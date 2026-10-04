@@ -2387,12 +2387,16 @@ check "ups: COMMLOST with the UPS on USB says restart apcupsd" true "$(_apc COMM
 # --- CrowdSec's parser folder made by its container (root): DCS's files go in through the container (docker cp), not silently nowhere
 _CW="$WORK/csroot"; mkdir -p "$_CW/conf/parsers/s02-enrich" "$_CW/bin" "$_CW/inside"; chmod 555 "$_CW/conf/parsers/s02-enrich"
 printf '%s\n' '#!/bin/bash' 'case "$1" in' '  ps) echo CrowdSec ;;' '  exec) shift; [[ "$1" == CrowdSec ]] || exit 1; shift; [[ "$1" == mkdir ]] && exit 0; [[ "$1" == rm ]] && { rm -f "'"$_CW"'/inside/${3##*/}"; exit 0; }; exit 1 ;;' '  cp) [[ "${3%%:*}" == CrowdSec ]] && cp "$2" "'"$_CW"'/inside/${3##*/}" ;;' '  *) exit 0 ;;' 'esac' > "$_CW/bin/docker"; chmod +x "$_CW/bin/docker"
-check "crowdsec files: a root-owned folder is written through the container" "0|hello" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-test.yaml hello; echo \"\$?|\$(cat \"$_CW/inside/dcs-test.yaml\")\"")"
-check "crowdsec files: the direct write's refusal is not printed" "" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-test.yaml hello" 2>&1)"
-chmod 755 "$_CW/conf/parsers/s02-enrich"
-check "crowdsec files: a folder DCS owns is written directly" "0|hi" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-own.yaml hi; echo \"\$?|\$(cat \"$_CW/conf/parsers/s02-enrich/dcs-own.yaml\")\"")"
-chmod 555 "$_CW/conf/parsers/s02-enrich"
-check "crowdsec files: no container and no right to write is an error with a reason" "1|yes" "$(_lib eval "docker() { return 1; }; _crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-x.yaml x && echo 0 || echo \"1|\$([[ -n \"\$CS_CONF_ERR\" ]] && echo yes)\"")"
+if [[ "$(id -u)" -ne 0 ]]; then      # (root writes into a 555 folder anyway: CI's Debian container runs the tests as root)
+    check "crowdsec files: a root-owned folder is written through the container" "0|hello" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-test.yaml hello; echo \"\$?|\$(cat \"$_CW/inside/dcs-test.yaml\")\"")"
+    check "crowdsec files: the direct write's refusal is not printed" "" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-test.yaml hello" 2>&1)"
+    chmod 755 "$_CW/conf/parsers/s02-enrich"
+    check "crowdsec files: a folder DCS owns is written directly" "0|hi" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-own.yaml hi; echo \"\$?|\$(cat \"$_CW/conf/parsers/s02-enrich/dcs-own.yaml\")\"")"
+    chmod 555 "$_CW/conf/parsers/s02-enrich"
+    check "crowdsec files: no container and no right to write is an error with a reason" "1|yes" "$(_lib eval "docker() { return 1; }; _crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-x.yaml x && echo 0 || echo \"1|\$([[ -n \"\$CS_CONF_ERR\" ]] && echo yes)\"")"
+else
+    check "crowdsec files: as root the folder is written directly" "0|hello" "$(PATH="$_CW/bin:$PATH" _lib eval "_crowdsec_conf_put \"$_CW/conf\" parsers/s02-enrich/dcs-test.yaml hello; echo \"\$?|\$(cat \"$_CW/conf/parsers/s02-enrich/dcs-test.yaml\")\"")"
+fi
 chmod 755 "$_CW/conf/parsers/s02-enrich"
 # --- a VM from an older DCS image: the kernel hooks and ext4 are added once, nothing else is touched
 _IR="$WORK/imgroot"; mkdir -p "$_IR/usr/local/sbin" "$_IR/etc/initramfs-tools" "$_IR/etc/kernel/postinst.d"
