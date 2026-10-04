@@ -21225,12 +21225,42 @@ _crowdsec_media_apps_sync() {
     content=$(_crowdsec_media_apps_yaml)
     if [[ -z "$content" ]]; then
         [[ -e "$target" ]] || return 1
-        rm -f "$target" && return 0
+        _crowdsec_conf_rm "$dir" parsers/s02-enrich/dcs-media-apps.yaml && return 0
         return 1
     fi
     [[ -f "$target" && "$(cat "$target" 2>/dev/null)"$'\n' == "$content"$'\n' ]] && return 1
-    mkdir -p "$dir/parsers/s02-enrich" 2>/dev/null
-    printf '%s\n' "$content" > "$target.tmp" && mv -f "$target.tmp" "$target"
+    _crowdsec_conf_put "$dir" parsers/s02-enrich/dcs-media-apps.yaml "$content"$'\n'
+}
+
+# _crowdsec_conf_put DIR REL CONTENT — writes REL (parsers/s02-enrich/x.yaml) under CrowdSec's configuration DIR. The folders there belong to whoever
+# made them: DCS, or the CrowdSec container (root) when it created parsers/ itself - then this server's user cannot write in them, and the home
+# allowlist and the media-app tuning were never installed while every sync looked fine (2026-10-04). Written directly when possible, else copied in
+# through the container (docker cp, as the profile and notification files are). Returns 1 with CS_CONF_ERR set when neither works.
+_crowdsec_conf_put() {
+    local dir="$1" rel="$2" content="$3" target="$1/$2" c tmp
+    CS_CONF_ERR=""
+    if { mkdir -p "$(dirname "$target")" && printf '%s' "$content" > "$target.tmp" && mv -f "$target.tmp" "$target"; } 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$target.tmp" 2>/dev/null || true
+    c=$(_crowdsec_container) || c=""
+    [[ -n "$c" ]] || { CS_CONF_ERR="cannot write $rel (the folder belongs to root) and the CrowdSec container is not running"; return 1; }
+    tmp=$(mktemp) || { CS_CONF_ERR="no temporary file"; return 1; }
+    printf '%s' "$content" > "$tmp"; chmod 644 "$tmp" 2>/dev/null || true
+    if timeout 15 docker exec "$c" mkdir -p "/etc/crowdsec/$(dirname "$rel")" >/dev/null 2>&1 \
+        && timeout 15 docker cp "$tmp" "$c:/etc/crowdsec/$rel" >/dev/null 2>&1; then
+        rm -f "$tmp"; return 0
+    fi
+    rm -f "$tmp"
+    CS_CONF_ERR="cannot write $rel: the folder belongs to root and copying it in through the $c container failed"
+    return 1
+}
+# _crowdsec_conf_rm DIR REL — removes REL the same way (directly, else through the container)
+_crowdsec_conf_rm() {
+    local c
+    rm -f "$1/$2" 2>/dev/null; [[ -e "$1/$2" ]] || return 0
+    c=$(_crowdsec_container) || return 1
+    timeout 15 docker exec "$c" rm -f "/etc/crowdsec/$2" >/dev/null 2>&1 && [[ ! -e "$1/$2" ]]
 }
 
 # Write parsers/s02-enrich/dcs-whitelist.yaml and reload CrowdSec when the set
@@ -21262,22 +21292,22 @@ _crowdsec_whitelist_sync() {
     [[ ${#ips[@]} -eq 0 && ${#cidrs[@]} -eq 0 ]] && content+="  ip: []"$'\n'
 
     local target="$dir/parsers/s02-enrich/dcs-whitelist.yaml"
-    mkdir -p "$dir/parsers/s02-enrich" 2>/dev/null
-    local changed=false
+    local changed=false werr=""
     # ($(cat) drops the newline the content ends with: without putting it back the two never matched and every sync reloaded CrowdSec)
     if [[ ! -f "$target" ]] || [[ "$(cat "$target" 2>/dev/null)"$'\n' != "$content" ]]; then
-        printf '%s' "$content" > "$target.tmp" && mv -f "$target.tmp" "$target" && changed=true
+        if _crowdsec_conf_put "$dir" parsers/s02-enrich/dcs-whitelist.yaml "$content"; then changed=true; else werr="$CS_CONF_ERR"; fi
     fi
     # the media-app tuning is a parser file beside this one: the same sync keeps it, and one reload covers both. The loops that call this keep the .env they
     # started with, so the setting is read from the file each time: every caller agrees, and none undoes the change another has seen
     local apps
     apps=$(_api_load_env_file "$BASE_DIR/.env"; printf '%s' "${CROWDSEC_MEDIA_APPS-jellyfin}")
-    CROWDSEC_MEDIA_APPS="$apps" _crowdsec_media_apps_sync "$dir" && changed=true
+    CS_CONF_ERR=""
+    if CROWDSEC_MEDIA_APPS="$apps" _crowdsec_media_apps_sync "$dir"; then changed=true; elif [[ -n "$CS_CONF_ERR" ]]; then werr="${werr:+$werr; }$CS_CONF_ERR"; fi
     [[ "$changed" == true ]] && { docker kill -s HUP "$container" >/dev/null 2>&1 || true; }
     mkdir -p "$(dirname "$CROWDSEC_SYNC_STATE")" 2>/dev/null
-    jq -n --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg pub "$public_ip" --arg h6 "$home6" --arg file "$target" --argjson changed "$changed" \
+    jq -n --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg pub "$public_ip" --arg h6 "$home6" --arg file "$target" --argjson changed "$changed" --arg werr "$werr" \
         --argjson ips "$(printf '%s\n' "${ips[@]}" "${cidrs[@]}" | grep -v '^$' | jq -R . | jq -s .)" \
-        '{synced_at: $ts, public_ip: $pub, home_ipv6: $h6, file: $file, addresses: $ips, reloaded: $changed}' > "$CROWDSEC_SYNC_STATE" 2>/dev/null
+        '{synced_at: $ts, public_ip: $pub, home_ipv6: $h6, file: $file, addresses: $ips, reloaded: $changed, error: (if $werr == "" then null else $werr end)}' > "$CROWDSEC_SYNC_STATE" 2>/dev/null
     # the Traefik bouncer plugin trusts the home address too, when the CrowdSec page manages its settings
     if [[ -s "$BASE_DIR/.data/crowdsec/plugin.json" ]]; then _crowdsec_cfg_lib; _cs_plugin_sync_home >/dev/null 2>&1 || true; fi
     return 0

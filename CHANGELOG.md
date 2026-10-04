@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [4.0.31] - 2026-10-04
+
+### Fixed
+
+- **CrowdSec's home allowlist and media-app tuning are installed when root owns the parser folder.** When the CrowdSec
+  container creates `parsers/` itself, the folder belongs to root and this server's user cannot write in it: DCS's
+  `dcs-whitelist.yaml` (the home address) and `dcs-media-apps.yaml` (a media app's own web client is not a crawl) were never
+  written, while every sync reported success - so a household watching Jellyfin was banned as an "aggressive crawler". The
+  files now go in through the container (`docker cp`, as the profile and notification files do) when the folder cannot be
+  written directly, and a failure is recorded in the sync state (`error`) instead of passing silently.
+
 ## [4.0.30] - 2026-10-03
 
 ### Added
