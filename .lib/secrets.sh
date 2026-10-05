@@ -173,10 +173,6 @@ secrets_env_exports() {
     done < <(secrets_references "$@")
 }
 
-# Run docker compose with the referenced secrets in its environment only.
-# Usage: compose_with_secrets COMPOSE_FILE ENV_FILE SUBCOMMAND [ARGS...]
-# ENV_FILE may be empty. References are collected from the compose file, the
-# stack .env and the root .env.
 # A stack's App-Data on a drive of its own: the absolute APP_DATA_DIR of its .env (quotes, a trailing comment, doubled and
 # trailing slashes dropped); 1 when the stack has none or a relative one (then the usual rule applies: ./App-Data).
 dcs_stack_appdata_override() {
@@ -195,6 +191,33 @@ dcs_appdata_marker_ok() {
     m=$(grep -oE '"stack"[[:space:]]*:[[:space:]]*"[^"]*"' "$d/.dcs-appdata" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/') || m=""
     [[ -n "$m" && "$m" == "$s" ]]
 }
+# The stacks DCS has seen with their drive there, one "stack<TAB>path" per line (.data/appdata-armed): only these are guarded
+# when the marker is gone. A path set by hand before 4.0.32, or changed later on the Env page, is armed only once its marker
+# is seen, so such a stack starts as it always did.
+dcs_appdata_arm() {
+    local f="${BASE_DIR:-.}/.data/appdata-armed"
+    mkdir -p "${f%/*}" 2>/dev/null || return 0
+    { grep -v -- "^$1"$'\t' "$f" 2>/dev/null; printf '%s\t%s\n' "$1" "$2"; } > "$f.tmp.$$" 2>/dev/null && mv -f "$f.tmp.$$" "$f" 2>/dev/null
+    rm -f "$f.tmp.$$" 2>/dev/null
+    return 0
+}
+dcs_appdata_disarm() {
+    local f="${BASE_DIR:-.}/.data/appdata-armed"
+    [[ -f "$f" ]] || return 0
+    { grep -v -- "^$1"$'\t' "$f" 2>/dev/null || true; } > "$f.tmp.$$" 2>/dev/null && mv -f "$f.tmp.$$" "$f" 2>/dev/null
+    rm -f "$f.tmp.$$" 2>/dev/null
+    return 0
+}
+# dcs_appdata_state PATH STACK — ok (the marker names the stack; it is armed from then on), missing (armed and the marker is
+# gone: the drive is not there), unmanaged (DCS never saw a marker there: handled as before 4.0.32, never refused)
+dcs_appdata_state() {
+    local f="${BASE_DIR:-.}/.data/appdata-armed"
+    if dcs_appdata_marker_ok "$1" "$2"; then
+        grep -qxF -- "$2"$'\t'"$1" "$f" 2>/dev/null || dcs_appdata_arm "$2" "$1"
+        printf 'ok'
+    elif grep -qxF -- "$2"$'\t'"$1" "$f" 2>/dev/null; then printf 'missing'
+    else printf 'unmanaged'; fi
+}
 
 # The shared "proxy" network, made when it is missing. A Traefik's own stack declares it by name and Compose makes it with
 # its labels; where no Traefik stack has (a VM of a fleet), or after a prune took it, a stack that names it as external
@@ -205,6 +228,10 @@ dcs_ensure_proxy_network() {
     docker network create --label com.docker.compose.network=proxy --label com.docker.compose.project=dcs-proxy proxy >/dev/null 2>&1
 }
 
+# Run docker compose with the referenced secrets in its environment only.
+# Usage: compose_with_secrets COMPOSE_FILE ENV_FILE SUBCOMMAND [ARGS...]
+# ENV_FILE may be empty. References are collected from the compose file, the
+# stack .env and the root .env.
 compose_with_secrets() {
     local compose_file="$1"; shift
     local env_file="$1"; shift
@@ -224,7 +251,7 @@ compose_with_secrets() {
             _dcs_st=$(basename "$(dirname "$compose_file")")
             case " $* " in
                 *" up "*|*" start "*|*" restart "*|*" create "*|*" run "*)
-                    if ! dcs_appdata_marker_ok "$_dcs_ad" "$_dcs_st"; then
+                    if [[ "$(dcs_appdata_state "$_dcs_ad" "$_dcs_st")" == missing ]]; then
                         echo "[DCS] $_dcs_st was not started: its App-Data $_dcs_ad is not there — is the drive mounted?" >&2
                         exit 3
                     fi ;;

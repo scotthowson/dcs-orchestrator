@@ -2411,6 +2411,7 @@ printf 'APP_DATA_DIR="/mnt/My Drive/appdata/x" # on the big disk\n' > "$_AD/spac
 check "appdata: a path with spaces and a comment" "/mnt/My Drive/appdata/x" "$(_lib dcs_stack_appdata_override "$_AD/space.env")"
 printf 'APP_DATA_DIR=/mnt/d//appdata/x/\n' > "$_AD/dbl.env"
 check "appdata: doubled and trailing slashes are normalised" "/mnt/d/appdata/x" "$(_lib dcs_stack_appdata_override "$_AD/dbl.env")"
+_lib dcs_appdata_arm stack "$_AD/drive/media"   # what DCS records when it makes the folder (a path set by hand is never armed)
 check "appdata: no marker, the start is refused (3) with the reason" "3|yes" "$(_o=$(_lib eval "DOCKER_COMPOSE_CMD='$_AD/bin/fakecompose' compose_with_secrets '$_AD/stack/docker-compose.yml' '$_AD/stack/.env' up -d 2>&1"); echo "$?|$(grep -q 'is not there' <<< "$_o" && echo yes)")"
 check "appdata: no marker, a stop still runs" "0" "$(DOCKER_COMPOSE_CMD="$_AD/bin/fakecompose" _lib compose_with_secrets "$_AD/stack/docker-compose.yml" "$_AD/stack/.env" stop >/dev/null 2>&1; echo $?)"
 printf '{"stack": "stack", "created": "2026-10-04T00:00:00Z"}\n' > "$_AD/drive/media/.dcs-appdata"
@@ -2428,7 +2429,9 @@ check "appdata: a stack's own setting wins over the global root" "$_AD/drive/med
 check "appdata: Nuke & reinstall's root follows it" "$_AD/drive/media" "$(_lib _stack_appdata_root "$WORK/Stacks/zz-ad")"
 check "appdata: the resolved compose binds the drive" "$_AD/drive/media/A" "$(APP_DATA_DIR=./App-Data _lib _fleet_stack_cfg_json zz-ad | jq -r '.services.a.volumes[0].source' 2>/dev/null)"
 check "appdata: a plain stack's resolved compose is unchanged" "$WORK/Stacks/zz-plain/App-Data/A" "$(APP_DATA_DIR=./App-Data _lib _fleet_stack_cfg_json zz-plain | jq -r '.services.a.volumes[0].source' 2>/dev/null)"
+cp "$_AD/drive/media/.dcs-appdata" "$_AD/marker.keep"; printf '{"stack": "zz-ad"}\n' > "$_AD/drive/media/.dcs-appdata"   # zz-ad as DCS made it
 check "appdata: the stack's own drive is not an outside path for a move" "" "$(_lib _fleet_stack_outside_paths zz-ad | grep -F "$_AD/drive/media")"
+cp "$_AD/marker.keep" "$_AD/drive/media/.dcs-appdata"
 _DRV="$WORK-drive2"; mkdir -p "$_DRV/appdata" "$_DRV/used"; : > "$_DRV/used/keep.txt"
 check "create: a stack with its App-Data on a drive" "true|$_DRV/appdata/zz-new" "$(auth_request POST /stacks "{\"name\":\"zz-new\",\"app_data_dir\":\"$_DRV/appdata/zz-new/\"}" | body_of | jq -r '"\(.success)|\(.app_data.path)"')"
 check "create: the folder, its marker and the .env line" "yes|zz-new|APP_DATA_DIR=\"$_DRV/appdata/zz-new\"" "$([[ -d "$_DRV/appdata/zz-new" ]] && echo yes)|$(jq -r .stack "$_DRV/appdata/zz-new/.dcs-appdata")|$(grep '^APP_DATA_DIR=' "$WORK/Stacks/zz-new/.env")"
@@ -2487,9 +2490,11 @@ check "selinux: a plain stack's binds are labelled as before" '      - ./App-Dat
 _DRV="$WORK-drive2"; mkdir -p "$_DRV/zz-e2" "$WORK/Stacks/zz-e2"
 printf 'services:\n  a:\n    image: alpine:3\n    volumes:\n      - ${APP_DATA_DIR:-./App-Data}/A:/a\n' > "$WORK/Stacks/zz-e2/docker-compose.yml"
 printf 'APP_DATA_DIR="%s"\n' "$_DRV/zz-e2" > "$WORK/Stacks/zz-e2/.env"
+printf '{"stack": "zz-e2"}\n' > "$_DRV/zz-e2/.dcs-appdata"   # zz-e2 as DCS made it: its marker, and armed
 check "nuke: a folder on the stack's own drive is one it may empty" "$_DRV/zz-e2" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('$_DRV/zz-e2' '$WORK/Stacks/zz-e2/App-Data'); _container_reset_root_of '$_DRV/zz-e2/A'")"
 check "nuke: never the drive folder itself nor its trash" "1|1" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('$_DRV/zz-e2'); a=0; b=0; _container_reset_root_of '$_DRV/zz-e2' >/dev/null || a=\$?; _container_reset_root_of '$_DRV/zz-e2/.trash/x' >/dev/null || b=\$?; echo \"\$a|\$b\"")"
 check "nuke: a root shared by every stack still needs two levels" "1" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('/srv/shared'); a=0; _container_reset_root_of /srv/shared/zz-e2 >/dev/null || a=\$?; echo \$a")"
+_lib dcs_appdata_state "$_DRV/zz-e2" zz-e2 >/dev/null; rm -f "$_DRV/zz-e2/.dcs-appdata"   # the drive goes: armed, no marker
 _r=$(auth_request POST /stacks/zz-e2/restart "" DOCKER_COMPOSE_CMD=true)
 check "restart: no drive, refused (409) with the reason" "409|yes" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | grep -q 'is not there' && echo yes)"
 _r=$(auth_request POST /stacks/zz-e2/start "" DOCKER_COMPOSE_CMD=true)
@@ -2519,6 +2524,72 @@ if [[ "$(df -P /opt 2>/dev/null | awk 'NR==2 {print $NF}')" == / && ! -e /opt/dc
 fi
 check "create: a plain stack's .env is as before" "1" "$(auth_request POST /stacks '{"name":"zz-pl3"}' >/dev/null; grep -c '^# APP_DATA_DIR is inherited from root .env$' "$WORK/Stacks/zz-pl3/.env")"
 rm -rf "$WORK/Stacks/zz-pl3"
+# --- final review: a path set by hand before 4.0.32 (no marker, never armed) is never guarded and keeps the old rules;
+#     a rename keeps a drive stack startable; the path is a plain path; a batch restart, the boot and a move behave
+_DRV="$WORK-drive2"; mkdir -p "$_DRV/legacy/A" "$WORK/Stacks/zz-leg"
+printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/zz-leg/docker-compose.yml"
+printf 'APP_DATA_DIR=%s\n' "$_DRV/legacy" > "$WORK/Stacks/zz-leg/.env"
+check "legacy: a hand-set path without a marker is never refused" "" "$(_lib _stack_appdata_missing zz-leg)"
+check "legacy: Compose starts it as before" "0" "$(DOCKER_COMPOSE_CMD=true _lib compose_with_secrets "$WORK/Stacks/zz-leg/docker-compose.yml" "$WORK/Stacks/zz-leg/.env" up -d >/dev/null 2>&1; echo $?)"
+rm -f "$WORK/.data/appdata-guard.json" "$WORK/guard-notes" "$WORK/guard-cmd"
+_GS='_notify_send() { echo "$1" >> "'"$WORK"'/guard-notes"; }; compose_with_secrets() { echo "$3" > "'"$WORK"'/guard-cmd"; }; _backup_stack_running() { echo c1; }'
+_lib eval "$_GS; _appdata_guard_tick"
+check "legacy: the guard neither stops nor alerts" "|" "$(cat "$WORK/guard-cmd" 2>/dev/null)|$(grep -c zz-leg "$WORK/guard-notes" 2>/dev/null | grep -v '^0$')"
+check "legacy: Nuke keeps the two-level rule for its root" "1" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-leg'; RST_ROOTS=('$_DRV/legacy'); a=0; _container_reset_root_of '$_DRV/legacy/A' >/dev/null || a=\$?; echo \$a")"
+check "legacy: shown as there" "true" "$(_lib _stack_appdata_json zz-leg | jq -r .ok)"
+check "legacy: no backup part of its own (as before)" "no" "$(_lib _stack_appdata_managed zz-leg && echo yes || echo no)"
+rm -rf "$WORK/Stacks/zz-leg" "$_DRV/legacy"
+# a stack DCS made, whose path was then changed by hand: the new path is a new, unguarded setting
+_r=$(auth_request POST /stacks "{\"name\":\"zz-chg\",\"app_data_dir\":\"$_DRV/chg\"}")
+check "armed: a stack DCS made is guarded" "yes" "$(mv "$_DRV/chg/.dcs-appdata" "$_DRV/chg/.off"; _lib _stack_appdata_missing zz-chg >/dev/null && echo yes)"
+printf 'APP_DATA_DIR="%s"\n' "$_DRV/chg2" > "$WORK/Stacks/zz-chg/.env"; mkdir -p "$_DRV/chg2"
+check "armed: a path changed by hand is not refused" "" "$(_lib _stack_appdata_missing zz-chg)"
+rm -rf "$WORK/Stacks/zz-chg" "$_DRV/chg" "$_DRV/chg2"
+# a rename takes the marker along
+_r=$(auth_request POST /stacks "{\"name\":\"zz-ren\",\"app_data_dir\":\"$_DRV/ren\"}")
+_r=$(auth_request POST /stacks/rename '{"old_name":"zz-ren","new_name":"zz-ren2"}')
+check "rename: the renamed stack still starts (marker follows)" "200||zz-ren2" "$(status_of <<< "$_r")|$(_lib _stack_appdata_missing zz-ren2)|$(grep -oE '"stack"[[:space:]]*:[[:space:]]*"[^"]*"' "$_DRV/ren/.dcs-appdata" | sed -E 's/.*"([^"]*)"$/\1/')"
+rm -rf "$WORK/Stacks/zz-ren2" "$WORK/Stacks/zz-ren" "$_DRV/ren"
+# the path is a plain path: nothing a shell or the .env would read as code or quoting
+for _bad in "$_DRV/x\$(touch $WORK/PWNED)" "$_DRV/x\`id\`" "$_DRV/q\\\"; touch $WORK/PWNED2; : \\\"" "$_DRV/a|b" "$_DRV/a&b" "$_DRV/a;b" "$_DRV/a\$b"; do
+    check "create: refused characters ${_bad#"$_DRV"/}" "400" "$(auth_request POST /stacks "{\"name\":\"zz-chr\",\"app_data_dir\":\"$_bad\"}" | status_of)"
+    rm -rf "$WORK/Stacks/zz-chr"
+done
+check "create: nothing ran" "no" "$([[ -e "$WORK/PWNED" || -e "$WORK/PWNED2" ]] && echo yes || echo no)"
+check "create: @ + _ and spaces are fine" "true" "$(auth_request POST /stacks "{\"name\":\"zz-ok\",\"app_data_dir\":\"$_DRV/My Disk/a@b+c_d\"}" | body_of | jq -r .success)"
+rm -rf "$WORK/Stacks/zz-ok" "$_DRV/My Disk"
+# a folder under /mnt or /media that is still on the system disk is a drive that is not mounted
+if [[ "$(df -P /mnt 2>/dev/null | awk 'NR==2 {print $NF}')" == / && ! -e /mnt/dcs-smoke-nodrive ]]; then
+    _r=$(auth_request POST /stacks '{"name":"zz-nm","app_data_dir":"/mnt/dcs-smoke-nodrive"}')
+    check "create: under /mnt but on the system disk is refused" "400|said|no" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | grep -q 'system disk' && echo said)|$([[ -e /mnt/dcs-smoke-nodrive ]] && echo yes || echo no)"
+    rm -rf "$WORK/Stacks/zz-nm"
+fi
+# a batch restart without the drive is refused for that stack (a restart takes the containers down first)
+_r=$(auth_request POST /stacks "{\"name\":\"zz-bat\",\"app_data_dir\":\"$_DRV/bat\"}"); mv "$_DRV/bat/.dcs-appdata" "$_DRV/bat/.off"
+_r=$(auth_request POST /batch/stacks '{"action":"restart","stacks":["zz-bat"]}' DOCKER_COMPOSE_CMD=true)
+check "batch: no drive, the restart is refused with the reason" "false|yes" "$(body_of <<< "$_r" | jq -r '.results[0].success')|$(body_of <<< "$_r" | jq -r '.results[0].message' | grep -q 'is not there' && echo yes)"
+rm -rf "$WORK/Stacks/zz-bat" "$_DRV/bat"
+# at boot a drive stack's value does not reach the stacks started after it
+mkdir -p "$WORK/boot/Stacks/b1" "$WORK/boot/Stacks/b2"
+printf 'services: {}\n' | tee "$WORK/boot/Stacks/b1/docker-compose.yml" > "$WORK/boot/Stacks/b2/docker-compose.yml"
+printf 'APP_DATA_DIR="%s"\n' "$_DRV/b1" > "$WORK/boot/Stacks/b1/.env"; : > "$WORK/boot/Stacks/b2/.env"; printf 'TZ=UTC\n' > "$WORK/boot/.env"
+_boot() { ( BASE_DIR="$WORK/boot"; COMPOSE_DIR="$WORK/boot/Stacks"; LOG_FILE=/dev/null; SKIP_HEALTHCHECK_WAIT=true; unset APP_DATA_DIR
+    log_info() { :; }; log_debug() { :; }; log_warning() { :; }; log_error() { :; }; log_success() { :; }; log_timer_start() { :; }; log_timer_stop() { :; }
+    compose_with_secrets() { echo "$(basename "$(dirname "$1")")=${APP_DATA_DIR-unset}" >> "$WORK/boot/seen"; }
+    eval "$(sed -n '/^start_service_stack()/,/^}/p' "$ROOT/.scripts/run.sh")"; start_service_stack b1 >/dev/null 2>&1; start_service_stack b2 >/dev/null 2>&1 ); }
+_boot
+check "boot: the drive stack gets its path" "b1=$_DRV/b1" "$(grep '^b1=' "$WORK/boot/seen")"
+check "boot: the next stack does not inherit it" "b2=unset" "$(grep '^b2=' "$WORK/boot/seen")"
+rm -rf "$WORK/boot"
+# a move into a VM: the VM's copy of the .env says ./App-Data before the stack starts there
+_VMH="$WORK/vmhome"; _VS="$_VMH/.Docker-Compose-Skeleton-AIO/Stacks/zz-mv2"; mkdir -p "$_VS" "$_DRV/mv2/App"; echo hi > "$_DRV/mv2/App/f"
+mkdir -p "$WORK/Stacks/zz-mv2"; printf 'services: {}\n' > "$WORK/Stacks/zz-mv2/docker-compose.yml"
+printf 'APP_DATA_DIR="%s"\n' "$_DRV/mv2" | tee "$WORK/Stacks/zz-mv2/.env" > "$_VS/.env"
+printf '{"stack": "zz-mv2", "created": "2026-10-04T00:00:00Z"}\n' > "$_DRV/mv2/.dcs-appdata"
+_lib eval "_job_log() { :; }; _fleet_reader_pick() { FLEET_READER=self; }; _fleet_ssh() { shift; HOME='$_VMH' bash -c \"\${*//sudo /}\"; }; _fleet_move_data j1 10.0.0.9 zz-mv2 zz-mv2" >/dev/null 2>&1
+check "move: the data reached the VM's App-Data" "hi" "$(cat "$_VS/App-Data/App/f" 2>/dev/null)"
+check "move: the VM's .env says ./App-Data (it starts there)" "1|0" "$(grep -c '^APP_DATA_DIR=./App-Data$' "$_VS/.env")|$(grep -c "$_DRV/mv2\"" "$_VS/.env")"
+rm -rf "$WORK/Stacks/zz-mv2" "$_DRV/mv2" "$_VMH"
 # --- a VM from an older DCS image: the kernel hooks and ext4 are added once, nothing else is touched
 _IR="$WORK/imgroot"; mkdir -p "$_IR/usr/local/sbin" "$_IR/etc/initramfs-tools" "$_IR/etc/kernel/postinst.d"
 printf '#!/bin/bash\n' > "$_IR/usr/local/sbin/dcs-grubcfg"; chmod +x "$_IR/usr/local/sbin/dcs-grubcfg"

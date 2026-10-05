@@ -91,9 +91,10 @@ The API takes it as `POST /stacks {"name": "media", "app_data_dir": "/mnt/disk2/
   system disk is refused: the drive is not mounted), gives it to `PUID:PGID`, writes a marker in it
   (`.dcs-appdata`) and the line `APP_DATA_DIR="/mnt/disk2/appdata/media"` in the stack's `.env`. Templates write
   `${APP_DATA_DIR:-./App-Data}/<App>/…`, so every app of the stack lands there.
-- Refused: a path that is not absolute, a system folder (`/etc`, `/usr`, `/var`, `/boot` …), DCS's own folder, the
-  inside of another stack's App-Data. A folder that already holds files is used only once you confirm
-  (`app_data_adopt`).
+- Refused: a path that is not absolute or holds anything but letters, digits, spaces and `. _ - @ +`, a system folder
+  (`/etc`, `/usr`, `/var`, `/boot` …), DCS's own folder, the inside of another stack's App-Data, and a folder under
+  `/mnt` or `/media` that is still on the system disk (the drive is not mounted). A folder that already holds files is
+  used only once you confirm (`app_data_adopt`).
 - Everything follows it: starts and updates, Nuke & reinstall (the trash is on that drive), template config files,
   the file editor, backups and restores (its own part, restored to its path), moving the stack into a VM (it becomes
   the VM's App-Data; the drive's copy stays), the sizes. The stack card shows where each stack's App-Data is.
@@ -101,8 +102,12 @@ The API takes it as `POST /stacks {"name": "media", "app_data_dir": "/mnt/disk2/
   its own, and notifies once — and again when the drive is back. Start, restart, update, a template deploy, Nuke &
   reinstall and a move into a VM are refused with that reason (409) before anything is taken down or written; a stop
   still works. Nothing on the drive is touched.
-- Deleting the stack never deletes that folder; the confirmation names it.
+- Deleting the stack never deletes that folder; the confirmation names it. Renaming the stack updates its marker.
 - Stacks without the setting are exactly as before. Moving an existing stack's App-Data is not offered yet.
+- An absolute `APP_DATA_DIR` you set in a stack's `.env` by hand (before 4.0.32, or changed later on the Env page) is used
+  as it always was, but DCS does not guard it, back it up as a part of its own or copy it into a VM until it holds a
+  `.dcs-appdata` marker naming the stack (`{"stack": "<name>"}`): DCS remembers which drive folders it has seen
+  (`.data/appdata-armed`), and only those count as "not mounted" when the marker is gone.
 
 ## Nuke & reinstall
 

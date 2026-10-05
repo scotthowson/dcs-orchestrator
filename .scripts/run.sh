@@ -113,7 +113,9 @@ start_service_stack() {
 
     # ---- Load environment variables ----
 
-    # Root .env first (global defaults), then stack-specific .env (overrides)
+    # Root .env first (global defaults), then stack-specific .env (overrides). A stack's own APP_DATA_DIR (its App-Data on a
+    # drive) is that stack's alone: the variable is local to this call, so the stacks started after it do not inherit it
+    if [[ -n "${APP_DATA_DIR+x}" ]]; then local -x APP_DATA_DIR="$APP_DATA_DIR"; else local APP_DATA_DIR; unset APP_DATA_DIR; fi
     if [[ -f "$BASE_DIR/.env" ]]; then
         set -a
         source "$BASE_DIR/.env"
