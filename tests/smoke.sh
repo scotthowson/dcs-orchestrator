@@ -2573,6 +2573,7 @@ rm -rf "$WORK/Stacks/zz-bat" "$_DRV/bat"
 mkdir -p "$WORK/boot/Stacks/b1" "$WORK/boot/Stacks/b2"
 printf 'services: {}\n' | tee "$WORK/boot/Stacks/b1/docker-compose.yml" > "$WORK/boot/Stacks/b2/docker-compose.yml"
 printf 'APP_DATA_DIR="%s"\n' "$_DRV/b1" > "$WORK/boot/Stacks/b1/.env"; : > "$WORK/boot/Stacks/b2/.env"; printf 'TZ=UTC\n' > "$WORK/boot/.env"
+# shellcheck disable=SC2034  # LOG_FILE and the others are read by the function pulled out of run.sh
 _boot() { ( BASE_DIR="$WORK/boot"; COMPOSE_DIR="$WORK/boot/Stacks"; LOG_FILE=/dev/null; SKIP_HEALTHCHECK_WAIT=true; unset APP_DATA_DIR
     log_info() { :; }; log_debug() { :; }; log_warning() { :; }; log_error() { :; }; log_success() { :; }; log_timer_start() { :; }; log_timer_stop() { :; }
     compose_with_secrets() { echo "$(basename "$(dirname "$1")")=${APP_DATA_DIR-unset}" >> "$WORK/boot/seen"; }
@@ -2580,7 +2581,7 @@ _boot() { ( BASE_DIR="$WORK/boot"; COMPOSE_DIR="$WORK/boot/Stacks"; LOG_FILE=/de
 _boot
 check "boot: the drive stack gets its path" "b1=$_DRV/b1" "$(grep '^b1=' "$WORK/boot/seen")"
 check "boot: the next stack does not inherit it" "b2=unset" "$(grep '^b2=' "$WORK/boot/seen")"
-rm -rf "$WORK/boot"
+rm -rf "${WORK:?}/boot"
 # a move into a VM: the VM's copy of the .env says ./App-Data before the stack starts there
 _VMH="$WORK/vmhome"; _VS="$_VMH/.Docker-Compose-Skeleton-AIO/Stacks/zz-mv2"; mkdir -p "$_VS" "$_DRV/mv2/App"; echo hi > "$_DRV/mv2/App/f"
 mkdir -p "$WORK/Stacks/zz-mv2"; printf 'services: {}\n' > "$WORK/Stacks/zz-mv2/docker-compose.yml"
