@@ -2591,6 +2591,40 @@ _lib eval "_job_log() { :; }; _fleet_reader_pick() { FLEET_READER=self; }; _flee
 check "move: the data reached the VM's App-Data" "hi" "$(cat "$_VS/App-Data/App/f" 2>/dev/null)"
 check "move: the VM's .env says ./App-Data (it starts there)" "1|0" "$(grep -c '^APP_DATA_DIR=./App-Data$' "$_VS/.env")|$(grep -c "$_DRV/mv2\"" "$_VS/.env")"
 rm -rf "$WORK/Stacks/zz-mv2" "$_DRV/mv2" "$_VMH"
+# --- stack cards (4.0.33): every container of a stack (stopped ones too), its CPU and memory, images with an update waiting,
+#     published ports, Traefik hostnames, the last backup; free space for the stack's own App-Data; drive folders a backup takes
+for _f in container-stats-cache.json image-update-cache.json backup-stack-times.json; do [[ -f "$WORK/.data/$_f" ]] && mv "$WORK/.data/$_f" "$WORK/.data/$_f.keep"; done
+printf '{"cf-a":{"cpu":10.5,"mem":2.25},"cf-b":{"cpu":1,"mem":1},"cf-c":{"cpu":50,"mem":9}}' > "$WORK/.data/container-stats-cache.json"
+printf '{"lscr.io/x/app:latest":true,"nginx:latest":true,"redis:7":false}' > "$WORK/.data/image-update-cache.json"
+_ROWS=$(printf 'cf-a\tzz-cf\tlscr.io/x/app:latest\trunning\t0.0.0.0:8080->80/tcp, [::]:8080->80/tcp\ncf-b\tzz-cf\tnginx\trunning\t127.0.0.1:9000->9000/tcp, 0.0.0.0:53->53/udp, 192.168.2.5:8443->443/tcp\ncf-c\tzz-cf\tredis:7\texited\t\ncf-d\tother\tbusybox\trunning\t\n')
+_CF=$(_lib _stacks_card_facts <<< "$_ROWS")
+check "cards: every container of the stack, stopped ones too" "3" "$(jq -r '."zz-cf".total' <<< "$_CF" 2>/dev/null)"
+check "cards: CPU and memory of its running containers" "11.5|3.25" "$(jq -r '."zz-cf" | "\(.cpu)|\(.mem)"' <<< "$_CF" 2>/dev/null)"
+check "cards: images with an update waiting (an untagged one is :latest)" "2" "$(jq -r '."zz-cf".updates' <<< "$_CF" 2>/dev/null)"
+check "cards: published TCP ports, not localhost-only or UDP" "8080,8443" "$(jq -r '."zz-cf".ports | map(tostring) | join(",")' <<< "$_CF" 2>/dev/null)"
+check "cards: another stack is counted apart" "1|0" "$(jq -r '.other | "\(.total)|\(.updates)"' <<< "$_CF" 2>/dev/null)"
+check "cards: no rows, an empty map" "{}" "$(_lib _stacks_card_facts < /dev/null)"
+mkdir -p "$WORK/Stacks/zz-cf"
+printf 'services:\n  a:\n    image: nginx\n    labels:\n      - traefik.http.routers.a.rule=Host(`app.example.com`)\n      - "traefik.http.routers.b.rule=Host(`${SUB}.example.com`)"\n' > "$WORK/Stacks/zz-cf/docker-compose.yml"
+check "cards: the stack's Traefik hostnames (not ones with a variable)" "app.example.com" "$(_lib _stack_card_hosts zz-cf | paste -sd,)"
+_lib _backup_stack_times_record '[{"kind":"stack","name":"zz-cf"},{"kind":"volume","name":"v1"},{"kind":"appdata","name":"zz-cf"}]'
+check "cards: a backup records when each stack was taken" "zz-cf" "$(jq -r 'keys | join(",")' "$WORK/.data/backup-stack-times.json" 2>/dev/null)"
+check "cards: free space for a stack's own App-Data too" "number" "$(_lib _stack_appdata_json zz-cf | jq -r '.free_bytes | type')"
+_SL=$(auth_request GET /stacks | body_of)
+check "cards: the stack list carries the new fields" "true" "$(jq -r '[.stacks[] | select(.name == "zz-cf")][0] | has("total_containers") and has("cpu_percent") and has("mem_percent") and has("updates_available") and has("ports") and has("links") and has("last_backup")' <<< "$_SL" 2>/dev/null)"
+check "cards: the hostnames become links, the backup time is there" "https://app.example.com|yes" "$(jq -r '[.stacks[] | select(.name == "zz-cf")][0] | "\(.links | join(","))|\(if .last_backup then "yes" else "no" end)"' <<< "$_SL" 2>/dev/null)"
+# the backup sheet names the drive folders a backup takes
+_DRV="$WORK-drive2"; mkdir -p "$_DRV"
+_r=$(auth_request POST /stacks "{\"name\":\"zz-cbk\",\"app_data_dir\":\"$_DRV/cbk\"}")
+check "backup config: the drive folders a backup takes" "zz-cbk|$_DRV/cbk|true" "$(auth_request GET /backups/config | body_of | jq -r '.appdata_dirs[]? | select(.stack == "zz-cbk") | "\(.stack)|\(.path)|\(.ok)"')"
+rm -rf "$WORK/Stacks/zz-cbk" "$_DRV/cbk"
+# update everything: starts the image update job now (409 while one runs)
+_LOCK=$(_lib eval 'printf %s "$IMAGE_UPDATE_LOCK"'); mkdir -p "$(dirname "$_LOCK")"
+( flock -n 9 && sleep 4 ) 9>"$_LOCK" & _lk=$!; sleep 0.5
+check "update all: refused while an image update runs" "409" "$(auth_request POST /images/update-all '{}' | status_of)"
+wait "$_lk" 2>/dev/null
+rm -rf "$WORK/Stacks/zz-cf"
+for _f in container-stats-cache.json image-update-cache.json backup-stack-times.json; do rm -f "$WORK/.data/$_f"; [[ -f "$WORK/.data/$_f.keep" ]] && mv "$WORK/.data/$_f.keep" "$WORK/.data/$_f"; done
 # --- a VM from an older DCS image: the kernel hooks and ext4 are added once, nothing else is touched
 _IR="$WORK/imgroot"; mkdir -p "$_IR/usr/local/sbin" "$_IR/etc/initramfs-tools" "$_IR/etc/kernel/postinst.d"
 printf '#!/bin/bash\n' > "$_IR/usr/local/sbin/dcs-grubcfg"; chmod +x "$_IR/usr/local/sbin/dcs-grubcfg"

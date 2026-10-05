@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `412` in total.
+Every endpoint below is `413` in total.
 
 ## Access levels
 
@@ -195,6 +195,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/images/{image}/delete` | admin | Image delete |
 | POST | `/images/check-updates` | admin | Images check updates post |
 | POST | `/images/pull` | admin | Pull an image by name {image} and leave the containers on its old copy alone (the Images page's Pull button; /images/update recreates them) |
+| POST | `/images/update-all` | admin | Update every image now: the unattended image update (pull what runs, recreate the containers on the old copy) started in the background; 409 while one runs |
 | POST | `/images/update` | admin | Pull an image and recreate the Compose services that use it |
 | POST | `/images/{image}/update` | admin | Pull an image and recreate the Compose services that use it |
 
