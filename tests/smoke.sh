@@ -2432,7 +2432,7 @@ check "appdata: the stack's own drive is not an outside path for a move" "" "$(_
 _DRV="$WORK-drive2"; mkdir -p "$_DRV/appdata" "$_DRV/used"; : > "$_DRV/used/keep.txt"
 check "create: a stack with its App-Data on a drive" "true|$_DRV/appdata/zz-new" "$(auth_request POST /stacks "{\"name\":\"zz-new\",\"app_data_dir\":\"$_DRV/appdata/zz-new/\"}" | body_of | jq -r '"\(.success)|\(.app_data.path)"')"
 check "create: the folder, its marker and the .env line" "yes|zz-new|APP_DATA_DIR=\"$_DRV/appdata/zz-new\"" "$([[ -d "$_DRV/appdata/zz-new" ]] && echo yes)|$(jq -r .stack "$_DRV/appdata/zz-new/.dcs-appdata")|$(grep '^APP_DATA_DIR=' "$WORK/Stacks/zz-new/.env")"
-for _bad in / /etc/x /usr/local/x /var/lib/x /proc/x "$WORK/Stacks/zz-x" relative/path "$_DRV/nope/deeper/x"; do
+for _bad in / /etc/x /usr/local/x /var/lib/x /proc/x "$WORK/Stacks/zz-x" relative/path; do
     check "create: refused location $_bad" 400 "$(auth_request POST /stacks "{\"name\":\"zz-bad\",\"app_data_dir\":\"$_bad\"}" | status_of)"
 done
 check "create: inside another stack's App-Data is refused" 400 "$(auth_request POST /stacks "{\"name\":\"zz-in\",\"app_data_dir\":\"$_DRV/appdata/zz-new/sub\"}" | status_of)"
@@ -2440,7 +2440,7 @@ check "create: a folder that already holds files needs adopt" "400|yes" "$(auth_
 check "create: a path with spaces" "true" "$(mkdir -p "$_DRV/My Drive"; auth_request POST /stacks "{\"name\":\"zz-sp\",\"app_data_dir\":\"$_DRV/My Drive/zz-sp\"}" | body_of | jq -r .success)"
 check "create: the plain create is unchanged" "true|no" "$(auth_request POST /stacks '{"name":"zz-plain2"}' | body_of | jq -r .success)|$(grep -q '^APP_DATA_DIR=' "$WORK/Stacks/zz-plain2/.env" 2>/dev/null && echo yes || echo no)"
 check "list: a stack on its own drive" "true|true|$_DRV/appdata/zz-new" "$(auth_request GET /stacks | body_of | jq -r '.stacks[] | select(.name == "zz-new") | "\(.app_data.external)|\(.app_data.ok)|\(.app_data.path)"')"
-check "list: a plain stack" "false|true|$WORK/Stacks/zz-plain2/App-Data" "$(auth_request GET /stacks | body_of | jq -r '.stacks[] | select(.name == "zz-plain2") | "\(.app_data.external)|\(.app_data.ok)|\(.app_data.path)"')"
+check "list: a plain stack (its App-Data where it always was)" "false|true|$(_lib _stack_appdata_root "$WORK/Stacks/zz-plain2")" "$(auth_request GET /stacks | body_of | jq -r '.stacks[] | select(.name == "zz-plain2") | "\(.app_data.external)|\(.app_data.ok)|\(.app_data.path)"')"
 mv "$_DRV/appdata/zz-new/.dcs-appdata" "$_DRV/appdata/zz-new/.dcs-appdata.off"
 check "detail: the drive missing shows" "false" "$(auth_request GET /stacks/zz-new | body_of | jq -r '.app_data.ok')"
 mv "$_DRV/appdata/zz-new/.dcs-appdata.off" "$_DRV/appdata/zz-new/.dcs-appdata"
@@ -2468,6 +2468,57 @@ check "restore: without the drive the part is refused, the folder untouched" "ye
 mv "$_DRV/appdata/zz-new/.off" "$_DRV/appdata/zz-new/.dcs-appdata"
 # (the stacks these checks made go again: later sections count the stacks they find)
 rm -rf "$WORK/Stacks/zz-ad" "$WORK/Stacks/zz-plain" "$WORK/Stacks/zz-new" "$WORK/Stacks/zz-old" "$WORK/Stacks/zz-plain2" "$WORK/.data/appdata-guard.json"
+# --- a template deployed into a stack whose App-Data is on its own drive keeps the placeholder (Compose resolves it there;
+#     moved into a VM it resolves to the VM's ./App-Data); every other stack gets the defaults written in, as before
+_TPLC='services:
+  a:
+    image: alpine:3
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${APP_DATA_DIR:-./App-Data}/A:/a
+      - ${APP_DATA_DIR}/B:/b:ro'
+check "deploy: a plain stack gets the defaults written in (as before)" "UTC|./App-Data/A:/a" "$(_lib _tpl_resolve_defaults "$_TPLC" false | grep -oE '\./App-Data/A:/a|UTC' | paste -sd'|')"
+check "deploy: a stack on its own drive keeps the App-Data placeholder" 'UTC|${APP_DATA_DIR:-./App-Data}/A:/a|${APP_DATA_DIR:-./App-Data}/B:/b:ro' "$(_lib _tpl_resolve_defaults "$_TPLC" true | grep -oE '\$\{APP_DATA_DIR:-\./App-Data\}/[AB]:/[ab](:ro)?|UTC' | paste -sd'|')"
+check "selinux: the placeholder's binds are the stack's own and get :z" '      - ${APP_DATA_DIR:-./App-Data}/A:/a:z|      - ${APP_DATA_DIR:-./App-Data}/B:/b:ro,z' "$(_lib _tpl_resolve_defaults "$_TPLC" true | _lib _selinux_label_volumes | grep 'APP_DATA_DIR' | paste -sd'|')"
+check "selinux: a plain stack's binds are labelled as before" '      - ./App-Data/A:/a:z' "$(_lib _tpl_resolve_defaults "$_TPLC" false | _lib _selinux_label_volumes | grep '/A:/a')"
+# --- E2E findings: Nuke empties the folders of a stack's own drive (trash on that drive); a start or restart without the
+#     drive is refused up front with the reason (a restart used to take the containers down, then could not bring them up)
+_DRV="$WORK-drive2"; mkdir -p "$_DRV/zz-e2" "$WORK/Stacks/zz-e2"
+printf 'services:\n  a:\n    image: alpine:3\n    volumes:\n      - ${APP_DATA_DIR:-./App-Data}/A:/a\n' > "$WORK/Stacks/zz-e2/docker-compose.yml"
+printf 'APP_DATA_DIR="%s"\n' "$_DRV/zz-e2" > "$WORK/Stacks/zz-e2/.env"
+check "nuke: a folder on the stack's own drive is one it may empty" "$_DRV/zz-e2" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('$_DRV/zz-e2' '$WORK/Stacks/zz-e2/App-Data'); _container_reset_root_of '$_DRV/zz-e2/A'")"
+check "nuke: never the drive folder itself nor its trash" "1|1" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('$_DRV/zz-e2'); a=0; b=0; _container_reset_root_of '$_DRV/zz-e2' >/dev/null || a=\$?; _container_reset_root_of '$_DRV/zz-e2/.trash/x' >/dev/null || b=\$?; echo \"\$a|\$b\"")"
+check "nuke: a root shared by every stack still needs two levels" "1" "$(_lib eval "RST_PROJ_DIR='$WORK/Stacks/zz-e2'; RST_ROOTS=('/srv/shared'); a=0; _container_reset_root_of /srv/shared/zz-e2 >/dev/null || a=\$?; echo \$a")"
+_r=$(auth_request POST /stacks/zz-e2/restart "" DOCKER_COMPOSE_CMD=true)
+check "restart: no drive, refused (409) with the reason" "409|yes" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | grep -q 'is not there' && echo yes)"
+_r=$(auth_request POST /stacks/zz-e2/start "" DOCKER_COMPOSE_CMD=true)
+check "start: no drive, refused (409)" "409" "$(status_of <<< "$_r")"
+_r=$(auth_request POST /stacks/zz-e2/stop "" DOCKER_COMPOSE_CMD=true)
+check "stop: no drive, a stop still runs" "200" "$(status_of <<< "$_r")"
+[[ -d "$WORK/.templates/diun" ]] || cp -r "$ROOT/.templates/diun" "$WORK/.templates/"
+_r=$(auth_request POST /templates/diun/deploy '{"target_stack":"zz-e2"}' DOCKER_COMPOSE_CMD=true)
+check "deploy: no drive, refused (409) before anything is written" "409|0" "$(status_of <<< "$_r")|$(find "$_DRV/zz-e2" -mindepth 1 | wc -l)"
+check "move: no drive, the move is blocked (it would copy an empty folder)" "1" "$(_lib _fleet_move_blockers zz-e2 | grep -c 'is not there')"
+printf '{"stack": "zz-e2", "created": "2026-10-04T00:00:00Z"}\n' > "$_DRV/zz-e2/.dcs-appdata"
+check "restart: with the drive, the guard says nothing" "" "$(_lib _stack_appdata_missing zz-e2)"
+check "move: with the drive, no such blocker" "0" "$(_lib _fleet_move_blockers zz-e2 | grep -c 'is not there')"
+check "restart: a plain stack is never refused" "1" "$(_lib _stack_appdata_missing demo >/dev/null; echo $?)"
+rm -rf "$WORK/Stacks/zz-e2" "$_DRV/zz-e2"
+# --- the suggested <drive>/appdata/<stack>: the missing middle folders are made when the nearest folder that exists is on a
+#     mounted drive; on the system disk (an empty mount point of a drive that is not mounted) the path is still refused
+_DRV="$WORK-drive2"; mkdir -p "$_DRV"
+if [[ "$(df -P "$_DRV" 2>/dev/null | awk 'NR==2 {print $NF}')" != / ]]; then
+    check "create: a missing .dcs/App-Data folder on a mounted drive is made" "true|yes" "$(auth_request POST /stacks "{\"name\":\"zz-mid\",\"app_data_dir\":\"$_DRV/fresh/.dcs/App-Data/zz-mid\"}" | body_of | jq -r .success)|$([[ -f "$_DRV/fresh/.dcs/App-Data/zz-mid/.dcs-appdata" ]] && echo yes)"
+    check "create: its .env does not also say App-Data is inherited" "0|1" "$(grep -c 'APP_DATA_DIR is inherited' "$WORK/Stacks/zz-mid/.env")|$(grep -c '^APP_DATA_DIR=' "$WORK/Stacks/zz-mid/.env")"
+    rm -rf "$WORK/Stacks/zz-mid" "$_DRV/fresh"
+fi
+if [[ "$(df -P /opt 2>/dev/null | awk 'NR==2 {print $NF}')" == / && ! -e /opt/dcs-smoke-nodrive ]]; then
+    check "create: missing folders on the system disk are refused (the drive is not mounted)" "400|no" "$(auth_request POST /stacks '{"name":"zz-nod","app_data_dir":"/opt/dcs-smoke-nodrive/appdata/zz-nod"}' | status_of)|$([[ -e /opt/dcs-smoke-nodrive ]] && echo yes || echo no)"
+    rm -rf "$WORK/Stacks/zz-nod"
+fi
+check "create: a plain stack's .env is as before" "1" "$(auth_request POST /stacks '{"name":"zz-pl3"}' >/dev/null; grep -c '^# APP_DATA_DIR is inherited from root .env$' "$WORK/Stacks/zz-pl3/.env")"
+rm -rf "$WORK/Stacks/zz-pl3"
 # --- a VM from an older DCS image: the kernel hooks and ext4 are added once, nothing else is touched
 _IR="$WORK/imgroot"; mkdir -p "$_IR/usr/local/sbin" "$_IR/etc/initramfs-tools" "$_IR/etc/kernel/postinst.d"
 printf '#!/bin/bash\n' > "$_IR/usr/local/sbin/dcs-grubcfg"; chmod +x "$_IR/usr/local/sbin/dcs-grubcfg"
@@ -2525,7 +2576,7 @@ cp "$WORK/Stacks/zz-move/.env" "$WORK/zz-move.env.keep" 2>/dev/null || : > "$WOR
 printf 'APP_DATA_DIR="%s"\n' "$_DRV/appdata/zz-mv" >> "$WORK/Stacks/zz-move/.env"
 check "move-check: the drive's App-Data is a folder of the move" "$_DRV/appdata/zz-mv" "$(auth_request GET '/fleet/provision/move-check?stack=zz-move' | body_of | jq -r '.folders[] | select(.path != null) | .path')"
 _lib _appdata_unpin zz-move
-check "move: the .env line becomes a comment" "1|no" "$(grep -c '^# APP_DATA_DIR=' "$WORK/Stacks/zz-move/.env")|$(_lib dcs_stack_appdata_override "$WORK/Stacks/zz-move/.env" >/dev/null && echo yes || echo no)"
+check "move: the .env says ./App-Data, with a note of the drive" "1|1|no" "$(grep -c '^APP_DATA_DIR=./App-Data$' "$WORK/Stacks/zz-move/.env")|$(grep -c "^# App-Data was on the hub's drive at $_DRV/appdata/zz-mv" "$WORK/Stacks/zz-move/.env")|$(_lib dcs_stack_appdata_override "$WORK/Stacks/zz-move/.env" >/dev/null && echo yes || echo no)"
 cp "$WORK/zz-move.env.keep" "$WORK/Stacks/zz-move/.env"
 chmod -R u+w "$WORK-drive2" 2>/dev/null; rm -rf "$WORK-drive2"
 rm -rf "$WORK/Stacks/zz-gpu"

@@ -87,17 +87,20 @@ its place and the app starts "fresh" on the system disk.
     `/sys`, `/usr`, `/var` and everything below them (drives live under `/mnt`, `/media`, `/srv`, `/opt` or `/home`);
   - not inside the DCS folder (except the stack's own folder, which is the default anyway), not inside another
     stack's App-Data, and not containing another stack's App-Data;
-  - its parent folder exists (the drive is mounted); DCS creates the last folder itself;
+  - its parent folder exists (the drive is mounted), or the nearest folder that exists is on a mounted drive (not the
+    system disk); DCS creates the missing folders itself;
   - writable by DCS, or creatable through `sudo -n` when available; it is owned by `PUID:PGID` afterwards;
   - an existing, non-empty folder is accepted only with `app_data_adopt: true` (the UI asks "use the existing data?").
 - On success: the folder, the marker, and the `APP_DATA_DIR=<path>` line in the new stack's `.env` (with a comment).
-- `GET /storage/appdata-targets` (admin): the mounted drives DCS knows (from the Disk Analysis data: mount point,
-  filesystem, size, free), each with the suggested path `<mount>/appdata/<stack>`, system disks marked as such.
+- The drive list comes from the existing `GET /disks` (mount point, filesystem, size, free bytes); the dashboard
+  suggests `<mount>/.dcs/App-Data/<stack>` (Scott's choice during the build; DCS makes the missing middle folders when the
+  nearest existing folder is on a mounted drive, never on the system disk). (Amended during planning: a new `GET /storage/appdata-targets` would have
+  returned the same data.)
 
 ## 6. Dashboard
 
 - **Create stack dialog** (`CreateStackOverlay.tsx`): an *App-Data location* choice — *In the stack's folder*
-  (default, today's behaviour) · *On a drive* (the list from `GET /storage/appdata-targets` with free space; the
+  (default, today's behaviour) · *On a drive* (the list from `GET /disks` with free space; the
   suggested path is editable) · *Custom path*. Errors from the API are shown inline; a non-empty folder asks before
   adopting it.
 - **Stack card and stack page**: an *App-Data* label on every stack: `Stacks/<stack>/App-Data` for the default, the full

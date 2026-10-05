@@ -135,7 +135,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/stacks/{stack}` | user | Stack detail: services, containers and images |
 | POST | `/stacks/rename` | admin | Rename a stack directory |
 | POST | `/stacks/reorder` | admin | Set stack startup order |
-| POST | `/stacks` | admin | Create an empty stack directory |
+| POST | `/stacks` | admin | Create stack |
 | POST | `/stacks/{stack}/delete` | admin | Delete a stopped stack directory |
 | POST | `/batch/stacks` | admin | Start, stop or restart several stacks in dependency order |
 | POST | `/batch/update` | admin | Pull images for several stacks and recreate what changed |

@@ -54,7 +54,7 @@ the API restarts: `sudo systemctl restart dcs-api`, or `POST /system/restart`.
 | `SERVER_SUBTITLE` | `DCS Orchestrator` | The line under the name |
 | `TZ` | `UTC` | Time zone for DCS and every container that takes `${TZ}` |
 | `PUID`, `PGID` | `1000` | The user and group containers run as; setup uses your own IDs |
-| `APP_DATA_DIR` | `./App-Data` | Where app data goes, relative to each stack's folder |
+| `APP_DATA_DIR` | `./App-Data` | Where app data goes, relative to each stack's folder. A stack can keep its App-Data on a drive of its own: an absolute `APP_DATA_DIR` in **that stack's** `.env`, set when the stack is created ([Operations → App-Data on another drive](OPERATIONS.md#app-data-on-another-drive)) |
 | `PROXY_DOMAIN` | `example.com` | Your domain: routes are `<app>.<domain>` |
 
 ## API and dashboard

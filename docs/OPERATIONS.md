@@ -81,6 +81,29 @@ On a hub, every one of these works across the fleet: the list pages open on *Eve
 for the hub or one VM, and each action runs where the thing lives.
 [Proxmox guide → everything from the hub](PROXMOX.md#everything-from-the-hub).
 
+### App-Data on another drive
+
+*(4.0.32)* A new stack can keep its App-Data on a bigger or faster drive: in **New stack**, choose *On a drive*
+(the drives DCS sees, with their free space; the suggested folder is `<drive>/.dcs/App-Data/<stack>`) or *Custom path*.
+The API takes it as `POST /stacks {"name": "media", "app_data_dir": "/mnt/disk2/appdata/media"}`.
+
+- DCS makes the folder and any missing folders above it on the drive (a path whose nearest existing folder is on the
+  system disk is refused: the drive is not mounted), gives it to `PUID:PGID`, writes a marker in it
+  (`.dcs-appdata`) and the line `APP_DATA_DIR="/mnt/disk2/appdata/media"` in the stack's `.env`. Templates write
+  `${APP_DATA_DIR:-./App-Data}/<App>/…`, so every app of the stack lands there.
+- Refused: a path that is not absolute, a system folder (`/etc`, `/usr`, `/var`, `/boot` …), DCS's own folder, the
+  inside of another stack's App-Data. A folder that already holds files is used only once you confirm
+  (`app_data_adopt`).
+- Everything follows it: starts and updates, Nuke & reinstall (the trash is on that drive), template config files,
+  the file editor, backups and restores (its own part, restored to its path), moving the stack into a VM (it becomes
+  the VM's App-Data; the drive's copy stays), the sizes. The stack card shows where each stack's App-Data is.
+- **The drive is not there** (not mounted at boot): DCS does not start the stack, stops what Docker started for it on
+  its own, and notifies once — and again when the drive is back. Start, restart, update, a template deploy, Nuke &
+  reinstall and a move into a VM are refused with that reason (409) before anything is taken down or written; a stop
+  still works. Nothing on the drive is touched.
+- Deleting the stack never deletes that folder; the confirmation names it.
+- Stacks without the setting are exactly as before. Moving an existing stack's App-Data is not offered yet.
+
 ## Nuke & reinstall
 
 When an app has wedged itself (a lost admin password, a broken database, a config you cannot untangle),
@@ -95,7 +118,8 @@ in `Stacks/<stack>/App-Data`, and that is where the nuke looks and where its tra
 (`Stacks/<stack>/App-Data/.trash`). An `App-Data` that Docker made belongs to root; the move into the
 trash is done as root in a small container, so nothing is lost there either. With an absolute
 `APP_DATA_DIR` (one root for every stack) only what lies two levels below the root counts as a
-container's own. A container in a VM is nuked in its VM: the hub forwards the request.
+container's own. A stack with its App-Data on a drive of its own keeps its trash there too. A container in a VM is
+nuked in its VM: the hub forwards the request.
 
 ## Updating DCS
 
@@ -157,6 +181,7 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 |---|---|
 | Each stack's whole folder: `docker-compose.yml`, `.env`, config files, `App-Data`, `data`, files of every owner (a database's, root's) with owners and modes as numbers | The link to a VM's App-Data on a hub (`Stacks/<name>/VM-App-Data`, an sshfs mount): that data is the VM's, in the VM's own backup |
 | Each named volume of a stack (`com.docker.compose.project` label) | Volumes a compose file declares `external`, and folders outside the stack (a media library): back those up where they live |
+| A stack's App-Data on a drive of its own *(4.0.32)*: a part of its own (`.dcs-backup/appdata/<stack>.tar`) with the path it goes back to; a restore sets the copy there aside beside it (`<path>.before-restore-<time>`, same drive) | That part while its drive is not mounted (the backup says so; a restore skips it and says so) |
 | `.env`, accounts and their layouts, notification rules, automations | Sessions, invite codes, rate limits, logs, caches, metrics |
 | `.secrets/*.enc` | The secret store's key, `.secrets/.master-key`: keep it elsewhere, or use the recovery bundle, which carries it encrypted |
 | `.data`: the fleet (`fleet.json`, the hub's ssh key to its VMs), schedules, CrowdSec, the intended state | `.data/cache`, `.data/metrics`, sessions to the VMs, `.data/recovery`, `.data/pre-restore` |
