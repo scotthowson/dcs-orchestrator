@@ -2743,8 +2743,8 @@ _stacks_card_facts() {
             | {name: .[0], project: (.[1] // ""), image: (.[2] // ""), state: (.[3] // ""), ports: (.[4] // "")} | select(.project != "")]
         | group_by(.project) | map({key: .[0].project, value: {
             total: length,
-            cpu: ([.[] | select(.state == "running") | ($st[.name].cpu // 0)] | add // 0 | . * 100 | round / 100),
-            mem: ([.[] | select(.state == "running") | ($st[.name].mem // 0)] | add // 0 | . * 100 | round / 100),
+            cpu: ([.[] | select(.state == "running") | $st[.name].cpu | numbers] | if length == 0 then null else add * 100 | round / 100 end),
+            mem: ([.[] | select(.state == "running") | $st[.name].mem | numbers] | if length == 0 then null else add * 100 | round / 100 end),
             updates: ([.[] | .image | select(($ic[.] // (if test(":[^/]+$") then null else $ic[. + ":latest"] end) // false) == true)] | unique | length),
             ports: ([.[] | .ports | scan("(?:^|, )([0-9.]+|\\[[0-9a-f:]*\\]):([0-9]+)->[0-9]+/tcp")
                      | select(.[0] != "127.0.0.1" and .[0] != "[::1]") | .[1] | tonumber] | unique)
@@ -2805,11 +2805,11 @@ handle_stacks() {
         [[ "$status" == stopped ]] && _stack_asleep "$stack" && asleep=true
         local zc=0 ho=false; [[ -n "$_down_od" ]] && zc=$(grep -cxF -- "$stack" <<< "$_down_od"); [[ "$zc" =~ ^[0-9]+$ ]] || zc=0
         _fleet_hub_only "$stack" && ho=true
-        local _tot="$count" _cpu=0 _mem=0 _upd=0 _ports='[]' _links='[]' _lb=null
+        local _tot="$count" _cpu=null _mem=null _upd=0 _ports='[]' _links='[]' _lb=null
         IFS=$'\t' read -r _tot _cpu _mem _upd _ports _lb < <(jq -r --arg s "$stack" --argjson bt "$_bt" --argjson run "$count" \
-            '(.[$s] // {total: $run, cpu: 0, mem: 0, updates: 0, ports: []}) | [([.total, $run] | max), .cpu, .mem, .updates, (.ports | tojson), ($bt[$s] // null | tojson)] | @tsv' \
+            '(.[$s] // {total: $run, cpu: null, mem: null, updates: 0, ports: []}) | [([.total, $run] | max), (.cpu | tojson), (.mem | tojson), .updates, (.ports | tojson), ($bt[$s] // null | tojson)] | @tsv' \
             <<< "$_cf" 2>/dev/null) || true
-        [[ "$_tot" =~ ^[0-9]+$ ]] || _tot="$count"; [[ "$_cpu" =~ ^[0-9.]+$ ]] || _cpu=0; [[ "$_mem" =~ ^[0-9.]+$ ]] || _mem=0
+        [[ "$_tot" =~ ^[0-9]+$ ]] || _tot="$count"; [[ "$_cpu" =~ ^[0-9.]+$ ]] || _cpu=null; [[ "$_mem" =~ ^[0-9.]+$ ]] || _mem=null
         [[ "$_upd" =~ ^[0-9]+$ ]] || _upd=0; [[ "$_ports" == \[* ]] || _ports='[]'; [[ -n "$_lb" ]] || _lb=null
         _links=$(_stack_card_hosts "$stack" "$_rdir" | jq -Rsc 'split("\n") | map(select(length > 0) | "https://" + .)') || _links='[]'
         [[ "$_links" == \[* ]] || _links='[]'

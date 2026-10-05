@@ -2604,6 +2604,7 @@ check "cards: images with an update waiting (an untagged one is :latest)" "2" "$
 check "cards: published TCP ports, not localhost-only or UDP" "8080,8443" "$(jq -r '."zz-cf".ports | map(tostring) | join(",")' <<< "$_CF" 2>/dev/null)"
 check "cards: another stack is counted apart" "1|0" "$(jq -r '.other | "\(.total)|\(.updates)"' <<< "$_CF" 2>/dev/null)"
 check "cards: no rows, an empty map" "{}" "$(_lib _stacks_card_facts < /dev/null)"
+check "cards: no stats sampled yet, CPU and memory unknown (not 0)" "null|null" "$(printf 'cf-z\tzz-new2\tnginx\trunning\t\n' | _lib _stacks_card_facts | jq -r '."zz-new2" | "\(.cpu)|\(.mem)"')"
 mkdir -p "$WORK/Stacks/zz-cf"
 printf 'services:\n  a:\n    image: nginx\n    labels:\n      - traefik.http.routers.a.rule=Host(`app.example.com`)\n      - "traefik.http.routers.b.rule=Host(`${SUB}.example.com`)"\n' > "$WORK/Stacks/zz-cf/docker-compose.yml"
 check "cards: the stack's Traefik hostnames (not ones with a variable)" "app.example.com" "$(_lib _stack_card_hosts zz-cf | paste -sd,)"

@@ -84,7 +84,7 @@ for the hub or one VM, and each action runs where the thing lives.
 ### App-Data on another drive
 
 *(4.0.32)* A new stack can keep its App-Data on a bigger or faster drive: in **New stack**, choose *On a drive*
-(the drives DCS sees, with their free space; the suggested folder is `<drive>/.dcs/App-Data/<stack>`) or *Custom path*.
+(the drives DCS sees, with their free space; the suggested folder is `<drive>/.dcs/Stacks/<stack>/App-Data`, the layout of DCS's own folder) or *Custom path*.
 The API takes it as `POST /stacks {"name": "media", "app_data_dir": "/mnt/disk2/appdata/media"}`.
 
 - DCS makes the folder and any missing folders above it on the drive (a path whose nearest existing folder is on the
@@ -163,10 +163,12 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 - **Check Registry** on the Updates page asks the registries which images have a newer version.
 - **Update** on an image pulls it and recreates exactly the containers that run an older copy. Chips mark
   containers left on an old copy, with a **Recreate** button.
-- **Automatic image updates**: the Updates page has a dropdown (off, every night, every Sunday, the 1st
-  of the month, at 03:00) that makes an **image-update** schedule. It pulls the image of every running
+- **Automatic image updates**: the Updates and Images pages have a dropdown (off, every night, every Sunday,
+  the 1st of the month, at 03:00) that makes an **image-update** schedule. It pulls the image of every running
   container and recreates the ones on an older copy; with the target `pull` it only pulls. It writes
   `logs/image-update.log`, a line on the Updates page, and a notification when something changed or failed.
+  **Update everything** *(4.0.33)* runs the same job now, schedule or not, on the servers the chips select
+  (`POST /images/update-all` on each; 409 while one runs).
 - **At boot** nothing is pulled unless `UPDATE_ON_BOOT=true`: a boot stays fast and predictable.
 - **Docker Engine**: a card on the Updates page shows the engine's version, where it comes from and the
   newest version on offer, and updates it (with passwordless sudo, or with the Terminal's Linux password).
