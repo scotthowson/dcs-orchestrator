@@ -2556,7 +2556,7 @@ for _bad in "$_DRV/x\$(touch $WORK/PWNED)" "$_DRV/x\`id\`" "$_DRV/q\\\"; touch $
     rm -rf "$WORK/Stacks/zz-chr"
 done
 check "create: nothing ran" "no" "$([[ -e "$WORK/PWNED" || -e "$WORK/PWNED2" ]] && echo yes || echo no)"
-check "create: @ + _ and spaces are fine" "true" "$(auth_request POST /stacks "{\"name\":\"zz-ok\",\"app_data_dir\":\"$_DRV/My Disk/a@b+c_d\"}" | body_of | jq -r .success)"
+check "create: @ + _ and spaces are fine" "true" "$(mkdir -p "$_DRV/My Disk"; auth_request POST /stacks "{\"name\":\"zz-ok\",\"app_data_dir\":\"$_DRV/My Disk/a@b+c_d\"}" | body_of | jq -r .success)"
 rm -rf "$WORK/Stacks/zz-ok" "$_DRV/My Disk"
 # a folder under /mnt or /media that is still on the system disk is a drive that is not mounted
 if [[ "$(df -P /mnt 2>/dev/null | awk 'NR==2 {print $NF}')" == / && ! -e /mnt/dcs-smoke-nodrive ]]; then
