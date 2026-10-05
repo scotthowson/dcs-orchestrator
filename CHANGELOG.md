@@ -5,6 +5,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [4.0.32] - 2026-10-05
+
+### Added
+
+- **A stack's App-Data on another drive.** A new stack can keep its App-Data on a bigger or faster drive: `POST /stacks`
+  takes `app_data_dir` (and `app_data_adopt` for a folder that already holds files); the dashboard's New stack offers
+  *In the stack's folder* (as before), *On a drive* (the drives DCS sees with their free space, suggesting
+  `<drive>/.dcs/App-Data/<stack>`) and *Custom path*. DCS makes the folder (and missing folders above it, only on a mounted
+  drive), gives it to `PUID:PGID`, writes a marker in it (`.dcs-appdata`) and `APP_DATA_DIR="<path>"` in the stack's
+  `.env`. Refused: system folders, DCS's own folder, another stack's App-Data, a folder under `/mnt` or `/media` that is
+  still on the system disk, and anything but letters, digits, spaces and `. _ - @ +` in the path.
+  [Operations → App-Data on another drive](docs/OPERATIONS.md#app-data-on-another-drive)
+- Everything follows it: Compose gets the stack's value (`compose_with_secrets`, boot, scheduler), templates deployed into
+  it keep `${APP_DATA_DIR:-./App-Data}`, Nuke & reinstall (its trash on that drive), template config files and Authelia
+  files, Traefik route lookups, sizes, backups (a part of its own, `.dcs-backup/appdata/<stack>.tar`, restored to its path
+  with the copy there set aside on the same drive) and moving the stack into a VM (it becomes the VM's own App-Data).
+- `GET /stacks` and the stack page report `app_data: {path, external, ok, free_bytes}`; the stack card and page show where
+  each stack's App-Data is, with the drive's free space, or "drive not mounted".
+
+### Changed
+
+- **A drive that is not mounted never gets an app started on the system disk.** For such a stack, start, restart, update,
+  a template deploy, Nuke & reinstall and a move into a VM are refused with the reason (409) before anything is taken down
+  or written (a stop still works); at boot `run.sh` skips it, and the automation loop stops what Docker started for it on
+  its own and notifies once, and again when the drive is back.
+- Deleting such a stack never deletes its App-Data folder; the answer and the confirmation name it (`app_data_kept`).
+  Renaming it updates its marker. A batch start or restart refuses such a stack with the reason, and a restart never takes
+  down a stack that could not come up again.
+- At boot (`run.sh`) a stack's own `APP_DATA_DIR` applies to that stack only; the stacks started after it no longer
+  inherit it.
+
+Stacks without the setting behave exactly as before. An absolute `APP_DATA_DIR` set in a stack's `.env` by hand keeps
+its old behaviour too: DCS guards, backs up and moves only the drive folders it made or has seen its marker in
+(`.data/appdata-armed`).
+
 ## [4.0.31] - 2026-10-04
 
 ### Fixed
