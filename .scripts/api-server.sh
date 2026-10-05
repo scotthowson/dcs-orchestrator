@@ -2758,7 +2758,7 @@ handle_stacks() {
         [[ "$status" == stopped ]] && _stack_asleep "$stack" && asleep=true
         local zc=0 ho=false; [[ -n "$_down_od" ]] && zc=$(grep -cxF -- "$stack" <<< "$_down_od"); [[ "$zc" =~ ^[0-9]+$ ]] || zc=0
         _fleet_hub_only "$stack" && ho=true
-        entries+=("{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $zc, \"hub_only\": $ho, \"has_env\": $has_env, \"compose_file\": \"$(_api_json_escape "$compose_file")\"}")
+        entries+=("{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $zc, \"hub_only\": $ho, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $has_env, \"compose_file\": \"$(_api_json_escape "$compose_file")\"}")
     done
 
     local json
@@ -2837,7 +2837,7 @@ handle_stack_detail() {
 
     local asleep=false; [[ "$status" == stopped ]] && _stack_asleep "$stack" && asleep=true
     local _zc; _zc=$(jq -r '[.[] | select(.sleeping == true)] | length' <<< "$containers_json" 2>/dev/null); [[ "$_zc" =~ ^[0-9]+$ ]] || _zc=0
-    _api_success "{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $_zc, \"has_env\": $([[ -f "$env_file" ]] && echo true || echo false), \"services\": $services_json, \"containers\": $containers_json, \"images\": $images_json}"
+    _api_success "{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $_zc, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $([[ -f "$env_file" ]] && echo true || echo false), \"services\": $services_json, \"containers\": $containers_json, \"images\": $images_json}"
 }
 
 # GET /stacks/{stack}/containers — Containers of one stack
@@ -5700,7 +5700,27 @@ RESET_TRASH_KEEP_DAYS="${RESET_TRASH_KEEP_DAYS:-7}"
 
 # The App-Data root a stack's compose file means: APP_DATA_DIR when it is absolute (one root for every stack), else that
 # path below the stack's own folder — ./App-Data, the default: every stack keeps its data next to its compose file.
+# A stack's App-Data on a drive of its own (an absolute APP_DATA_DIR in its .env); 1 when it has none
+_stack_appdata_override() { [[ -n "${1:-}" ]] || return 1; dcs_stack_appdata_override "$COMPOSE_DIR/$1/.env"; }
+_stack_appdata_external() { _stack_appdata_override "$1" >/dev/null; }
+# Where a stack's App-Data is: its own drive when it has one, else the usual rule (_stack_appdata_root)
+_stack_appdata_dir() {
+    local ov; ov=$(_stack_appdata_override "$1") && { printf '%s' "$ov"; return 0; }
+    _stack_appdata_root "$COMPOSE_DIR/$1"
+}
+# {path, external, ok, free_bytes} of a stack's App-Data, for the stack card (free space only for a drive of its own)
+_stack_appdata_json() {
+    local s="$1" p ext=false ok=true free=null
+    if p=$(_stack_appdata_override "$s"); then
+        ext=true; dcs_appdata_marker_ok "$p" "$s" || ok=false
+        if [[ "$ok" == true ]]; then free=$(df -B1 --output=avail -- "$p" 2>/dev/null | tail -n 1 | tr -dc '0-9') || free=""; [[ -n "$free" ]] || free=null; fi
+    else
+        p=$(_stack_appdata_dir "$s") || p=""
+    fi
+    printf '{"path": "%s", "external": %s, "ok": %s, "free_bytes": %s}' "$(_api_json_escape "$p")" "$ext" "$ok" "$free"
+}
 _stack_appdata_root() {
+    local _ov; _ov=$(dcs_stack_appdata_override "${1%/}/.env") && { printf '%s' "$_ov"; return 0; }
     local proj="${1%/}" ad="${APP_DATA_DIR:-./App-Data}"
     [[ "$ad" == /* ]] || ad="$proj/${ad#./}"
     printf '%s' "${ad%/}"
@@ -6334,6 +6354,8 @@ handle_maintenance_report() {
     else
         local -a _add=(); local _d
         for _d in "$COMPOSE_DIR"/*/"${_adr#./}"; do [[ -d "$_d" && ! -L "$_d" ]] && _add+=("$_d"); done
+        # stacks that keep their App-Data on a drive of their own count it there
+        for _d in "$COMPOSE_DIR"/*/; do _d="${_d%/}"; _d=$(_stack_appdata_override "${_d##*/}") && [[ -d "$_d" ]] && _add+=("$_d"); done
         if (( ${#_add[@]} > 0 )); then app_data_size=$(du -shc "${_add[@]}" 2>/dev/null | tail -n 1 | cut -f1); fi
     fi
     [[ -n "$app_data_size" ]] || app_data_size="N/A"
@@ -7110,6 +7132,7 @@ _backup_part_tar() {
     case "$kind" in
         stack)  src="$COMPOSE_DIR/$name"; bk_ex=(--exclude="./$FLEET_APPDATA_LINK" --exclude=./App-Data/.trash) ;;
         dir)    src="$name" ;;
+        appdata) src="$name"; bk_ex=(--exclude=./.trash) ;;
         volume) src="$name" ;;
         *)      return 2 ;;
     esac
@@ -7264,13 +7287,13 @@ _backup_retention() {
 _backup_build() {
     local file="$1" only="${2:-}" dest="${BACKUP_DEST_DIR%/}" stage="" errf="" s="" v="" short="" rc=0 kb=0 st="" free=0 i=0 cnt=0 f="" fsz=0 nfiles=0 sha=""
     local -a bk_stacks=() bk_ids=() bk_warns=() bk_install=() bk_dest_ex=() bk_part_paths=()
-    local bk_parts='[]' src="${BACKUP_SOURCE_DIR:-}" keyfp="" in_vm=false
+    local bk_parts='[]' src="${BACKUP_SOURCE_DIR:-}" keyfp="" in_vm=false _bk_ov=""
     BK_ERROR=""; BK_WARNINGS='[]'; BK_RESULT='{}'
     [[ -n "$dest" ]] || { BK_ERROR="Backup not configured. Set BACKUP_DEST_DIR in .env"; return 1; }
     (umask 077; mkdir -p -- "$dest") 2>/dev/null || { BK_ERROR="Cannot create $dest"; return 1; }
     stage="$dest/.dcs-backup-staging-${file%.tar.gz}"
     rm -rf -- "$stage" 2>/dev/null
-    (umask 077; mkdir -p -- "$stage/.dcs-backup/stacks" "$stage/.dcs-backup/volumes") 2>/dev/null || { BK_ERROR="Cannot write to $dest"; return 1; }
+    (umask 077; mkdir -p -- "$stage/.dcs-backup/stacks" "$stage/.dcs-backup/volumes" "$stage/.dcs-backup/appdata") 2>/dev/null || { BK_ERROR="Cannot write to $dest"; return 1; }
     errf="$stage/errors.log"
     if [[ -n "$only" ]]; then
         [[ -d "$COMPOSE_DIR/$only" ]] || { rm -rf -- "$stage"; BK_ERROR="No stack named $only"; return 1; }
@@ -7285,6 +7308,7 @@ _backup_build() {
     _backup_status running 3 prepare "Measuring what to back up..."
     for s in "${bk_stacks[@]}"; do
         st=$(_backup_du "stack" "$s"); kb=$(( kb + ${st:-0} ))
+        if _bk_ov=$(_stack_appdata_override "$s") && [[ -d "$_bk_ov" ]]; then st=$(_backup_du dir "$_bk_ov"); kb=$(( kb + ${st:-0} )); fi
         while IFS=$'\t' read -r v short; do [[ -n "$v" ]] && { st=$(_backup_du volume "$v"); kb=$(( kb + ${st:-0} )); }; done < <(_fleet_stack_volumes "$s")
     done
     [[ -z "$only" && -n "$src" && -d "$src" ]] && { st=$(_backup_du dir "$src"); kb=$(( kb + ${st:-0} )); }
@@ -7315,6 +7339,16 @@ _backup_build() {
         : > "$errf"
         _backup_part_tar stack "$s" > "$f" 2>"$errf"; rc=$?
         _backup_part_note stack "$s" "$f" "$rc" "./.dcs-backup/stacks/$s.tar" "{\"in_vm\": $in_vm}" || true
+        # its App-Data on a drive of its own is a part of its own, with the path it goes back to
+        if _bk_ov=$(_stack_appdata_override "$s"); then
+            if dcs_appdata_marker_ok "$_bk_ov" "$s"; then
+                f="$stage/.dcs-backup/appdata/$s.tar"; : > "$errf"
+                _backup_part_tar appdata "$_bk_ov" > "$f" 2>"$errf"; rc=$?
+                _backup_part_note appdata "$s" "$f" "$rc" "./.dcs-backup/appdata/$s.tar" "$(jq -nc --arg p "$_bk_ov" '{appdata_path: $p}')" || true
+            else
+                bk_warns+=("$s: its App-Data $_bk_ov is not there (drive not mounted?), so it is not in the backup")
+            fi
+        fi
         while IFS=$'\t' read -r v short; do
             [[ -n "$v" ]] || continue
             f="$stage/.dcs-backup/volumes/$v.tar"
@@ -7346,7 +7380,7 @@ _backup_build() {
         '{format: 2, created_at: (now | todate), hostname: $host, dcs_version: $v, kind: (if $only == "" then "full" else "stack" end), stack: $only,
           reader: $reader, paused: ($paused == "true"), key_fingerprint: $key, source_dir: $src, install: $install, parts: $parts, warnings: $w, complete: (($w | length) == 0)}' \
         > "$stage/.dcs-backup/manifest.json"
-    mapfile -t bk_part_paths < <(cd "$stage" && find ./.dcs-backup/stacks ./.dcs-backup/volumes -type f 2>/dev/null | sort; [[ -f "$stage/.dcs-backup/source.tar" ]] && echo ./.dcs-backup/source.tar)
+    mapfile -t bk_part_paths < <(cd "$stage" && find ./.dcs-backup/stacks ./.dcs-backup/volumes ./.dcs-backup/appdata -type f 2>/dev/null | sort; [[ -f "$stage/.dcs-backup/source.tar" ]] && echo ./.dcs-backup/source.tar)
 
     _backup_status running 80 archive "Compressing the archive..."
     : > "$errf"
@@ -7613,13 +7647,14 @@ handle_backup_verify() {
 # were. Sets BR_RESULT (last_restore) or BR_ERROR.
 _backup_restore_run() {
     local archive="$1" only="${2:-}" name="${1##*/}" man="" ts="" pre="" s="" v="" vs="" short="" rc=0 chk="" inner="" listing=""
-    local -a bk_rs=() bk_vols=() bk_stopped=() bk_ids=() bk_warns=() bk_restored=() bk_rvols=() bk_skip=()
+    local -a bk_rs=() bk_vols=() bk_stopped=() bk_ids=() bk_warns=() bk_restored=() bk_rvols=() bk_skip=() bk_ads=() bk_rads=()
     local install=false lst
     BR_ERROR=""; BR_RESULT='{}'
     man=$(_backup_manifest "$archive")
     [[ -n "$man" ]] || { _backup_restore_legacy "$archive"; return; }
     mapfile -t bk_rs < <(jq -r --arg o "$only" '.parts[] | select(.kind == "stack" and ($o == "" or .name == $o)) | .name' <<< "$man")
     mapfile -t bk_vols < <(jq -r --arg o "$only" '.parts[] | select(.kind == "volume" and ($o == "" or .stack == $o)) | [.name, .stack, .volume] | @tsv' <<< "$man")
+    mapfile -t bk_ads < <(jq -r --arg o "$only" '.parts[] | select(.kind == "appdata" and ($o == "" or .name == $o)) | [.name, .appdata_path] | @tsv' <<< "$man")
     if [[ -n "$only" && ${#bk_rs[@]} -eq 0 ]]; then BR_ERROR="$only is not in this backup"; return 1; fi
     [[ -z "$only" && "$(jq -r '.kind' <<< "$man")" == full ]] && install=true
     for s in "${bk_rs[@]}"; do [[ "$s" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { BR_ERROR="the backup names a stack that is not a plain name: $s"; return 1; }; done
@@ -7633,6 +7668,12 @@ _backup_restore_run() {
         inner=$(tar -xzOf "$archive" --occurrence=1 "./.dcs-backup/stacks/$s.tar" 2>/dev/null | tar -tvf - 2>/dev/null) || { BR_ERROR="The part of $s cannot be read"; return 1; }
         chk=$(_backup_listing_check "$inner") || { BR_ERROR="Refusing the part of $s: ${chk#refuse: }"; return 1; }
     done
+    for vs in "${bk_ads[@]}"; do
+        s="${vs%%$'\t'*}"
+        [[ "$s" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { BR_ERROR="the backup names a stack that is not a plain name: $s"; return 1; }
+        inner=$(tar -xzOf "$archive" --occurrence=1 "./.dcs-backup/appdata/$s.tar" 2>/dev/null | tar -tvf - 2>/dev/null) || { BR_ERROR="The App-Data part of $s cannot be read"; return 1; }
+        chk=$(_backup_listing_check "$inner") || { BR_ERROR="Refusing the App-Data part of $s: ${chk#refuse: }"; return 1; }
+    done
 
     ts=$(date +%Y%m%d-%H%M%S); pre="$BACKUP_PRE_RESTORE_DIR/$ts"; local _pn=1; while [[ -e "$pre" ]]; do _pn=$((_pn + 1)); pre="$BACKUP_PRE_RESTORE_DIR/$ts-$_pn"; done
     (umask 077; mkdir -p -- "$pre/Stacks" "$pre/volumes") 2>/dev/null || { BR_ERROR="Cannot write $pre"; return 1; }
@@ -7642,6 +7683,7 @@ _backup_restore_run() {
     local -A bk_want=()
     for s in "${bk_rs[@]}"; do bk_want[$s]=1; done
     for vs in "${bk_vols[@]}"; do bk_want[$(cut -f2 <<< "$vs")]=1; done
+    for vs in "${bk_ads[@]}"; do bk_want[${vs%%$'\t'*}]=1; done
     for s in "${!bk_want[@]}"; do
         mapfile -t bk_ids < <(_backup_stack_running "$s")
         (( ${#bk_ids[@]} )) && bk_stopped+=("${bk_ids[@]}")
@@ -7689,6 +7731,26 @@ _backup_restore_run() {
         bk_restored+=("$s")
     done
 
+    # a stack's App-Data on a drive of its own goes back to its path; the copy there before is set aside beside it, on the
+    # same drive (a move, never a copy of the whole folder across drives)
+    for vs in "${bk_ads[@]}"; do
+        IFS=$'\t' read -r s v <<< "$vs"
+        [[ "$v" == /* ]] || { bk_warns+=("$s: the backup's App-Data path is not a full path, skipped"); continue; }
+        if [[ ! -d "$v" ]] || ! dcs_appdata_marker_ok "$v" "$s"; then
+            bk_warns+=("$s: its App-Data $v is not there (drive not mounted?), so that part was not restored"); continue
+        fi
+        _backup_status restoring 82 appdata "Restoring the App-Data of $s..."
+        local _aside="$v.before-restore-$ts"
+        _backup_mv "$v" "$_aside" || { bk_warns+=("$s: its App-Data could not be set aside, so it was not restored"); continue; }
+        mkdir -p -- "$v" 2>/dev/null
+        tar -xzOf "$archive" --occurrence=1 "./.dcs-backup/appdata/$s.tar" 2>/dev/null | _backup_part_untar "$v" >/dev/null 2>"$pre/$s-appdata.err"
+        if [[ "${PIPESTATUS[0]}" != 0 || "${PIPESTATUS[1]}" != 0 ]]; then
+            _backup_rm "$v"; _backup_mv "$_aside" "$v"
+            bk_warns+=("$s: its App-Data could not be written ($(tail -n 1 "$pre/$s-appdata.err" | cut -c1-200)); the folder as it was is back"); continue
+        fi
+        bk_rads+=("$s")
+    done
+
     for vs in "${bk_vols[@]}"; do
         IFS=$'\t' read -r v s short <<< "$vs"
         [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { bk_warns+=("volume $v: not a plain name, skipped"); continue; }
@@ -7715,9 +7777,10 @@ _backup_restore_run() {
     BR_RESULT=$(jq -nc --arg f "$name" --arg pre "$pre" --argjson inst "$install" \
         --argjson st "$(printf '%s\n' "${bk_restored[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
         --argjson vo "$(printf '%s\n' "${bk_rvols[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+        --argjson ad "$(printf '%s\n' "${bk_rads[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
         --argjson w "$(printf '%s\n' "${bk_warns[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
         --argjson sk "$(printf '%s\n' "${bk_skip[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
-        '{filename: $f, timestamp: (now | todate), install: $inst, stacks: $st, volumes: $vo, kept_before: $pre, skipped_links: $sk, warnings: $w,
+        '{filename: $f, timestamp: (now | todate), install: $inst, stacks: $st, volumes: $vo, appdata: $ad, kept_before: $pre, skipped_links: $sk, warnings: $w,
           api_restart_needed: $inst, note: (if $inst then "The .env and settings are back on disk: restart the API (Config, or systemctl restart dcs-api) so it reads them" else "" end)}')
     return 0
 }
@@ -7804,6 +7867,32 @@ handle_backup_restore() {
 # =============================================================================
 
 # POST /stacks — Create an empty stack directory
+# Can a new stack keep its App-Data at PATH: absolute, on a mounted drive (its parent exists), not a system folder, not
+# DCS's own folder, not inside or around another stack's App-Data. Prints the normalised path, or `__error=<why>` and 1.
+_appdata_location_check() {
+    local p="$1" stack="$2" s other
+    [[ "$p" == /* ]] || { printf '__error=%s\n' "The App-Data location must be a full path, like /mnt/disk2/appdata/$stack"; return 1; }
+    [[ ${#p} -le 4096 && "$p" != *[[:cntrl:]]* ]] || { printf '__error=%s\n' "That is not a usable path"; return 1; }
+    p=$(printf '%s' "$p" | tr -s '/'); [[ "$p" == / ]] || p="${p%/}"
+    case "/${p#/}/" in */../*|*/./*) printf '__error=%s\n' "Use a path without . or .."; return 1 ;; esac
+    case "$p" in
+        /|/bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*|/libx32|/libx32/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var|/var/*)
+            printf '__error=%s\n' "$p is a system folder: choose a folder on a data drive (under /mnt, /media, /srv, /opt or /home)"; return 1 ;;
+    esac
+    if [[ "$p" == "$BASE_DIR" || "$p" == "$BASE_DIR"/* ]]; then
+        printf '__error=%s\n' "$p is inside DCS's own folder: leave the location empty to keep it in the stack's folder"; return 1
+    fi
+    [[ -d "$(dirname "$p")" ]] || { printf '__error=%s\n' "$(dirname "$p") does not exist: is the drive mounted?"; return 1; }
+    for s in "$COMPOSE_DIR"/*/; do
+        s="${s%/}"; s="${s##*/}"; [[ "$s" == "$stack" ]] && continue
+        other=$(_stack_appdata_override "$s") || continue
+        if [[ "$p" == "$other" || "$p" == "$other"/* || "$other" == "$p"/* ]]; then
+            printf '__error=%s\n' "$p overlaps the App-Data of $s ($other)"; return 1
+        fi
+    done
+    printf '%s' "$p"
+}
+
 handle_create_stack() {
     local body="$1"
 
@@ -7831,6 +7920,24 @@ handle_create_stack() {
     if [[ -d "$stack_dir" ]]; then
         _api_error 409 "Stack already exists: $name"
         return
+    fi
+
+    # Its App-Data on a drive of its own (chosen on the create sheet): checked and made before the stack itself
+    local _adr _ad="" _adopt
+    _adr=$(printf '%s' "$body" | jq -r '.app_data_dir // empty | strings' 2>/dev/null) || _adr=""
+    _adopt=$(printf '%s' "$body" | jq -r '.app_data_adopt // false' 2>/dev/null) || _adopt=false
+    if [[ -n "$_adr" ]]; then
+        if ! _ad=$(_appdata_location_check "$_adr" "$name"); then _api_error 400 "${_ad#__error=}"; return; fi
+        if [[ -d "$_ad" && -n "$(ls -A "$_ad" 2>/dev/null | grep -vx '.dcs-appdata' | head -n 1)" && "$_adopt" != true ]]; then
+            _api_error 400 "$_ad already holds files: confirm to use them for $name (app_data_adopt)"; return
+        fi
+        if ! { mkdir -p -- "$_ad" || { sudo -n mkdir -p -- "$_ad" && sudo -n chown "${PUID:-$(id -u)}:${PGID:-$(id -g)}" "$_ad"; }; } 2>/dev/null; then
+            _api_error 400 "$_ad cannot be created by this server's user (and sudo is not available)"; return
+        fi
+        chown "${PUID:-$(id -u)}:${PGID:-$(id -g)}" "$_ad" 2>/dev/null || true
+        if ! printf '{"stack": "%s", "created": "%s"}\n' "$name" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$_ad/.dcs-appdata" 2>/dev/null; then
+            _api_error 400 "$_ad is not writable by this server's user"; return
+        fi
     fi
 
     # Create directory
@@ -7870,6 +7977,12 @@ COMPOSE_EOF
 # PUID and PGID are inherited from root .env
 ENV_EOF
 
+    if [[ -n "$_ad" ]]; then
+        printf '\n# This stack keeps its App-Data on a drive of its own (chosen when it was created)\nAPP_DATA_DIR="%s"\n' "$_ad" >> "$stack_dir/.env"
+        _api_success "{\"success\": true, \"name\": \"$name\", \"app_data\": {\"path\": \"$(_api_json_escape "$_ad")\", \"external\": true}, \"message\": \"Stack '$name' created successfully; its App-Data is in $(_api_json_escape "$_ad")\"}"
+        return
+    fi
+
     # Create App-Data directory
     mkdir -p "$stack_dir/App-Data" 2>/dev/null
 
@@ -7907,6 +8020,8 @@ handle_delete_stack() {
 
     # where the routes live is asked before the folder goes (a Traefik's own stack takes its routes directory along)
     local _rdir; _rdir=$(_find_traefik_routes_dir 2>/dev/null) || _rdir=""
+    # App-Data on a drive of its own is never deleted with the stack: the answer names it
+    local _kept; _kept=$(_stack_appdata_override "$name") || _kept=""
 
     # Remove the stack directory (falls back to Docker for root-owned files)
     _force_remove_dir "$stack_dir"
@@ -7933,6 +8048,10 @@ handle_delete_stack() {
         fi
     fi
 
+    if [[ -n "$_kept" ]]; then
+        _api_success "{\"success\": true, \"name\": \"$name\", \"app_data_kept\": \"$(_api_json_escape "$_kept")\", \"message\": \"Stack '$name' deleted successfully; its App-Data in $(_api_json_escape "$_kept") is kept\"}"
+        return
+    fi
     _api_success "{\"success\": true, \"name\": \"$name\", \"message\": \"Stack '$name' deleted successfully\"}"
 }
 
@@ -9873,7 +9992,8 @@ handle_ui_update_apply() {
     # Recreate in background — the UI will disconnect briefly
     local env_args=()
     [[ -f "$stack_dir/.env" ]] && env_args=(--env-file "$stack_dir/.env")
-    ( $DOCKER_COMPOSE_CMD -f "$compose_file" "${env_args[@]}" up -d --force-recreate --no-deps dcs-ui ) </dev/null >/dev/null 2>&1 &
+    local _ov; _ov=$(dcs_stack_appdata_override "$stack_dir/.env") || _ov=""
+    ( [[ -z "$_ov" ]] || export APP_DATA_DIR="$_ov"; $DOCKER_COMPOSE_CMD -f "$compose_file" "${env_args[@]}" up -d --force-recreate --no-deps dcs-ui ) </dev/null >/dev/null 2>&1 &
 
     _api_success "{\"success\": true, \"message\": \"DCS-UI is being updated. The page will reconnect automatically.\"}"
 }
@@ -13917,7 +14037,7 @@ _traefik_stack_appdata() {
     local _s _ad first=""
     for _s in $(_api_get_stacks); do
         grep -qE '^\s*container_name:\s*"?Traefik"?\s*$|^\s*image:\s*"?traefik(:[A-Za-z0-9._-]+)?"?\s*$' "$COMPOSE_DIR/$_s/docker-compose.yml" 2>/dev/null || continue
-        _ad="${APP_DATA_DIR:-$COMPOSE_DIR/$_s/App-Data}"
+        _ad=$(_stack_appdata_override "$_s") || _ad="${APP_DATA_DIR:-$COMPOSE_DIR/$_s/App-Data}"
         [[ "$_ad" == ./* ]] && _ad="$COMPOSE_DIR/$_s/${_ad#./}"
         if [[ -d "$_ad/Traefik" ]]; then printf '%s\t%s\n' "$_s" "$_ad"; return 0; fi
         [[ -n "$first" ]] || first="$_s	$_ad"
@@ -14775,7 +14895,7 @@ _find_traefik_routes_dir() {
     # 1. Per-stack resolution: ./App-Data → $COMPOSE_DIR/$stack/App-Data
     #    This is the pattern used by handle_traefik_status() and template deploy
     for _s in $(_api_get_stacks); do
-        local _ad="${APP_DATA_DIR:-$COMPOSE_DIR/$_s/App-Data}"
+        local _ad; _ad=$(_stack_appdata_override "$_s") || _ad="${APP_DATA_DIR:-$COMPOSE_DIR/$_s/App-Data}"
         [[ "$_ad" == ./* ]] && _ad="$COMPOSE_DIR/$_s/${_ad#./}"
         [[ -d "$_ad/Traefik/custom_routes" ]] && { printf '%s' "$_ad/Traefik/custom_routes"; return; }
     done
@@ -17583,7 +17703,7 @@ handle_template_deploy() {
     # -----------------------------------------------------------------------
     local traefik_routes_dir="" traefik_domain=""
     for _check_stack in $(_api_get_stacks); do
-        local _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
+        local _check_appdata; _check_appdata=$(_stack_appdata_override "$_check_stack") || _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
         [[ "$_check_appdata" == ./* ]] && _check_appdata="$COMPOSE_DIR/$_check_stack/${_check_appdata#./}"
         if [[ -d "$_check_appdata/Traefik/custom_routes" ]]; then
             # Verify this stack actually runs Traefik (not a stale artifact)
@@ -17628,7 +17748,7 @@ handle_template_deploy() {
         config_target_name=$(printf '%s' "$meta" | jq -r '.config_path // empty' 2>/dev/null)
         if [[ -n "$config_target_name" ]]; then
             # Config goes into the TARGET STACK's App-Data, not the repo root
-            local app_data="${APP_DATA_DIR:-$target_dir/App-Data}"
+            local app_data; app_data=$(_stack_appdata_override "$target_stack") || app_data="${APP_DATA_DIR:-$target_dir/App-Data}"
             # If APP_DATA_DIR is a relative path (e.g. ./App-Data), resolve it relative to target stack
             if [[ "$app_data" == ./* ]]; then
                 app_data="$target_dir/${app_data#./}"
@@ -17773,7 +17893,7 @@ handle_template_deploy() {
     fi
 
     # Every App-Data bind mount of the template's services exists before they start (files as files)
-    local _pm_ad="${APP_DATA_DIR:-$target_dir/App-Data}"
+    local _pm_ad; _pm_ad=$(_stack_appdata_override "$target_stack") || _pm_ad="${APP_DATA_DIR:-$target_dir/App-Data}"
     [[ "$_pm_ad" == ./* ]] && _pm_ad="$target_dir/${_pm_ad#./}"
     _template_prepare_mounts "$tdir/docker-compose.yml" "$_pm_ad"
 
@@ -17782,7 +17902,7 @@ handle_template_deploy() {
     # the top of the handler found nothing because the directory didn't exist yet.
     if [[ -z "$traefik_routes_dir" ]]; then
         for _check_stack in $(_api_get_stacks); do
-            local _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
+            local _check_appdata; _check_appdata=$(_stack_appdata_override "$_check_stack") || _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
             [[ "$_check_appdata" == ./* ]] && _check_appdata="$COMPOSE_DIR/$_check_stack/${_check_appdata#./}"
             if [[ -d "$_check_appdata/Traefik/custom_routes" ]]; then
                 if grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_check_stack/docker-compose.yml" 2>/dev/null; then
@@ -17798,7 +17918,7 @@ handle_template_deploy() {
     # when deploying the authelia template. Secrets are auto-generated.
     # -----------------------------------------------------------------------
     if [[ "$name" == "authelia" ]]; then
-        local _auth_base="${APP_DATA_DIR:-$target_dir/App-Data}"
+        local _auth_base; _auth_base=$(_stack_appdata_override "$target_stack") || _auth_base="${APP_DATA_DIR:-$target_dir/App-Data}"
         [[ "$_auth_base" == ./* ]] && _auth_base="$target_dir/${_auth_base#./}"
         local _auth_dir="$_auth_base/Authelia/config"
         # Write to a private temp dir first, then copy with docker (handles root-owned target dirs)
@@ -18500,7 +18620,7 @@ print('\n'.join(result))
         [[ -f "$target_dir/.env" ]] && env_up=(--env-file "$target_dir/.env")
         local _puid="${PUID:-1000}"
         local _pgid="${PGID:-1000}"
-        local _ad="${APP_DATA_DIR:-$target_dir/App-Data}"
+        local _ad; _ad=$(_stack_appdata_override "$target_stack") || _ad="${APP_DATA_DIR:-$target_dir/App-Data}"
         [[ "$_ad" == ./* ]] && _ad="$target_dir/${_ad#./}"
         local _svc_list=""
         _svc_list=$(printf '%s' "$template_services" | tr '\n' ' ')
@@ -19240,7 +19360,7 @@ handle_template_undeploy() {
     local _routes_dir=""
     local _sd_stack
     for _sd_stack in $(_api_get_stacks); do
-        local _sd_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_sd_stack/App-Data}"
+        local _sd_appdata; _sd_appdata=$(_stack_appdata_override "$_sd_stack") || _sd_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_sd_stack/App-Data}"
         [[ "$_sd_appdata" == ./* ]] && _sd_appdata="$COMPOSE_DIR/$_sd_stack/${_sd_appdata#./}"
         if [[ -d "$_sd_appdata/Traefik/custom_routes" ]] && \
            grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_sd_stack/docker-compose.yml" 2>/dev/null; then
@@ -19292,7 +19412,7 @@ handle_template_undeploy() {
 
     if [[ "$remove_data" == "true" ]]; then
         # Heavy cleanup in background — app-data, images (prevents HTTP timeout)
-        local _app_data="${APP_DATA_DIR:-$target_dir/App-Data}"
+        local _app_data; _app_data=$(_stack_appdata_override "$target_stack") || _app_data="${APP_DATA_DIR:-$target_dir/App-Data}"
         [[ "$_app_data" == ./* ]] && _app_data="$target_dir/${_app_data#./}"
         local _config_path
         _config_path=$(printf '%s' "$meta" | jq -r '.config_path // empty' 2>/dev/null)
@@ -20907,6 +21027,36 @@ _automation_tick() {
     done < <(jq -c '.[] | select(.enabled == true)' "$sched_file" 2>/dev/null)
 }
 
+# A stack whose App-Data is on a drive of its own, with the drive not there (no marker): Docker restarts containers by
+# itself at boot and would give them an empty folder on the system disk. They are stopped, and it is said once; and
+# once more when the drive is back. State: .data/appdata-guard.json {"<stack>": "missing"}.
+_appdata_guard_tick() {
+    local sf="$BASE_DIR/.data/appdata-guard.json" st s p was ids
+    st=$(jq -c . "$sf" 2>/dev/null) || st='{}'; [[ "$st" == \{* ]] || st='{}'
+    for s in "$COMPOSE_DIR"/*/; do
+        s="${s%/}"; s="${s##*/}"
+        p=$(_stack_appdata_override "$s") || continue
+        [[ -f "$COMPOSE_DIR/$s/RUNS-IN-A-VM.txt" ]] && continue
+        was=$(jq -r --arg s "$s" '.[$s] // ""' <<< "$st") || was=""
+        if dcs_appdata_marker_ok "$p" "$s"; then
+            if [[ "$was" == missing ]]; then
+                _notify_send "💾 $s: its drive is back" "$s: its App-Data $p is back — start the stack from the Stacks page" default "floppy_disk" "appdata" "$(jq -nc --arg s "$s" --arg p "$p" '{stack: $s, path: $p, state: "back"}')" >/dev/null 2>&1 || true
+                st=$(jq -c --arg s "$s" 'del(.[$s])' <<< "$st")
+            fi
+            continue
+        fi
+        ids=$(_backup_stack_running "$s" 2>/dev/null) || ids=""
+        if [[ -n "$ids" ]]; then compose_with_secrets "$COMPOSE_DIR/$s/docker-compose.yml" "$COMPOSE_DIR/$s/.env" stop >/dev/null 2>&1 || true; fi
+        if [[ "$was" != missing ]]; then
+            _notify_send "💾 $s was not started" "$s was not started: its App-Data $p is not there — is the drive mounted?" high "warning" "appdata" "$(jq -nc --arg s "$s" --arg p "$p" '{stack: $s, path: $p, state: "missing"}')" >/dev/null 2>&1 || true
+            st=$(jq -c --arg s "$s" '. + {($s): "missing"}' <<< "$st")
+        fi
+    done
+    mkdir -p "$(dirname "$sf")" 2>/dev/null
+    printf '%s\n' "$st" > "$sf.tmp" 2>/dev/null && mv -f "$sf.tmp" "$sf"
+    return 0
+}
+
 # Background loop started by start_server. Errors in one rule never stop it.
 _dcs_automation_loop() {
     trap 'kill "${_sleep_pid:-}" 2>/dev/null; exit 0' TERM INT
@@ -20917,6 +21067,7 @@ _dcs_automation_loop() {
         if (( minute != last_minute )); then
             last_minute=$minute
             _automation_tick "$now" </dev/null >>"$AUTOMATION_LOG" 2>&1
+            _appdata_guard_tick </dev/null >/dev/null 2>&1 || true
             (( minute % 10 == 0 )) && _crowdsec_whitelist_sync >/dev/null 2>&1
             # keep the log bounded
             if [[ -f "$AUTOMATION_LOG" ]] && (( $(wc -c < "$AUTOMATION_LOG" 2>/dev/null || echo 0) > 1048576 )); then
@@ -23345,7 +23496,7 @@ _authelia_config_file() {
     local s ad
     for s in $(_api_get_stacks); do
         grep -qsE '^[[:space:]]+container_name:[[:space:]]*"?Authelia"?[[:space:]]*$' "$COMPOSE_DIR/$s/docker-compose.yml" || continue
-        ad="${APP_DATA_DIR:-$COMPOSE_DIR/$s/App-Data}"; [[ "$ad" == ./* ]] && ad="$COMPOSE_DIR/$s/${ad#./}"
+        ad=$(_stack_appdata_override "$s") || ad="${APP_DATA_DIR:-$COMPOSE_DIR/$s/App-Data}"; [[ "$ad" == ./* ]] && ad="$COMPOSE_DIR/$s/${ad#./}"
         [[ -f "$ad/Authelia/config/configuration.yml" ]] && { printf '%s' "$ad/Authelia/config/configuration.yml"; return 0; }
     done
     return 1
@@ -26081,7 +26232,7 @@ _fleet_appdata_status_json() {
     local name="$1" id="" ad mounted=false held=false enabled=true tool=false m mname=""
     id=$(_fleet_member_for_stack "$name" 2>/dev/null) || id=""
     if [[ -z "$id" ]]; then
-        ad="${APP_DATA_DIR:-./App-Data}"; [[ "$ad" == /* ]] || ad="$COMPOSE_DIR/$name/${ad#./}"
+        ad=$(_stack_appdata_override "$name") || { ad="${APP_DATA_DIR:-./App-Data}"; [[ "$ad" == /* ]] || ad="$COMPOSE_DIR/$name/${ad#./}"; }
         jq -nc --arg s "$name" --arg p "$ad" --argjson e "$([[ -d "$ad" ]] && echo true || echo false)" '{stack: $s, placement: "local", path: $p, exists: $e}'
         return 0
     fi
@@ -26857,6 +27008,7 @@ handle_fleet_provision() {
         if [[ "$mv" == true && "$phase" == check ]]; then
             local _mkb=0 _md _mst
             while IFS= read -r _md; do [[ -n "$_md" ]] || continue; _mst=$(_fleet_dir_stat "$COMPOSE_DIR/$stack/$_md") || _mst=""; [[ "$_mst" =~ ^[0-9]+\ [0-9]+$ ]] && _mkb=$(( _mkb + ${_mst% *} )); done < <(_fleet_stack_data_dirs "$stack")
+            if _md=$(_stack_appdata_override "$stack") && [[ -d "$_md" ]]; then _mst=$(_fleet_dir_stat "$_md") || _mst=""; [[ "$_mst" =~ ^[0-9]+\ [0-9]+$ ]] && _mkb=$(( _mkb + ${_mst% *} )); fi
             (( disk * 1048576 > _mkb + _mkb / 5 + 8 * 1048576 )) || { _api_error 400 "$stack holds $(( _mkb / 1048576 + 1 )) GB of data: a disk of ${disk} GB is too small for it, give the VM at least $(( 10 + _mkb * 12 / 10 / 1048576 + 1 )) GB"; return; }
         fi
         if [[ -n "$ip" ]]; then
@@ -26982,6 +27134,12 @@ _fleet_dir_tar() {
     esac
 }
 # The folders of a stack that hold what it wrote (the link to a VM's App-Data is not one of them)
+# After a stack moved into a VM: its App-Data lives in the VM's stack folder; the hub's .env line becomes a comment
+_appdata_unpin() {
+    local f="$COMPOSE_DIR/${1:?}/.env" p
+    p=$(dcs_stack_appdata_override "$f") || return 0
+    sed -i -E "s|^[[:space:]]*(export[[:space:]]+)?APP_DATA_DIR=.*$|# APP_DATA_DIR=\"$p\"  (on the hub, before the move into a VM; the VM keeps its App-Data in the stack's folder)|" "$f"
+}
 _fleet_stack_data_dirs() {
     local src="$1" d
     for d in App-Data app-data data; do
@@ -27003,9 +27161,11 @@ _fleet_stack_volumes() {
 _fleet_stack_outside_paths() {
     local src="$1" dir="$COMPOSE_DIR/$1" cfg
     local -a args=(-f "$dir/docker-compose.yml"); [[ -f "$dir/.env" ]] && args+=(--env-file "$dir/.env")
-    cfg=$( cd "$dir" 2>/dev/null && timeout 20 $DOCKER_COMPOSE_CMD "${args[@]}" config --format json 2>/dev/null ) || cfg=""
+    # a stack's App-Data on a drive of its own travels with it (_fleet_move_data copies it): it is not a folder left behind
+    local _ov; _ov=$(_stack_appdata_override "$src") || _ov=""
+    cfg=$( cd "$dir" 2>/dev/null && { [[ -z "$_ov" ]] || export APP_DATA_DIR="$_ov"; } && timeout 20 $DOCKER_COMPOSE_CMD "${args[@]}" config --format json 2>/dev/null ) || cfg=""
     if [[ "$cfg" == \{* ]]; then
-        jq -r --arg d "$dir/" '[.services[]?.volumes[]? | select(.type == "bind") | .source | select(startswith($d) | not) | select(test("^/(var/run|run)/docker\\.sock$") | not) | select(test("^/(proc|sys|dev|etc/(localtime|timezone|os-release))") | not)] | unique | .[]' <<< "$cfg" 2>/dev/null
+        jq -r --arg d "$dir/" --arg ov "$_ov" '[.services[]?.volumes[]? | select(.type == "bind") | .source | select(startswith($d) | not) | select(($ov != "") and (. == $ov or startswith($ov + "/")) | not) | select(test("^/(var/run|run)/docker\\.sock$") | not) | select(test("^/(proc|sys|dev|etc/(localtime|timezone|os-release))") | not)] | unique | .[]' <<< "$cfg" 2>/dev/null
     fi
     return 0
 }
@@ -27015,7 +27175,8 @@ _fleet_hub_only() { [[ " $FLEET_HUB_ONLY_STACKS " == *" $1 "* ]]; }
 # _fleet_stack_cfg_json STACK — the stack's compose file as Docker Compose resolves it (JSON), or nothing
 _fleet_stack_cfg_json() {
     local dir="$COMPOSE_DIR/$1"; local -a args=(-f "$dir/docker-compose.yml"); [[ -f "$dir/.env" ]] && args+=(--env-file "$dir/.env")
-    ( cd "$dir" 2>/dev/null && timeout 20 $DOCKER_COMPOSE_CMD "${args[@]}" config --format json 2>/dev/null ) || true
+    local _ov; _ov=$(_stack_appdata_override "$1") || _ov=""
+    ( cd "$dir" 2>/dev/null && { [[ -z "$_ov" ]] || export APP_DATA_DIR="$_ov"; } && timeout 20 $DOCKER_COMPOSE_CMD "${args[@]}" config --format json 2>/dev/null ) || true
 }
 # _fleet_move_blockers STACK — one line per reason the stack cannot be moved into a VM without losing something
 _fleet_move_blockers() {
@@ -27144,6 +27305,12 @@ handle_fleet_move_check() {
         kb=$(( kb + ${st% *} )); nfiles=$(( nfiles + ${st#* } ))
         dirs=$(jq -c --arg n "$d" --argjson kb "${st% *}" --argjson f "${st#* }" '. + [{name: $n, kb: $kb, files: $f}]' <<< "$dirs")
     done < <(_fleet_stack_data_dirs "$stack")
+    # its App-Data on a drive of its own travels too: into the VM's own App-Data
+    local _mc_ov; if _mc_ov=$(_stack_appdata_override "$stack") && [[ -d "$_mc_ov" ]]; then
+        st=$(_fleet_dir_stat "$_mc_ov") || st=""; [[ "$st" =~ ^[0-9]+\ [0-9]+$ ]] || st="0 0"
+        kb=$(( kb + ${st% *} )); nfiles=$(( nfiles + ${st#* } ))
+        dirs=$(jq -c --arg p "$_mc_ov" --argjson kb "${st% *}" --argjson f "${st#* }" '. + [{name: "App-Data", path: $p, kb: $kb, files: $f}]' <<< "$dirs")
+    fi
     while IFS=$'\t' read -r v short; do
         [[ -n "$v" ]] || continue
         st=$(_fleet_dir_stat "volume:$v") || st=""; [[ "$st" =~ ^[0-9]+\ [0-9]+$ ]] || st="0 0"
@@ -27188,6 +27355,20 @@ _fleet_move_data() {
         (( got == files )) || { FLEET_JOB_ERR="$d: the hub has $files files, the VM received $got (the hub's copy is untouched)"; return 1; }
         _job_log "$id" "✓ $d is in the VM: $files files, owners and permissions as they were"
     done < <(_fleet_stack_data_dirs "$src")
+    # its App-Data on a drive of its own becomes the VM's App-Data (the drive's copy stays as it is)
+    local _mv_ov
+    if _mv_ov=$(_stack_appdata_override "$src"); then
+        st=$(_fleet_dir_stat "$_mv_ov"); [[ "$st" =~ ^[0-9]+\ [0-9]+$ ]] || { FLEET_JOB_ERR="could not read $src's App-Data at $_mv_ov on the hub (is its drive mounted?)"; return 1; }
+        kb=${st% *}; files=${st#* }
+        free=$(_fleet_ssh "$ip" "df -Pk \$HOME | awk 'NR==2 {print \$4}'" 2>/dev/null); [[ "$free" =~ ^[0-9]+$ ]] || free=0
+        (( free > kb + kb / 10 + 1048576 )) || { FLEET_JOB_ERR="$src's App-Data holds $(( kb / 1024 )) MB and the VM has $(( free / 1024 )) MB free: give the VM a larger disk (Proxmox page), then Retry"; return 1; }
+        _job_log "$id" "copying App-Data (on $_mv_ov): $(( kb / 1024 )) MB in $files files"
+        _fleet_dir_tar "$_mv_ov" 2>/dev/null | _fleet_ssh "$ip" "sudo mkdir -p $remote/App-Data && sudo tar --numeric-owner -xpf - -C $remote/App-Data" 2>/dev/null
+        [[ "${PIPESTATUS[0]}" == 0 && "${PIPESTATUS[1]}" == 0 ]] || { FLEET_JOB_ERR="copying $src's App-Data into the VM stopped part-way (the drive's copy is untouched)"; return 1; }
+        got=$(_fleet_ssh "$ip" "sudo find $remote/App-Data -type f | wc -l" 2>/dev/null); [[ "$got" =~ ^[0-9]+$ ]] || got=-1
+        (( got >= files )) || { FLEET_JOB_ERR="App-Data: the hub has $files files, the VM received $got (the drive's copy is untouched)"; return 1; }
+        _job_log "$id" "✓ App-Data (from $_mv_ov) is in the VM: $files files, owners and permissions as they were"
+    fi
     while IFS=$'\t' read -r v short; do
         [[ -n "$v" && -n "$short" ]] || continue
         st=$(_fleet_dir_stat "volume:$v"); [[ "$st" =~ ^[0-9]+\ [0-9]+$ ]] || { FLEET_JOB_ERR="could not read the volume $v on the hub"; return 1; }
@@ -27795,6 +27976,7 @@ _fleet_job_run() {
                     mv_stopped=false      # it runs in the VM: the hub lets go
                     local _odn _odr; _odn=$(_fleet_stack_on_demand "$src")   # read before the hub sets its Sablier blocks aside
                     _fleet_move_unlist "$src" && _job_log "$id" "$src is out of the hub's own list of stacks"
+                    if _stack_appdata_external "$src"; then _appdata_unpin "$src"; _job_log "$id" "$src's App-Data is the VM's own now; its copy on the hub's drive is kept as it was"; fi
                     _fleet_move_retire_routes "$id" "$src"
                     _job_log "$id" "the hub's copy of the data stays in Stacks/$src (App-Data and volumes are not deleted): remove it yourself once you trust the VM"
                     _audit_log "fleet_stack_moved" "the stack $src of this server now runs in VM $vmid ($ip) with its data; the hub keeps its own copy"

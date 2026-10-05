@@ -182,6 +182,11 @@ start_service_stack() {
     else
         local exit_code=$?
 
+        # A stack whose App-Data drive is not there was refused on purpose (compose_with_secrets): say why
+        if [[ -s "$compose_output" ]] && grep -q '^\[DCS\] .* is not there' "$compose_output" 2>/dev/null; then
+            log_error "$(grep -m1 '^\[DCS\] .* is not there' "$compose_output" | sed 's/^\[DCS\] //')"
+        fi
+
         # On failure, log the full output for diagnostics
         if [[ -s "$compose_output" ]]; then
             {
