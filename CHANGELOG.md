@@ -5,6 +5,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [4.0.33] - 2026-10-05
+
+### Added
+
+- **More on every stack card** (`GET /stacks`, one extra docker call for the whole list): `total_containers` (the card
+  says *3 running · 1 sleeping · 2 stopped*, stopped in red), `cpu_percent` and `mem_percent` of its running containers
+  (from the stats cache; null until sampled), `updates_available` (images with a newer version at the last registry
+  check), `ports` (published TCP ports beyond localhost) and `links` (the hostnames Traefik serves it on), and
+  `last_backup` (when it was last in a backup, recorded per stack from this release on). A stack's own App-Data now
+  reports the free space of its disk too, and a VM's card shows the VM's address.
+- **Update everything**: `POST /images/update-all` starts the unattended image update now (pull what runs, recreate the
+  containers on the old copy; 409 while one runs). The dashboard offers it, with a confirmation, next to the automatic
+  image updates on the Updates page and now on the Images page too, for the servers the chips select.
+- `GET /backups/config` lists the App-Data folders on drives a backup takes (`appdata_dirs`); the dashboard's
+  *Start a backup* shows them.
+
+### Changed
+
+- The dashboard suggests `<drive>/.dcs/Stacks/<stack>/App-Data` for a stack's App-Data on a drive (the layout of DCS's
+  own folder). Stacks made with the 4.0.32 suggestion keep their folder.
+
 ## [4.0.32] - 2026-10-05
 
 ### Added
