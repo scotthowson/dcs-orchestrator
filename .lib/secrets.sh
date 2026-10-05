@@ -177,6 +177,25 @@ secrets_env_exports() {
 # Usage: compose_with_secrets COMPOSE_FILE ENV_FILE SUBCOMMAND [ARGS...]
 # ENV_FILE may be empty. References are collected from the compose file, the
 # stack .env and the root .env.
+# A stack's App-Data on a drive of its own: the absolute APP_DATA_DIR of its .env (quotes, a trailing comment, doubled and
+# trailing slashes dropped); 1 when the stack has none or a relative one (then the usual rule applies: ./App-Data).
+dcs_stack_appdata_override() {
+    local f="$1" v
+    [[ -n "$f" && -f "$f" ]] || return 1
+    v=$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?APP_DATA_DIR=//p' "$f" 2>/dev/null | tail -n 1) || v=""
+    v=$(printf '%s' "$v" | sed -E 's/^"([^"]*)".*$/\1/; t; s/^'"'"'([^'"'"']*)'"'"'.*$/\1/; t; s/[[:space:]]+#.*$//; s/[[:space:]]+$//') || v=""
+    [[ "$v" == /* ]] || return 1
+    v=$(printf '%s' "$v" | tr -s '/'); [[ "$v" == / ]] || v="${v%/}"
+    printf '%s' "$v"
+}
+# The drive is really there: the marker DCS wrote when the stack was created names this stack
+dcs_appdata_marker_ok() {
+    local d="$1" s="$2" m
+    [[ -f "$d/.dcs-appdata" ]] || return 1
+    m=$(grep -oE '"stack"[[:space:]]*:[[:space:]]*"[^"]*"' "$d/.dcs-appdata" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/') || m=""
+    [[ -n "$m" && "$m" == "$s" ]]
+}
+
 # The shared "proxy" network, made when it is missing. A Traefik's own stack declares it by name and Compose makes it with
 # its labels; where no Traefik stack has (a VM of a fleet), or after a prune took it, a stack that names it as external
 # could not come up. It carries the label Compose looks for, so a Traefik stack started later takes it over instead of
@@ -197,6 +216,20 @@ compose_with_secrets() {
     fi
     (
         eval "$(secrets_env_exports "$compose_file" "${env_file:-/dev/null}" "$BASE_DIR/.env")"
+        # a stack whose App-Data is on a drive of its own: Compose gets that path (an exported APP_DATA_DIR would otherwise
+        # win over the stack's .env), and nothing starts while the drive is not there (Docker would make an empty folder)
+        _dcs_ad="" _dcs_st=""
+        if _dcs_ad=$(dcs_stack_appdata_override "$env_file"); then
+            export APP_DATA_DIR="$_dcs_ad"
+            _dcs_st=$(basename "$(dirname "$compose_file")")
+            case " $* " in
+                *" up "*|*" start "*|*" restart "*|*" create "*|*" run "*)
+                    if ! dcs_appdata_marker_ok "$_dcs_ad" "$_dcs_st"; then
+                        echo "[DCS] $_dcs_st was not started: its App-Data $_dcs_ad is not there — is the drive mounted?" >&2
+                        exit 3
+                    fi ;;
+            esac
+        fi
         ${DOCKER_COMPOSE_CMD:-docker compose} "${args[@]}" "$@"
     )
 }
