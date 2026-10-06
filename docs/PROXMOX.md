@@ -386,8 +386,8 @@ Updates page says *Updated by its hub* instead of looking for releases.
 The hub is the one place to look at and to run the whole server. Every page that lists things
 opens on **Everywhere** on a hub — the hub and every VM in one list, each row carrying a capsule
 that says where it lives (*Hub*, or *VM #103 · media-services*) — and the same row of chips
-narrows it to the hub alone or to one VM: Health, Images, Updates, Networks, Volumes, Snapshots,
-Automations, Schedules, Secrets and Activity all share the one choice, and it
+narrows it to the hub alone or to one VM: Health, Images, Updates, Networks, Volumes, Backups,
+Automation, Secrets and Activity all share the one choice, and it
 is remembered. *Everywhere* is a view: to change something, pick the hub or the VM it lives on
 (clicking a row's capsule does that), and the change happens on that DCS through the hub. The API
 is the same: `?fleet=1` on `GET /health`, `/images`, `/networks`, `/volumes`, `/events`,
@@ -421,14 +421,14 @@ Some things go further than a merged list:
   VM writes the routes for the services it already runs (`POST /traefik/routes/rebuild` does
   the same by hand, on any DCS that got Traefik after its stacks).
 - **Every page, every VM.** *Everywhere* on the Topology page is the fleet map: the hub's stacks and
-  containers and every reachable VM's, each under its server's band. Containers, Logs, Uptime, Topology, Backup, File Browser,
-  Environment, System and Maintenance take the same Everywhere / Hub / VM choice as the list
+  containers and every reachable VM's, each under its server's band. Containers, Logs, Topology, File Browser,
+  Environment, System and Cleanup take the same Everywhere / Hub / VM choice as the list
   pages: a container's buttons (start, stop, restart, recreate, remove, env, exec, logs, Sablier,
   Nuke & reinstall) act on the VM it lives in, a stack's backup runs on its VM and restores go to
   the archive's own server, a VM's files and `.env` open through the hub, OS updates on a VM the
-  hub built need no password, and maintenance numbers add up (the hub answers the Maintenance
+  hub built need no password, and maintenance numbers add up (the hub answers the Cleanup
   page's three questions for the whole fleet in one call each: `GET /maintenance/report`,
-  `/orphans`, `/disk` with `?fleet=1`). The Live Events page follows the same choice
+  `/orphans`, `/disk` with `?fleet=1`). Activity's Live stream tab follows the same choice
   (`GET /stream?fleet=1` / `?member=`). The hub only forwards a container request to the
   member whose recorded placements include the container's stack.
 - **A shell in every VM.** The Terminal page has the Hub / VM chips: unlock it once with the

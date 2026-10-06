@@ -74,8 +74,8 @@ The dashboard does everything the commands do, and more:
   Command* for one-off commands; *Start on demand*, *Theme*, *Add to Homarr* and *Nuke & reinstall*.
 - **Terminal**: a shell on the host. Unlock it with the Linux password of the account DCS runs as (or
   root's). Each command may run 60 seconds, and every command is in the audit log.
-- **Also**: Images, Networks, Volumes, Logs, Live Events, Topology, Uptime, Diagnostics, Maintenance
-  (prune, orphans, disk use) and a File Browser.
+- **Also**: Images, Networks, Volumes, Logs, Topology, Diagnostics, Cleanup (prune, orphans, disk use)
+  and a File Browser. Activity has the event history, the live stream and the audit log as tabs.
 
 On a hub, every one of these works across the fleet: the list pages open on *Everywhere* with a chip
 for the hub or one VM, and each action runs where the thing lives.
@@ -177,8 +177,8 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 
 | Kind | What it holds | Where |
 |---|---|---|
-| **Backup** | Everything a server runs on: every stack's folder (compose, `.env`, App-Data, data) with its named volumes, and the install's own state | Backup page; set `BACKUP_DEST_DIR` first; `BACKUP_RETENTION_COUNT` kept of each kind |
-| **Snapshot** | The configuration: every stack's compose, `.env` and config files, the root `.env`, accounts and rules, templates, Traefik's routes, the schedules | Snapshots page; download or restore any one |
+| **Backup** | Everything a server runs on: every stack's folder (compose, `.env`, App-Data, data) with its named volumes, and the install's own state | Backups page (Maintenance → Backups); set `BACKUP_DEST_DIR` first; `BACKUP_RETENTION_COUNT` kept of each kind |
+| **Snapshot** | The configuration: every stack's compose, `.env` and config files, the root `.env`, notification rules, templates, Traefik's routes, the timed rules (a restore never brings back the root `.env`, accounts or secrets) | Backups page, Snapshots view; download or restore any one |
 | **Rollback snapshot** | A stack's files, taken before a change | Per stack, `ROLLBACK_MAX_SNAPSHOTS` kept |
 | **Recovery bundle** | Everything needed to rebuild the install, encrypted | See [below](#the-recovery-bundle) |
 
@@ -285,7 +285,8 @@ where the drive should be. Every App-Data folder that came back is listed in `ap
   but the last checks failed), **Reconnecting…** (the dashboard is trying again by itself) and **Offline**
   (press *Retry*). While the link is down, the pages say so and show the last known state instead of a
   stale "healthy".
-- **Uptime** and **Diagnostics** show availability over time and a port and health matrix.
+- **Health**'s *Last 30 min* view and **Diagnostics** show availability over time (from Docker's own start, stop
+  and health events) and a port and health matrix.
 - **The proxy**: `GET /routes/certificates` lists the domain, the certificates and their expiry, a live
   probe of every route and Traefik's last errors (the Certificates panel on DNS & Routes).
 
@@ -312,7 +313,8 @@ channels of their own. [Discord guide](DISCORD.md) covers every event, the bot a
 
 ## Schedules and automations
 
-**Schedules** run an action on a cron timetable (*Schedules* page):
+**Timed rules** (schedules) run an action on a timetable; the *Automation* page lists them with the condition rules
+below, under one **Rules** tab, and keeps the server's own crontab on a tab of its own:
 
 | Action | What it does |
 |---|---|
