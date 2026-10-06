@@ -9,7 +9,7 @@ Everything DCS can do with Discord, and every click it takes. Four pieces, each 
 | **Notifications webhook** | The API posts embeds to a channel: container problems, deploys, backups, disk space, image updates, health changes, automations, UPS events, DCS self-updates | A channel webhook URL pasted into Config |
 | **CrowdSec alerts** | Every ban CrowdSec issues lands in a channel with the attacker's address, country, network, scenario and duration | The `crowdsec` template (uses the same webhook, or its own) |
 | **The bot** (`DCS Discord Bot` template) | Slash commands with buttons: `/status`, `/health`, `/containers`, `/restart`, `/deploy`, `/backup`, `/security` … | A Discord application with a bot token, plus a DCS bot account (created for you) |
-| **Rich Presence** (desktop app) | "Managing *your server* · 17/17 containers · all healthy" on your own Discord profile while DCS Manager is open | A Discord application ID pasted into the desktop app's Settings |
+| **Rich Presence** (desktop app) | "Managing *your server* · 17/17 containers · all healthy" on your own Discord profile while the DCS Orchestrator desktop app is open | A Discord application ID pasted into the desktop app's Settings |
 
 Discord IDs (server, channel, user, role) are copied with **Developer Mode** on: Discord → User Settings → Advanced → Developer Mode. Right-click anything → *Copy … ID*. IDs are not secrets; bot tokens and webhook URLs are.
 
@@ -37,7 +37,7 @@ Under the same Config section:
 
 | Setting | `.env` key | Meaning |
 | --- | --- | --- |
-| Discord name | `DISCORD_WEBHOOK_NAME` | The name the posts appear with (default `DCS Manager`) |
+| Discord name | `DISCORD_WEBHOOK_NAME` | The name the posts appear with (default `DCS Orchestrator`; the old default `DCS Manager` counts as unset, a name of your own is kept) |
 | Discord avatar | `DISCORD_WEBHOOK_AVATAR` | Any https image; empty = the DCS icon |
 | Dashboard URL | `DASHBOARD_PUBLIC_URL` | Every title links here (falls back to `https://ui.<PROXY_DOMAIN>`) |
 | Server name | `SERVER_NAME` | Shown as the author line of every embed |
@@ -195,13 +195,13 @@ The bot's own status line mirrors the server: *Watching 17 containers · all hea
 
 ## 4. Rich Presence (desktop app)
 
-1. [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application** → name it `DCS Manager` (a separate application from the bot keeps the profile text clean, but the bot's application works too).
-2. **General Information**: upload `app-icon.png` as the App Icon, fill **Terms of Service URL** and **Privacy Policy URL** — DCS Manager's live at
+1. [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application** → name it `DCS Orchestrator` (a separate application from the bot keeps the profile text clean, but the bot's application works too).
+2. **General Information**: upload `app-icon.png` as the App Icon, fill **Terms of Service URL** and **Privacy Policy URL** — the dashboard's live at
    `https://github.com/scotthowson/dcs-orchestrator-ui/blob/HEAD/TERMS.md` and
    `https://github.com/scotthowson/dcs-orchestrator-ui/blob/HEAD/PRIVACY.md`.
 3. **Rich Presence → Art Assets**: upload `presence-dcs.png` as `dcs`, `presence-healthy.png` as `healthy`, `presence-warning.png` as `warning` (the names matter).
 4. Copy the **Application ID**.
-5. DCS Manager (desktop) → Settings → **Discord Rich Presence** → paste the ID → switch it on. Discord must be running on the same computer. In Discord → User Settings → Activity Privacy, "Share your activity status" must be on.
+5. DCS Orchestrator (desktop app) → Settings → **Discord Rich Presence** → paste the ID → switch it on. Discord must be running on the same computer. In Discord → User Settings → Activity Privacy, "Share your activity status" must be on.
 
 Your profile then shows *Managing <server> · 17/17 containers · 9 stacks · all healthy*, how long the app has been open, and a "Get DCS" button. Everything shown is what the app already sees; nothing else leaves your machine.
 
@@ -209,7 +209,7 @@ Your profile then shows *Managing <server> · 17/17 containers · 9 stacks · al
 
 ## 5. Brand kit
 
-`brand/discord/` in the DCS Manager repository holds ready-made artwork (SVG sources, `render.sh` rebuilds the PNGs):
+`brand/discord/` in the dashboard's repository ([dcs-orchestrator-ui](https://github.com/scotthowson/dcs-orchestrator-ui)) holds ready-made artwork (SVG sources, `render.sh` rebuilds the PNGs):
 
 | File | Where to put it |
 | --- | --- |

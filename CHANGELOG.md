@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **One name: DCS Orchestrator.** The dashboard is no longer called "DCS Manager"; it is the dashboard of DCS
+  Orchestrator. The install folder (`~/.Docker-Compose-Skeleton-AIO`) stays where it is.
+- **The dashboard image is `ghcr.io/scotthowson/dcs-orchestrator-ui`.** The old name,
+  `ghcr.io/scotthowson/docker-compose-skeleton-ui`, carries the same image and stays published for a few releases.
+  Stacks/ is yours and an update never rewrites it, so the API moves the dashboard's compose file over when it starts:
+  only the image reference changes (the tag, the file's owner and mode are kept, the write is atomic), it says so once
+  in the API log, and a file already on the new name is left alone. The running dashboard is not restarted: the new
+  name takes effect on its next update or recreate. The image already on the machine gets the new name too (a local
+  `docker tag`, nothing downloaded), so the update check keeps working and a recreate needs no network.
+- **Discord posts come from "DCS Orchestrator"** by default (`DISCORD_WEBHOOK_NAME`). An `.env` that still holds the
+  old default, exactly `DCS Manager`, gets the new name; a name of your own is kept.
+- `GET /status` answers `server_name` (`SERVER_NAME` from `.env`, an empty string when unset), so the dashboard can show
+  the server's name under its own.
+
 ## [4.0.34] - 2026-10-05
 
 ### Security

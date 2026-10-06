@@ -302,12 +302,29 @@ echo "Automations, schedules and the cron matcher"
 _lib() { local -a _c=("$@"); ( set --; source "$API" >/dev/null 2>&1; "${_c[@]}" ) 2>/dev/null; }
 # the dashboard image is the one the core stack's compose file names: :latest for a release, a pinned tag for a release candidate
 UIC="$WORK/uic"; mkdir -p "$UIC/core" "$UIC/other"
-printf 'services:\n  dcs-ui:\n    container_name: DCS-UI\n    image: ghcr.io/scotthowson/docker-compose-skeleton-ui:4.0.0-rc.1\n' > "$UIC/core/docker-compose.yml"
+printf 'services:\n  dcs-ui:\n    container_name: DCS-UI\n    image: ghcr.io/scotthowson/dcs-orchestrator-ui:4.0.0-rc.1\n' > "$UIC/core/docker-compose.yml"
 printf 'services:\n  x:\n    container_name: Other\n    image: nginx:1\n' > "$UIC/other/docker-compose.yml"
-check "dashboard image: a pinned tag is followed"     "ghcr.io/scotthowson/docker-compose-skeleton-ui:4.0.0-rc.1" "$(COMPOSE_DIR=$UIC _lib _dcs_ui_image)"
-check "dashboard image: none named, then latest"       "ghcr.io/scotthowson/docker-compose-skeleton-ui:latest" "$(COMPOSE_DIR=$UIC/other _lib _dcs_ui_image)"
-sed -i 's#docker-compose-skeleton-ui:4.0.0-rc.1#docker-compose-skeleton-ui:${TAG:-latest}#' "$UIC/core/docker-compose.yml"
-check "dashboard image: a variable is not followed"   "ghcr.io/scotthowson/docker-compose-skeleton-ui:latest" "$(COMPOSE_DIR=$UIC _lib _dcs_ui_image)"
+check "dashboard image: a pinned tag is followed"     "ghcr.io/scotthowson/dcs-orchestrator-ui:4.0.0-rc.1" "$(COMPOSE_DIR=$UIC _lib _dcs_ui_image)"
+check "dashboard image: none named, then latest"       "ghcr.io/scotthowson/dcs-orchestrator-ui:latest" "$(COMPOSE_DIR=$UIC/other _lib _dcs_ui_image)"
+sed -i 's#dcs-orchestrator-ui:4.0.0-rc.1#dcs-orchestrator-ui:${TAG:-latest}#' "$UIC/core/docker-compose.yml"
+check "dashboard image: a variable is not followed"   "ghcr.io/scotthowson/dcs-orchestrator-ui:latest" "$(COMPOSE_DIR=$UIC _lib _dcs_ui_image)"
+# the image's old name (docker-compose-skeleton-ui) in a user's compose file moves to dcs-orchestrator-ui: that reference
+# only, the tag, owner and mode kept; a file already on the new name, other images and a missing file are left alone
+UIM="$WORK/uim"; mkdir -p "$UIM/core" "$UIM/other"
+printf 'services:\n  redis:\n    image: redis:7-alpine # docker-compose-skeleton-ui stays in a comment\n  dcs-ui:\n    container_name: DCS-UI\n    image: "ghcr.io/scotthowson/docker-compose-skeleton-ui:9.9.9-smoke"   # pinned\n    # image: ghcr.io/scotthowson/docker-compose-skeleton-ui:latest\n    restart: unless-stopped\n' > "$UIM/core/docker-compose.yml"
+printf 'services:\n  x:\n    container_name: Other\n    image: ghcr.io/scotthowson/docker-compose-skeleton-ui:1\n' > "$UIM/other/docker-compose.yml"
+chmod 640 "$UIM/core/docker-compose.yml"; _uim_before=$(cat "$UIM/core/docker-compose.yml")
+check "image rename: announced once"               1 "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image_migrate | grep -c 'Dashboard image renamed')"
+check "image rename: the tag is kept"              '    image: "ghcr.io/scotthowson/dcs-orchestrator-ui:9.9.9-smoke"   # pinned' "$(grep -m1 'dcs-orchestrator-ui' "$UIM/core/docker-compose.yml")"
+check "image rename: no other line changes"        1 "$(diff <(printf '%s\n' "$_uim_before") "$UIM/core/docker-compose.yml" | grep -c '^>')"
+check "image rename: the mode is kept"             640 "$(stat -c %a "$UIM/core/docker-compose.yml")"
+check "image rename: no temporary file left"       0 "$(find "$UIM/core" -name '*.dcs-tmp.*' | wc -l)"
+check "image rename: the dashboard follows"        "ghcr.io/scotthowson/dcs-orchestrator-ui:9.9.9-smoke" "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image)"
+check "image rename: other stacks untouched"       "ghcr.io/scotthowson/docker-compose-skeleton-ui:1" "$(sed -n 's/^ *image: //p' "$UIM/other/docker-compose.yml")"
+_uim_after=$(stat -c %Y.%i "$UIM/core/docker-compose.yml")
+check "image rename: the new name is left alone"   "0 $_uim_after" "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image_migrate | wc -l) $(stat -c %Y.%i "$UIM/core/docker-compose.yml")"
+check "image rename: no dashboard, nothing to do"  "rc=0" "$(COMPOSE_DIR=$UIM/none _lib _dcs_ui_image_migrate; echo "rc=$?")"
+command rm -rf "$UIM"
 VTOKEN=$(request POST /auth/login '{"username":"viewer","password":"viewer-pass-123"}' "${AUTH[@]}" | body_of | jq -r '.token // empty')
 check "viewer signed in again"          200 "$(viewer_request GET /stacks | status_of)"
 # Schedules run in the installation's TZ (from .env); compute test instants the same way
@@ -1455,7 +1472,10 @@ check "discord payload: fields"          3 "$(_lib _discord_payload "Plex is unh
 check "discord payload: emoji title"     yes "$(_lib _discord_payload "Plex is unhealthy" "m" default container_unhealthy '{}' | jq -r '.embeds[0].title' | grep -q '^🩺 ' && echo yes || echo no)"
 check "discord payload: own emoji kept"  "⚡ x" "$(_lib _discord_payload "⚡ x" "m" default power '{}' | jq -r '.embeds[0].title')"
 check "discord payload: urgent is rose"  15942494 "$(_lib _discord_payload "t" "m" urgent deploy_complete '{}' | jq '.embeds[0].color')"
-check "discord payload: identity"        "DCS Manager" "$(_lib _discord_payload "t" "m" default test '{}' | jq -r '.username')"
+check "discord payload: identity"        "DCS Orchestrator" "$(_lib _discord_payload "t" "m" default test '{}' | jq -r '.username')"
+check "discord name: the old default moves on"   "DCS Orchestrator" "$(DISCORD_WEBHOOK_NAME="DCS Manager" _lib _discord_name)"
+check "discord name: unset is the default"       "DCS Orchestrator" "$(DISCORD_WEBHOOK_NAME="" _lib _discord_name)"
+check "discord name: a name of its own is kept"  "Homelab Bot" "$(DISCORD_WEBHOOK_NAME="Homelab Bot" _lib _discord_payload "t" "m" default test '{}' | jq -r '.username')"
 check "discord payload: avatar"          yes "$(_lib _discord_payload "t" "m" default test '{}' | jq -r '.avatar_url' | grep -q '^https://' && echo yes || echo no)"
 check "discord payload: no pings"        0 "$(_lib _discord_payload "t" "m" default test '{}' | jq '.allowed_mentions.parse | length')"
 check "discord payload: bold identifiers" '**media**' "$(_lib _discord_payload "t" "m" default test '{"stack":"media"}' | jq -r '.embeds[0].fields[0].value')"
@@ -1485,7 +1505,12 @@ check "default wording: stopped"         "{container} stopped" "$(_lib eval '_no
 check "rule: cooldown stored"            15 "$(auth_request POST /notifications/rules '{"name":"cd","trigger":"container_stopped","cooldown_minutes":15}' | body_of | jq -r '.cooldown_minutes')"
 check "rule: cooldown optional"          null "$(auth_request POST /notifications/rules '{"name":"cd0","trigger":"container_stopped"}' | body_of | jq -r '.cooldown_minutes')"
 check "rule: bad cooldown"               400 "$(auth_request POST /notifications/rules '{"name":"cd2","trigger":"container_stopped","cooldown_minutes":"soon"}' | status_of)"
-check "config: discord name"             "DCS Manager" "$(auth_request GET /config | body_of | jq -r '.discord_webhook_name')"
+check "config: discord name"             "DCS Orchestrator" "$(auth_request GET /config | body_of | jq -r '.discord_webhook_name')"
+_dwn=$(grep -m1 '^DISCORD_WEBHOOK_NAME=' "$WORK/.env"); sed -i '/^DISCORD_WEBHOOK_NAME=/d' "$WORK/.env"; echo 'DISCORD_WEBHOOK_NAME="DCS Manager"' >> "$WORK/.env"
+check "config: the old discord name reads as the new" "DCS Orchestrator" "$(auth_request GET /config | body_of | jq -r '.discord_webhook_name')"
+sed -i '/^DISCORD_WEBHOOK_NAME=/d' "$WORK/.env"; echo 'DISCORD_WEBHOOK_NAME="Homelab Bot"' >> "$WORK/.env"
+check "config: a discord name of its own"  "Homelab Bot" "$(auth_request GET /config | body_of | jq -r '.discord_webhook_name')"
+sed -i '/^DISCORD_WEBHOOK_NAME=/d' "$WORK/.env"; [[ -n "$_dwn" ]] && printf '%s\n' "$_dwn" >> "$WORK/.env"
 check "config: cooldown minutes"         60 "$(auth_request GET /config | body_of | jq -r '.notify_cooldown_minutes')"
 check "bot role: may restart"            0 "$(_lib _api_bot_allowed POST /containers/Plex/restart; echo $?)"
 check "bot role: may deploy"             0 "$(_lib _api_bot_allowed POST /templates/it-tools/deploy; echo $?)"
@@ -3294,6 +3319,12 @@ command rm -rf "$_HB"
 _NB="$WORK/nocmd-bin"; mkdir -p "$_NB"; ln -sf /usr/bin/* /bin/* "$_NB"/ 2>/dev/null || true; command rm -f "$_NB/hostname" "$_NB/crontab"
 command rm -f "$WORK/.data/cache/"*.http
 check "no hostname command: the name is still known"   "$(uname -n)" "$(PATH="$_NB" auth_request GET /status | body_of | jq -r '.hostname' 2>/dev/null)"
+# the server's own name rides along for the dashboard's header: SERVER_NAME, an empty string when it is unset
+command rm -f "$WORK/.data/cache/"*.http
+check "status: the server's name"                      "$(grep -m1 '^SERVER_NAME=' "$WORK/.env" | cut -d= -f2- | tr -d '"')" "$(auth_request GET /status | body_of | jq -r '.server_name' 2>/dev/null)"
+_sn=$(grep -m1 '^SERVER_NAME=' "$WORK/.env"); sed -i '/^SERVER_NAME=/d' "$WORK/.env"; command rm -f "$WORK/.data/cache/"*.http
+check "status: no server name, an empty string"        '""' "$(auth_request GET /status | body_of | jq -c '.server_name' 2>/dev/null)"
+[[ -n "$_sn" ]] && printf '%s\n' "$_sn" >> "$WORK/.env"; command rm -f "$WORK/.data/cache/"*.http
 check "no hostname command: the helper answers"        "$(uname -n)" "$(PATH="$_NB" _lib _hostname)"
 check "no crontab command: an empty list, no error line" "0 " "$(PATH="$_NB" auth_request GET /system/crontab | body_of | jq -r '"\(.entries | length) \(.raw)"' 2>/dev/null)"
 command rm -rf "$_NB"

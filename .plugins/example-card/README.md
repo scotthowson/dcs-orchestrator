@@ -1,6 +1,6 @@
 # Example Card Plugin
 
-Demonstrates how to create custom dashboard cards for DCS Manager.
+Demonstrates how to create custom cards for the DCS Orchestrator dashboard.
 
 ## Plugin Structure
 

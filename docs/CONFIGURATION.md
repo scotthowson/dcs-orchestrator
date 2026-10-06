@@ -183,7 +183,7 @@ them finds them; [Templates → Traefik add-ons](TEMPLATES.md#traefik-add-ons) s
 | `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN` | *(empty)*, `dcs`, *(empty)* | Push notifications through an ntfy server; the token when it needs one |
 | `NTFY_PRIORITY` | `default` | ntfy priority |
 | `DISCORD_WEBHOOK_URL` | *(empty)* | A Discord channel webhook, or a `${SECRETS_…}` reference |
-| `DISCORD_WEBHOOK_NAME`, `DISCORD_WEBHOOK_AVATAR` | `DCS Manager`, *(the DCS icon)* | The name and picture the posts carry |
+| `DISCORD_WEBHOOK_NAME`, `DISCORD_WEBHOOK_AVATAR` | `DCS Orchestrator`, *(the DCS icon)* | The name and picture the posts carry |
 | `NOTIFY_COOLDOWN_MINUTES` | `60` | How often a container rule repeats the same event while the problem lasts (disk rules wait 6 h, image rules a day) |
 | `CRITICAL_CONTAINERS`, `IMPORTANT_CONTAINERS` | *(empty)* | Containers named in the ntfy start and stop reports |
 

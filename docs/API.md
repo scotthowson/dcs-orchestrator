@@ -59,7 +59,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | GET | `/` | public | API name, version, authentication mode, role (hub or node) and the endpoint list |
-| GET | `/status` | user | Host and Docker overview: containers, images, stacks, load, memory, disk, the graphics cards (NVIDIA, AMD, Intel) |
+| GET | `/status` | user | Host and Docker overview: containers, images, stacks, load, memory, disk, the graphics cards (NVIDIA, AMD, Intel); server_name is SERVER_NAME from .env (empty when unset) |
 | GET | `/health` | user | # GET /health?fleet=1 on a hub: the members' containers ride along (member, member_name, vmid on each row), the summary and the status cover the fleet, members[] says how each DCS is doing |
 | GET | `/config` | user | Effective configuration (secrets masked) |
 | GET | `/system` | user | Host resources: CPU, memory, uptime, kernel |

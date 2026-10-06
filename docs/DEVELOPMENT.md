@@ -9,7 +9,7 @@ How the code is laid out, how to test it, and how to run the API while you work 
 | Repository | What it holds |
 |---|---|
 | [dcs-orchestrator](https://github.com/scotthowson/dcs-orchestrator) (this one) | The Bash framework, the API, the stacks, the templates, the plugins, the VM images and these docs |
-| [dcs-orchestrator-ui](https://github.com/scotthowson/dcs-orchestrator-ui) | The dashboard: a React app built with Vite, published as the `ghcr.io/scotthowson/docker-compose-skeleton-ui` image and as Android, Linux and Windows apps |
+| [dcs-orchestrator-ui](https://github.com/scotthowson/dcs-orchestrator-ui) | The dashboard: a React app built with Vite, published as the `ghcr.io/scotthowson/dcs-orchestrator-ui` image and as Android, Linux and Windows apps |
 
 Everything here is Bash 4+, Docker Compose v2 and `jq`. There is no build step.
 
