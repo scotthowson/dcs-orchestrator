@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `419` in total.
+Every endpoint below is `422` in total.
 
 ## Access levels
 
@@ -472,6 +472,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/fleet/bootstrap` | public | The node installer for any Debian, Ubuntu, Fedora or Arch machine (needs ?token=, a valid join code; &stack= names the one stack the node carries): a shell script that installs Docker and the tools, fetches this hub's code, sets DCS up as a node and joins — run as a user with sudo: curl -fsSL '…' \| bash |
 | GET | `/storage/overview` | user | Storage overview |
 | GET | `/domains` | user | This server's domains: the primary one (the hub's stacks), the others, the default domain for new VMs, which VMs use which, and whether each has its certificate and sign-in |
+| GET | `/authelia/second-step` | user | The second step at sign-in to the apps behind Authelia: the setting (off, all, or apps and which), what Authelia's configuration says now, the apps that can ask for it, the sign-in address, and how a device is registered |
+| GET | `/authelia/verification-code` | admin | The one-time code Authelia last sent to confirm who is registering a device (its file notifier writes it on this server, not in an e-mail): the code, when it was sent and the subject (admin) |
 | GET | `/summary` | user | The server at a glance for whoever is signed in or holds an API key: the same answer as /feed/summary (version, stacks, containers, the machine's load and disk) |
 | GET | `/power` | user | UPS status: mains or battery, charge, runtime, load, and whether the watch loop runs |
 | GET | `/recovery` | admin | Recovery bundles on this box and how they are made (destination, off-box copy, retention, passphrase set?), the result of the last bundle restore, and upload: the largest bundle an upload may be and the room free |
@@ -531,6 +533,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/fleet/routes` | admin | The hub hands this DCS the other servers' routes for the Traefik that runs here {http: {routers, services}}; written as custom_routes/fleet-members.yml (admin: the hub's own account); 409 without a Traefik here |
 | POST | `/fleet/hub/domain` | admin | The hub hands this member the fleet's proxy domain {domain, force}: written as PROXY_DOMAIN when this DCS has none yet (or the example.com placeholder), so the routes it writes for its stacks carry the fleet's domain; a domain of its own (a Traefik here) is kept unless force is true |
 | POST | `/domains` | admin | Add a domain {domain}: one Cloudflare token covers it; it gets its wildcard certificate, its sign-in (auth.<domain>) and its apex record (admin) |
+| POST | `/authelia/second-step` | admin | Set the second step at sign-in {mode: off\|all\|apps, apps: ["dash","traefik"]}: kept in .env and written into Authelia's access rules (only the rules DCS manages; a copy of the file is kept), then Authelia restarts to read it. off brings back a password alone (admin) |
 | POST | `/domains/vm-default` | admin | The domain new VMs get {domain} ("" = this server's own) (admin) |
 | POST | `/fleet/members/{id}/domain` | admin | The VM answers under another of the hub's domains {domain} ("" = the hub's own): its routes move to it at once (admin) |
 | POST | `/fleet/docker-engine/update` | admin | Bring the Docker Engine up to date on members {members: ["id", …] or "all"} (each VM the hub built has passwordless sudo, so no password travels); the answer says what each member started |

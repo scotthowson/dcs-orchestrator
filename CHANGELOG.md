@@ -5,6 +5,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **A second step at sign-in to your apps (Authelia).** `GET/POST /authelia/second-step` keeps a setting in `.env`
+  (`AUTHELIA_SECOND_STEP` = `off`, the default and what every server had so far, `all` or `apps`, with
+  `AUTHELIA_SECOND_STEP_APPS` naming the apps) and writes it into Authelia's access rules: the rule DCS generates for
+  `*.<domain>` (now marked `# dcs-main-rule`) gets `one_factor` or `two_factor`, and for `apps` one rule of DCS's own,
+  between `# dcs-second-step: begin` and `end`, goes in front of it with the same subject and `two_factor`. Rules added
+  by hand are left alone, a copy of the file is kept (`configuration.yml.bak-<time>`), and Authelia restarts to read it.
+  A new Authelia follows the setting from its first start. `GET /authelia/verification-code` (admin) reads the one-time
+  code Authelia's file notifier last wrote on the server, so a device can be registered without e-mail.
+
 ## [4.0.35] - 2026-10-06
 
 ### Added
