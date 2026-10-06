@@ -112,8 +112,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | GET | `/setup/status` | public | Always available, no auth. Reports whether the server needs setup; a node answers its role and the hub that manages it (null until it joined one) |
-| GET | `/setup/defaults` | public | Defaults and detected system values for the setup wizard (anonymous until setup is complete, admin afterwards) |
-| POST | `/setup/restore` | public | First-run only: restore a recovery bundle sent by the setup wizard {content_b64, passphrase} |
+| GET | `/setup/defaults` | public | Defaults and detected system values for the setup wizard (anonymous until setup is complete, admin afterwards; the saved .env values only to the admin once one exists) |
+| POST | `/setup/restore` | public | First-run only: restore a recovery bundle sent by the setup wizard {content_b64, passphrase}; once an admin exists, only that admin |
 | POST | `/setup/configure` | user | Apply the setup wizard's settings and stack list |
 | POST | `/setup/complete` | user | Mark first-run setup as finished |
 

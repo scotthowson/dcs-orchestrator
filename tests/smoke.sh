@@ -1301,7 +1301,17 @@ check "recovery: pre-restore snapshot"  yes "$(ls "$WORK"/.snapshots/pre-restore
 : > "$WORK/.api-auth/.setup-complete"
 check "recovery: setup restore refused when set up" 403 "$(request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' "${AUTH[@]}" | status_of)"
 rm -f "$WORK/.api-auth/.setup-complete"
-check "recovery: setup restore rejects junk" 400 "$(request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' "${AUTH[@]}" | status_of)"
+# an admin exists but the wizard never finished: the bundle restore is that admin's, not a passer-by's
+SRA=$(request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' "${AUTH[@]}")
+check "recovery: setup restore needs the admin once one exists" 401 "$(printf '%s' "$SRA" | status_of)"
+check "recovery: …and says to sign in"  yes "$(printf '%s' "$SRA" | body_of | jq -r '.message' 2>/dev/null | grep -q 'Sign in' && echo yes || echo no)"
+check "recovery: setup restore rejects junk" 400 "$(auth_request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' | status_of)"
+# …and the saved settings the wizard resumes from are the admin's to read
+printf 'SMOKE_SETUP_MARK=resume-me\n' >> "$WORK/.env"
+check "setup defaults: open for the connection test" 200 "$(request GET /setup/defaults '' "${AUTH[@]}" | status_of)"
+check "setup defaults: saved values hidden from strangers" null "$(request GET /setup/defaults '' "${AUTH[@]}" | body_of | jq -r '.defaults.SMOKE_SETUP_MARK' 2>/dev/null)"
+check "setup defaults: saved values shown to the admin" resume-me "$(auth_request GET /setup/defaults | body_of | jq -r '.defaults.SMOKE_SETUP_MARK' 2>/dev/null)"
+sed -i '/^SMOKE_SETUP_MARK=/d' "$WORK/.env"
 UPB=$(base64 -w0 "$WORK/.data/recovery/$RBF")
 check "recovery: upload accepted"       200 "$(auth_request POST /recovery/upload "{\"filename\":\"dcs-recovery-smoke-20260101-000000.tar.gz.enc\",\"content_b64\":\"$UPB\"}" | status_of)"
 # a name the browser changed (a " (1)" on a second download) or a bad one is never used: the file is kept under one of ours

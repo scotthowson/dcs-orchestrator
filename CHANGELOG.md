@@ -5,6 +5,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **The setup wizard's restore was open to anyone after the admin existed.** Between creating the first admin and
+  finishing the wizard (a wizard closed half-way, or resumed later), `POST /setup/restore` took a recovery bundle from
+  anyone who could reach the API and replaced the server's accounts and settings with it. Once an admin exists it now
+  needs that admin's sign-in (401 otherwise, with the reason); a fresh install with no account yet is open as before.
+  In the same window `GET /setup/defaults` showed anyone the saved `.env` values (domain, email, paths; secrets were
+  already masked): it still answers the wizard's connection test, with the saved values only for the signed-in admin.
+
 ### Fixed
 
 - **Recovery bundle App-Data** (checked end to end: bundle → download → upload → restore, on the same machine and on a
