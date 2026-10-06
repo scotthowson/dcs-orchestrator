@@ -2203,6 +2203,7 @@ GET = {
     "/images": {"images": "nope", "total": "x"},
     "/images/check-updates": {"images": {"a": 1}, "total": [], "updates_available": "3", "stale": None, "registry_checked_at": 12},
     "/system/docker-engine": {"version": 5, "upgradable": "yes", "source": None, "last_update": "nope"},
+    "/system/os-updates": {"supported": "yes", "updates": "many", "security": 3, "reboot_required": "yes", "security_packages": "nope", "auto_updates": 7, "checked_at": "x"},
     "/fleet/feed": FEED,
 }
 POST = {
@@ -2278,6 +2279,9 @@ check "hostile: /fleet/images still 200"    200 "$(auth_request GET /fleet/image
 check "hostile: fleet image total numeric"  number "$(auth_request GET /fleet/images | body_of | jq -r '.total | type' 2>/dev/null)"
 check "hostile: engine card still 200"      200 "$(auth_request GET '/system/docker-engine?fleet=1' | status_of)"
 check "hostile: engine version a string"    string "$(auth_request GET '/system/docker-engine?fleet=1' | body_of | jq -r --arg m "$HMID" '.members[] | select(.id == $m) | .version | type' 2>/dev/null)"
+_HOU=$(auth_request GET '/system/os-updates?fleet=1' | body_of)
+check "hostile: OS updates, the hub first"   "null true" "$(jq -r --arg m "$HMID" '"\(.members[0].id) \([.members[].id] | index($m) != null)"' <<< "$_HOU" 2>/dev/null)"
+check "hostile: OS updates rebuilt by type"  "3 null null [] null 0" "$(jq -r --arg m "$HMID" '.members[] | select(.id == $m) | "\(.security) \(.updates) \(.reboot_required) \(.security_packages | tojson) \(.auto_updates.enabled) \(.checked_at)"' <<< "$_HOU" 2>/dev/null)"
 # the feed: routers are rebuilt from a whitelist; the hub's own hosts and foreign addresses never get through
 _envset TRAEFIK_FEED_ENABLED true; _envset TRAEFIK_FEED_TOKEN mock-feed-token; _envset DASHBOARD_PUBLIC_URL https://dash.smoke.test
 _HF=$(request GET '/traefik/dynamic?token=mock-feed-token' '' "${AUTH[@]}" | body_of)
@@ -3760,6 +3764,135 @@ check "wizard: …and reported, once"                  1 "$(printf '%s' "$_SCR" 
 check "wizard: a listed stack is never removed"      yes "$([[ -d "$SCFG/Stacks/zz-keep" ]] && echo yes || echo no)"
 check "wizard: an empty placeholder is still tidied" no "$([[ -d "$SCFG/Stacks/zz-placeholder" ]] && echo yes || echo no)"
 rm -rf "$SCFG"
+
+echo "OS updates at a glance (stand-ins for dnf, apt, systemctl: unprivileged, nothing installed)"
+_OSB="$WORK/osu-bin"; _OSF="$WORK/.data/os-updates.json"; mkdir -p "$_OSB" "$WORK/osu-boot" "$WORK/osu-mods"
+cat > "$_OSB/dnf" <<'OSU'
+#!/bin/bash
+# FAKE_DNF: updates (default) | none | fail | dnf5 (check-update refused, check-upgrade answers); FAKE_DNF_REBOOT=yes
+echo "$*" >> "$(dirname "$0")/dnf.calls"
+case "$*" in
+  *needs-restarting*)
+    if [[ "${FAKE_DNF_REBOOT:-no}" == yes ]]; then
+      printf 'Core libraries or services have been updated since boot-up:\n  * glibc\n  * kernel\n\nReboot is required to fully utilize these updates.\nMore information: https://access.redhat.com/solutions/27943\n'; exit 1
+    fi
+    printf 'No core libraries or services have been updated since boot-up.\nReboot should not be necessary.\n'; exit 0 ;;
+esac
+[[ "${FAKE_DNF:-updates}" == dnf5 && "$*" == *check-update* ]] && { echo "Unknown argument \"check-update\" for command \"dnf5\"." >&2; exit 2; }
+[[ "${FAKE_DNF:-updates}" == fail ]] && { echo "Error: Failed to download metadata for repo 'updates': Cannot download repomd.xml" >&2; exit 1; }
+[[ "${FAKE_DNF:-updates}" == none ]] && exit 0
+if [[ "$*" == *--security* ]]; then
+  printf '\nkernel-core.x86_64                 6.16.9-200.fc42          updates\nopenssl-libs.x86_64                1:3.2.4-3.fc42           updates\n'
+  exit 100
+fi
+printf 'Last metadata expiration check: 0:41:02 ago on Mon 06 Oct 2026 09:00:00 AM EDT.\n\n'
+printf 'kernel-core.x86_64                 6.16.9-200.fc42          updates\n'
+printf 'openssl-libs.x86_64                1:3.2.4-3.fc42           updates\n'
+printf 'firefox.x86_64                     143.0-1.fc42             updates\n'
+printf 'python3-a-very-long-package-name-that-wraps.noarch\n                                   2.0-1.fc42               updates\n'
+printf 'vim-minimal.x86_64                 2:9.1.1-1.fc42           updates\n'
+printf 'Obsoleting Packages\nnew-thing.x86_64                   1.0-1.fc42               updates\n    old-thing.x86_64               0.9-1.fc41               @System\n'
+exit 100
+OSU
+cat > "$_OSB/systemctl" <<'OSU'
+#!/bin/bash
+# FAKE_ENABLED: the units that are enabled (space separated); FAKE_NO_SYSTEMD=1: no manager to ask
+[[ -n "${FAKE_NO_SYSTEMD:-}" ]] && { echo "System has not been booted with systemd as init system (PID 1). Can't operate." >&2; exit 1; }
+case "$1" in
+  is-enabled) [[ " ${FAKE_ENABLED:-} " == *" $2 "* ]] && { echo enabled; exit 0; }; echo disabled; exit 1 ;;
+  is-active) echo inactive; exit 3 ;;
+esac
+exit 1
+OSU
+cat > "$_OSB/apt" <<'OSU'
+#!/bin/bash
+echo "WARNING: apt does not have a stable CLI interface. Use with caution in scripts." >&2
+echo "Listing..."
+printf 'libssl3/stable-security 3.0.17-1~deb12u3 amd64 [upgradable from: 3.0.16-1~deb12u1]\n'
+printf 'openssh-server/stable-security,stable-security 1:9.2p1-2+deb12u7 amd64 [upgradable from: 1:9.2p1-2+deb12u6]\n'
+printf 'tzdata/stable-updates 2025b-0+deb12u2 all [upgradable from: 2025b-0+deb12u1]\n'
+printf 'curl/stable 7.88.1-10+deb12u14 amd64 [upgradable from: 7.88.1-10+deb12u12]\n'
+OSU
+cat > "$_OSB/apt-config" <<'OSU'
+#!/bin/bash
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "%s";\n' "${FAKE_UU:-1}"
+printf 'Unattended-Upgrade::Origins-Pattern:: "origin=Debian,codename=${distro_codename},label=Debian-Security";\n'
+OSU
+printf '#!/bin/bash\nexit 0\n' > "$_OSB/unattended-upgrade"
+chmod +x "$_OSB"/*
+printf '[commands]\nupgrade_type = default\napply_updates = no\n\n[emitters]\nemit_via = stdio\n' > "$WORK/osu-automatic.conf"
+# _osu ENV… : one look with the stand-ins first on PATH, printed as the state file holds it
+_osu() { env PATH="$_OSB:$PATH" OS_UPDATES_KERNEL=6.16.8-200.fc42.x86_64 OS_UPDATES_DNF_CONF="$WORK/osu-automatic.conf" OS_UPDATES_BOOT_DIR="$WORK/osu-boot" \
+             OS_UPDATES_MODULES_DIR="$WORK/osu-mods" OS_UPDATES_REBOOT_FILE="$WORK/osu-reboot-required" "$@" "$API" --os-updates-check 2>/dev/null; }
+_osj() { jq -r "$1" "$_OSF" 2>/dev/null; }
+rm -rf "$_OSF" "$_OSF.lock"   # a look an earlier section's reads started (the real apt here) is not this section's first
+# the answers of the API itself (the test install's .env keeps the response cache on: each read starts from none)
+_osget() { command rm -f "$WORK/.data/cache/"*.http; auth_request GET "$@"; }
+
+_osu OS_UPDATES_PM=dnf FAKE_DNF_REBOOT=yes FAKE_ENABLED="dnf-automatic.timer" >/dev/null
+check "os updates: dnf counts each waiting package once"   5 "$(_osj .updates)"
+check "os updates: …and the security fixes among them"     "2 kernel-core,openssl-libs" "$(_osj '"\(.security) \(.security_packages | join(","))"')"
+check "os updates: needs-restarting asks for a restart"    "true glibc,kernel" "$(_osj '"\(.reboot_required) \(.reboot_packages | join(","))"')"
+check "os updates: dnf-automatic that only downloads"      "true false false" "$(_osj '"\(.auto_updates.enabled) \(.auto_updates.installs) \(.auto_updates.security_only)"')"
+check "os updates: waiting since this look"                yes "$(_osj '(.pending_since > 0 and .security_since > 0 and .pending_since == .checked_at)' | sed 's/true/yes/')"
+check "os updates: dnf was never asked to change anything" 0 "$(grep -cvE '(^| )(-q check-update( --security)?|needs-restarting -r)$' "$_OSB/dnf.calls")"
+_PS=$(_osj .pending_since)
+printf '[commands]\nupgrade_type = security\napply_updates = yes\n' > "$WORK/osu-automatic.conf"
+_osu OS_UPDATES_PM=dnf FAKE_ENABLED="dnf-automatic.timer" >/dev/null
+check "os updates: dnf-automatic installing security fixes" "true true true" "$(_osj '"\(.auto_updates.enabled) \(.auto_updates.installs) \(.auto_updates.security_only)"')"
+check "os updates: no restart needed"                      false "$(_osj .reboot_required)"
+check "os updates: still waiting since the first look"     "$_PS" "$(_osj .pending_since)"
+_osu OS_UPDATES_PM=dnf FAKE_ENABLED="dnf-automatic-install.timer" FAKE_DNF=dnf5 >/dev/null
+check "os updates: dnf 5's check-upgrade"                  "5 2 true" "$(_osj '"\(.updates) \(.security) \(.auto_updates.installs)"')"
+_osu OS_UPDATES_PM=dnf FAKE_DNF=fail >/dev/null
+check "os updates: a look that fails keeps the last counts" "5 2" "$(_osj '"\(.updates) \(.security)"')"
+check "os updates: …and says why"                          yes "$(_osj .check_error | grep -q 'could not list the updates: Error: Failed to download metadata' && echo yes || echo no)"
+check "os updates: no timer enabled"                       false "$(_osj .auto_updates.enabled)"
+_osu OS_UPDATES_PM=dnf FAKE_DNF=none FAKE_NO_SYSTEMD=1 >/dev/null
+check "os updates: nothing waiting"                        "0 0 0 0" "$(_osj '"\(.updates) \(.security) \(.pending_since) \(.security_since)"')"
+check "os updates: no systemd to ask is not 'off'"         null "$(_osj .auto_updates.enabled)"
+check "os updates: …and no error left behind"              "" "$(_osj .check_error)"
+
+: > "$WORK/osu-reboot-required"; printf 'linux-image-6.1.0-26-amd64\nlibc6\nlibc6\n' > "$WORK/osu-reboot-required.pkgs"
+_osu OS_UPDATES_PM=apt FAKE_ENABLED="apt-daily-upgrade.timer" >/dev/null
+check "os updates: apt lists what is upgradable"           4 "$(_osj .updates)"
+check "os updates: …a -security suite is a security fix"   "2 libssl3,openssh-server" "$(_osj '"\(.security) \(.security_packages | join(","))"')"
+check "os updates: reboot-required and its packages"       "true libc6,linux-image-6.1.0-26-amd64" "$(_osj '"\(.reboot_required) \(.reboot_packages | join(","))"')"
+check "os updates: unattended-upgrades, security origins"  "true unattended-upgrades true true" "$(_osj '"\(.auto_updates.enabled) \(.auto_updates.tool) \(.auto_updates.installs) \(.auto_updates.security_only)"')"
+rm -f "$WORK/osu-reboot-required" "$WORK/osu-reboot-required.pkgs"
+: > "$WORK/osu-boot/vmlinuz-6.1.0-25-amd64"; : > "$WORK/osu-boot/vmlinuz-6.1.0-27-rt-amd64"
+_osu OS_UPDATES_PM=apt OS_UPDATES_KERNEL=6.1.0-25-amd64 FAKE_UU=0 >/dev/null
+check "os updates: the running kernel is the newest of its kind" false "$(_osj .reboot_required)"
+check "os updates: Unattended-Upgrade \"0\" is off"         false "$(_osj .auto_updates.enabled)"
+: > "$WORK/osu-boot/vmlinuz-6.1.0-26-amd64"
+_osu OS_UPDATES_PM=apt OS_UPDATES_KERNEL=6.1.0-25-amd64 >/dev/null
+check "os updates: a newer kernel installed needs a restart" "true Linux 6.1.0-26-amd64 is installed, 6.1.0-25-amd64 is running" "$(_osj '"\(.reboot_required) \(.reboot_reason)"')"
+mkdir -p "$WORK/osu-mods/6.16.9-arch1-1"
+_osu OS_UPDATES_PM=pacman OS_UPDATES_KERNEL=6.16.8-arch1-1 >/dev/null
+check "os updates: Arch removed the running kernel's modules" "true null" "$(_osj '"\(.reboot_required) \(.updates)"')"
+check "os updates: …no checkupdates, said plainly"         yes "$(_osj .note | grep -q 'pacman-contrib' && echo yes || echo no)"
+
+_osu OS_UPDATES_PM=apt >/dev/null
+_OSR=$(_osget /system/os-updates '' OS_UPDATES_PKGDB=/nonexistent)
+check "os updates: GET answers"                            200 "$(printf '%s' "$_OSR" | status_of)"
+check "os updates: …the last look, with the live fields"   "apt 4 true false 21600" "$(printf '%s' "$_OSR" | body_of | jq -r '"\(.package_manager) \(.updates) \(.enabled) \(.checking) \(.interval)"' 2>/dev/null)"
+check "os updates: …every field the dashboard reads"       true "$(printf '%s' "$_OSR" | body_of | jq -r 'has("supported") and has("security") and has("security_since") and has("reboot_required") and (.auto_updates | has("enabled") and has("installs")) and has("checked_at") and has("check_error") and has("hostname")' 2>/dev/null)"
+check "os updates: a viewer reads it too"                  200 "$(viewer_request GET /system/os-updates | status_of)"
+mkdir -p "$_OSF.lock"
+check "os updates: a look under way says so"               true "$(_osget '/system/os-updates?refresh=1' '' OS_UPDATES_PKGDB=/nonexistent | body_of | jq -r '.checking' 2>/dev/null)"
+rmdir "$_OSF.lock"
+check "os updates: switched off"                           false "$(_osget /system/os-updates '' OS_UPDATES_CHECK=false | body_of | jq -r '.enabled' 2>/dev/null)"
+# when a look is due: the interval, the packages changing since (an update was installed), nothing new
+# shellcheck disable=SC2163  # "$@" holds NAME=value pairs to export
+_osdue() { ( export "$@"; _lib _os_updates_due ) && echo due || echo not; }
+check "os updates: a fresh look is not due again"          not "$(_osdue OS_UPDATES_PKGDB=/nonexistent)"
+jq -c --argjson t "$(( $(date +%s) - 600 ))" '.checked_at = $t' "$_OSF" > "$_OSF.t" && mv -f "$_OSF.t" "$_OSF"
+: > "$WORK/osu-pkgdb"
+check "os updates: due once the packages changed"          due "$(_osdue OS_UPDATES_PKGDB="$WORK/osu-pkgdb")"
+touch -d '@1' "$WORK/osu-pkgdb"
+check "os updates: …not while they did not"                not "$(_osdue OS_UPDATES_PKGDB="$WORK/osu-pkgdb")"
+check "os updates: due after the interval"                 due "$(_osdue OS_UPDATES_PKGDB=/nonexistent OS_UPDATES_INTERVAL=300)"
+rm -rf "$_OSB" "$WORK/osu-boot" "$WORK/osu-mods" "$WORK/osu-automatic.conf" "$WORK/osu-pkgdb" "$_OSF"
 
 fi   # (end of the sections SMOKE_ONLY=crowdsec skips)
 

@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `419` in total.
+Every endpoint below is `420` in total.
 
 ## Access levels
 
@@ -330,6 +330,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/system/docker-engine/status` | user | The engine update in progress or the last one (idle, running, done, failed) |
 | GET | `/system/update/history` | admin | Outcomes of unattended self-updates (last 30) and whether a job runs now |
 | GET | `/system/os-update/status` | admin | Poll background OS update progress |
+| GET | `/system/os-updates` | user | Waiting OS updates (how many, how many are security fixes), whether a restart is needed to finish updates, and whether the system installs updates on its own (dnf-automatic, unattended-upgrades); unprivileged, looked at in the background at most every 6 h (sooner after packages changed or a restart) and answered from the last look. ?refresh=1 (admin) looks again now unless the last look is under five minutes old; ?fleet=1 on a hub adds every member's (members[], the hub first) |
 | GET | `/system/crontab` | admin | User crontab entries |
 | GET | `/system/crontab/system` | admin | System-level cron entries |
 | POST | `/system/crontab` | admin | Update user crontab |
