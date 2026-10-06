@@ -235,6 +235,9 @@ cp "$BKA" "$BKW/backups/Docker-Compose-Backup-2026-01-01_000003.tar.gz"; cp "$BK
 printf 'XXXX' | dd of="$BKW/backups/Docker-Compose-Backup-2026-01-01_000003.tar.gz" bs=1 seek=2000 conv=notrunc 2>/dev/null
 check "verify: a damaged archive is not whole"        false "$(_bk handle_backup_verify '{"filename":"Docker-Compose-Backup-2026-01-01_000003.tar.gz"}' | body_of | jq -r '.ok')"
 check "restore: a damaged archive is refused"         400 "$(_bk handle_backup_restore '{"filename":"Docker-Compose-Backup-2026-01-01_000003.tar.gz","confirm":"RESTORE"}' | status_of)"
+# a name that is not there, or no name, is answered (the answer used to be swallowed: an empty reply)
+check "restore: a backup that is not there is a 404"    404 "$(_bk handle_backup_restore '{"filename":"Docker-Compose-Backup-2020-01-01_000000.tar.gz","confirm":"RESTORE"}' | status_of)"
+check "verify: no name is a 400, a bad one too"         "400 400" "$(_bk handle_backup_verify '{}' | status_of) $(_bk handle_backup_verify '{"filename":"../x.tar.gz"}' | status_of)"
 # retention: BACKUP_RETENTION_COUNT of each kind (2 here), the stacks' own never push the full ones out
 mkdir -p "$BKW/r"; for _i in 1 2 3; do for _k in "" "-demo"; do _f="$BKW/r/Docker-Compose-Backup-2026-02-0${_i}_000000$_k.tar.gz"; : > "$_f"; : > "$_f.sha256"; touch -d "2026-02-0$_i" "$_f"; done; done
 ( set --; source "$BKW/.scripts/api-server.sh" >/dev/null 2>&1; BACKUP_DEST_DIR="$BKW/r" _backup_retention ) 2>/dev/null
@@ -1301,14 +1304,16 @@ rm -f "$WORK/.api-auth/.setup-complete"
 check "recovery: setup restore rejects junk" 400 "$(request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' "${AUTH[@]}" | status_of)"
 UPB=$(base64 -w0 "$WORK/.data/recovery/$RBF")
 check "recovery: upload accepted"       200 "$(auth_request POST /recovery/upload "{\"filename\":\"dcs-recovery-smoke-20260101-000000.tar.gz.enc\",\"content_b64\":\"$UPB\"}" | status_of)"
-check "recovery: upload name checked"   400 "$(auth_request POST /recovery/upload '{"filename":"../evil.enc","content_b64":"AAAA"}' | status_of)"
-check "recovery: two bundles listed"    2 "$(auth_request GET /recovery | body_of | jq -r '.bundles | length')"
+# a name the browser changed (a " (1)" on a second download) or a bad one is never used: the file is kept under one of ours
+check "recovery: a renamed upload is kept under a name of ours" "200 yes" "$(_UPR=$(auth_request POST /recovery/upload '{"filename":"../evil (1).enc","content_b64":"AAAA"}'); printf '%s %s' "$(status_of <<< "$_UPR")" "$(body_of <<< "$_UPR" | jq -r .file | grep -qE '^dcs-recovery-uploaded-[0-9]{8}-[0-9]{6}\.tar\.gz\.enc$' && echo yes || echo no)")"
+check "recovery: nothing written outside the bundles' folder" no "$([[ -e "$WORK/.data/evil (1).enc" || -e "$WORK/evil (1).enc" ]] && echo yes || echo no)"
+check "recovery: three bundles listed"  3 "$(auth_request GET /recovery | body_of | jq -r '.bundles | length')"
 check "secret stored for schedules"     200 "$(auth_request POST /secrets '{"key":"RECOVERY_PASSPHRASE","value":"smoke-pass-123"}' | status_of)"
 check "recovery: passphrase stored"     true "$(auth_request GET /recovery | body_of | jq -r '.passphrase_set')"
 SID=$(auth_request POST /schedules '{"name":"rb","schedule":"@daily","action":"recovery","target":""}' | body_of | jq -r '.id // .schedule.id // empty' 2>/dev/null)
 check "schedule: recovery accepted"     yes "$([[ -n "$SID" ]] && echo yes || echo no)"
 check "schedule: recovery runs"         200 "$(auth_request POST "/schedules/$SID/run" | status_of)"
-check "recovery: schedule made a bundle" 3 "$(auth_request GET /recovery | body_of | jq -r '.bundles | length')"
+check "recovery: schedule made a bundle" 4 "$(auth_request GET /recovery | body_of | jq -r '.bundles | length')"
 [[ -n "$SID" ]] && auth_request DELETE "/schedules/$SID" >/dev/null
 check "schedule: dcs-update accepted"   200 "$(auth_request POST /schedules '{"name":"su","schedule":"@weekly","action":"dcs-update","target":"images"}' | status_of)"
 check "schedule: dcs-update bad target" 400 "$(auth_request POST /schedules '{"name":"su2","schedule":"@weekly","action":"dcs-update","target":"bogus"}' | status_of)"
@@ -2467,8 +2472,29 @@ check "restore: the drive's App-Data comes back" "one|1" "$(cat "$_DRV/appdata/z
 check "backup: verify passes with the part" "true|2" "$(FLEET_READER=plain _lib eval "BACKUP_DEST_DIR='$_DRV/bk'; _backup_verify '$_BKF' >/dev/null 2>&1; printf '%s' \"\$BK_VERIFY\"" | jq -r '"\(.ok)|\(.parts)"' 2>/dev/null)"
 mv "$_DRV/appdata/zz-new/.dcs-appdata" "$_DRV/appdata/zz-new/.off"; echo three > "$_DRV/appdata/zz-new/App/a.txt"
 _BRW=$(FLEET_READER=plain _lib eval "BACKUP_DEST_DIR='$_DRV/bk'; _backup_restore_run '$_BKF' zz-new >/dev/null; printf '%s' \"\$BR_RESULT\"" | jq -r '.warnings | join(" ")' 2>/dev/null)
-check "restore: without the drive the part is refused, the folder untouched" "yes|three" "$(grep -q 'is not there' <<< "$_BRW" && echo yes)|$(cat "$_DRV/appdata/zz-new/App/a.txt")"
+check "restore: without the drive the part is refused, the folder untouched" "yes|three" "$(grep -q 'holds files but no DCS marker' <<< "$_BRW" && echo yes)|$(cat "$_DRV/appdata/zz-new/App/a.txt")"
 mv "$_DRV/appdata/zz-new/.off" "$_DRV/appdata/zz-new/.dcs-appdata"
+# a new machine or a new drive: the folder is not there (refused, nothing written), or made empty for it (restored, with the
+# marker the archive carries)
+mv "$_DRV/appdata/zz-new" "$_DRV/appdata/zz-new.away"
+_BRW=$(FLEET_READER=plain _lib eval "BACKUP_DEST_DIR='$_DRV/bk'; _backup_restore_run '$_BKF' zz-new >/dev/null; printf '%s' \"\$BR_RESULT\"" | jq -r '.warnings | join(" ")' 2>/dev/null)
+check "restore: a drive folder that is not there is not made" "yes|no" "$(grep -q 'make the empty folder' <<< "$_BRW" && echo yes)|$([[ -e "$_DRV/appdata/zz-new" ]] && echo yes || echo no)"
+mkdir "$_DRV/appdata/zz-new"
+_BRW=$(FLEET_READER=plain _lib eval "BACKUP_DEST_DIR='$_DRV/bk'; _backup_restore_run '$_BKF' zz-new >/dev/null; printf '%s' \"\$BR_RESULT\"" | jq -r '"\(.appdata | join(","))|\(.warnings | length)"' 2>/dev/null)
+check "restore: …made empty, it is filled, marker and all" "zz-new|0|one|zz-new" "$_BRW|$(cat "$_DRV/appdata/zz-new/App/a.txt")|$(jq -r .stack "$_DRV/appdata/zz-new/.dcs-appdata")"
+rm -rf "$_DRV/appdata/zz-new.away"
+# a recovery bundle takes the App-Data of a stack on its own drive (it looked in ./App-Data alone) and gives it back there
+echo bundle-one > "$_DRV/appdata/zz-new/App/a.txt"
+_RCB=$(_lib eval 'FLEET_READER=plain; _recovery_bundle_create smoke-pass-123 zz-new >/dev/null; printf "%s|%s" "$RCV_FILE" "$RCV_APPDATA"')
+check "recovery: a drive stack's App-Data is in the bundle" "zz-new " "${_RCB#*|}"
+echo bundle-two > "$_DRV/appdata/zz-new/App/a.txt"
+_RCR=$(_lib eval "FLEET_READER=plain; _recovery_restore '${_RCB%%|*}' smoke-pass-123 >/dev/null; printf '%s|%s' \"\$RCV_APPDATA\" \"\$RCV_WARNINGS\"")
+check "recovery: …and comes back to the drive" "yes|[]|bundle-one" "$(grep -qw zz-new <<< "${_RCR%%|*}" && echo yes)|${_RCR#*|}|$(cat "$_DRV/appdata/zz-new/App/a.txt")"
+mv "$_DRV/appdata/zz-new" "$_DRV/appdata/zz-new.away"
+_RCR=$(_lib eval "FLEET_READER=plain; _recovery_restore '${_RCB%%|*}' smoke-pass-123 >/dev/null; printf '%s' \"\$RCV_WARNINGS\"")
+check "recovery: …on a new machine without the folder it says so, nothing made" "yes|no" "$(grep -q 'zz-new: its App-Data .* is not there' <<< "$_RCR" && echo yes)|$([[ -e "$_DRV/appdata/zz-new" ]] && echo yes || echo no)"
+mv "$_DRV/appdata/zz-new.away" "$_DRV/appdata/zz-new"
+rm -f "${_RCB%%|*}" "${_RCB%%|*}.sha256"
 # (the stacks these checks made go again: later sections count the stacks they find)
 rm -rf "$WORK/Stacks/zz-ad" "$WORK/Stacks/zz-plain" "$WORK/Stacks/zz-new" "$WORK/Stacks/zz-old" "$WORK/Stacks/zz-plain2" "$WORK/.data/appdata-guard.json"
 # --- a template deployed into a stack whose App-Data is on its own drive keeps the placeholder (Compose resolves it there;

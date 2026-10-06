@@ -188,7 +188,7 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 |---|---|
 | Each stack's whole folder: `docker-compose.yml`, `.env`, config files, `App-Data`, `data`, files of every owner (a database's, root's) with owners and modes as numbers | The link to a VM's App-Data on a hub (`Stacks/<name>/VM-App-Data`, an sshfs mount): that data is the VM's, in the VM's own backup |
 | Each named volume of a stack (`com.docker.compose.project` label) | Volumes a compose file declares `external`, and folders outside the stack (a media library): back those up where they live |
-| A stack's App-Data on a drive of its own *(4.0.32)*: a part of its own (`.dcs-backup/appdata/<stack>.tar`) with the path it goes back to; a restore sets the copy there aside beside it (`<path>.before-restore-<time>`, same drive) | That part while its drive is not mounted (the backup says so; a restore skips it and says so) |
+| A stack's App-Data on a drive of its own *(4.0.32)*: a part of its own (`.dcs-backup/appdata/<stack>.tar`) with the path it goes back to; a restore sets the copy there aside beside it (`<path>.before-restore-<time>`, same drive) | That part while its drive is not mounted (the backup says so; a restore skips it and says so). On a new machine or a new drive, make the empty folder at that path and restore again: an empty folder is filled, marker and all |
 | `.env`, accounts and their layouts, notification rules, automations | Sessions, invite codes, rate limits, logs, caches, metrics |
 | `.secrets/*.enc` | The secret store's key, `.secrets/.master-key`: keep it elsewhere, or use the recovery bundle, which carries it encrypted |
 | `.data`: the fleet (`fleet.json`, the hub's ssh key to its VMs), schedules, CrowdSec, the intended state | `.data/cache`, `.data/metrics`, sessions to the VMs, `.data/recovery`, `.data/pre-restore` |
@@ -252,9 +252,12 @@ app data live on; with the QEMU guest agent the file system is frozen for a cons
 
 One encrypted file (AES-256) that rebuilds the install on another machine: the root `.env`, the secret
 store with its key, accounts, notification rules and dashboard layouts, schedules, every stack's files,
-Traefik's and Authelia's data, templates and plugins. App data of the stacks you choose can go along (read like a
-backup reads it, so a database's files are in it; they come back owned by DCS's user). It needs no rsync *(before
-4.0.28 it refused to run without it, which the DCS VM images do not have)*.
+Traefik's and Authelia's data, templates and plugins. App data of the stacks you choose can go along, wherever it lives
+(a stack's App-Data on a drive of its own too): it is read like a backup reads it, so a database's and root's files are
+in it, and it comes back with its owners and modes *(before 4.0.34 a stack on a drive was left out without a word, every
+file came back owned by DCS's user, and a restore over App-Data a container had written failed without a word)*. Named
+volumes are not in a bundle: that is a backup's job. It needs no rsync *(before 4.0.28 it refused to run without it,
+which the DCS VM images do not have)*.
 
 1. Store a passphrase as the secret `RECOVERY_PASSPHRASE` (the Backup page asks for it).
 2. Optional: set `RECOVERY_REMOTE` to an rsync target or a mounted drive for an off-box copy.
@@ -262,7 +265,13 @@ backup reads it, so a database's files are in it; they come back owned by DCS's 
 
 **To restore** on a new machine: install DCS, and in the wizard's *Admin* step open *Moving from another
 server? Restore a recovery bundle*. Then sign in with your old account and start the stacks. On a running
-install, the Backup page restores a bundle after taking a snapshot of the current state.
+install, the Backup page restores a bundle after taking a snapshot of the current state (its configuration: App-Data the
+bundle holds is written over the App-Data there, which that snapshot does not keep; stop those stacks first). A bundle
+whose name the browser changed (`… (1).enc`) is kept under a name of the usual form.
+
+A stack's App-Data on a drive goes back to the path its `.env` names: the folder must be there (mount the drive; on a
+new drive make the empty folder), otherwise that part is skipped and the result says so (`warnings`), nothing is written
+where the drive should be. Every App-Data folder that came back is listed in `app_data`.
 
 ## Health
 

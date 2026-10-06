@@ -7224,12 +7224,14 @@ _backup_unpause_all() {
     return 0
 }
 
-# _backup_part_tar KIND NAME — a stack's folder (stack NAME), a named volume (volume NAME) or a folder (dir PATH) as a tar
-# stream on stdout, owners and modes as numbers, read as root, with sudo or through a read-only helper container (the
-# reader the move into a VM uses). The link to a VM's App-Data is not followed; GNU tar stays on the folder's own disk.
+# _backup_part_tar KIND NAME [--exclude=PATTERN...] — a stack's folder (stack NAME), a named volume (volume NAME) or a
+# folder (dir PATH) as a tar stream on stdout, owners and modes as numbers, read as root, with sudo or through a read-only
+# helper container (the reader the move into a VM uses). The link to a VM's App-Data is not followed; GNU tar stays on the
+# folder's own disk.
 _backup_part_tar() {
     local kind="$1" name="$2" src="" mp=""
     local -a bk_ex=() bk_sudo=()
+    shift 2
     _fleet_reader_pick
     case "$kind" in
         stack)  src="$COMPOSE_DIR/$name"; bk_ex=(--exclude="./$FLEET_APPDATA_LINK" --exclude=./App-Data/.trash) ;;
@@ -7238,6 +7240,7 @@ _backup_part_tar() {
         volume) src="$name" ;;
         *)      return 2 ;;
     esac
+    bk_ex+=("$@")
     if [[ "$FLEET_READER" == docker:* ]]; then
         # label=disable: on an SELinux host the helper reads the folder without relabelling it (a :z would change the
         # label the stack's own containers use)
@@ -7730,15 +7733,17 @@ handle_backup_cancel() {
     fi
 }
 
-# _backup_archive_path NAME — the path of a backup in BACKUP_DEST_DIR (answers the error itself; 1 when NAME is not one)
+# _backup_archive_path NAME — sets BK_ARCHIVE to the path of a backup in BACKUP_DEST_DIR; answers the error itself and
+# returns 1 when NAME is not one (called directly, never in $(...): the error answer would be captured and lost)
 _backup_archive_path() {
     local name="$1" dir="${BACKUP_DEST_DIR%/}" p=""
+    BK_ARCHIVE=""
     if [[ -z "$name" ]]; then _api_error 400 "Missing 'filename' in request body"; return 1; fi
     if [[ "$name" == *"/"* || "$name" == *".."* || "$name" == "."* || ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then _api_error 400 "Invalid backup filename"; return 1; fi
     p=$(realpath -m -- "$dir/$name" 2>/dev/null)
     [[ "$p" == "$(realpath -m -- "$dir" 2>/dev/null)/"* ]] || { _api_error 400 "Invalid backup filename"; return 1; }
     [[ -f "$dir/$name" ]] || { _api_error 404 "Backup file not found: $name"; return 1; }
-    printf '%s' "$dir/$name"
+    BK_ARCHIVE="$dir/$name"
 }
 
 # POST /backups/verify — Check a backup without restoring it: its .sha256, gzip and tar read it to the end, every part its manifest names is in it {filename}
@@ -7747,7 +7752,8 @@ handle_backup_verify() {
     if ! _api_check_admin; then _api_error 403 "Admin access required"; return; fi
     [[ -n "${BACKUP_DEST_DIR:-}" ]] || { _api_error 400 "Backup not configured. Set BACKUP_DEST_DIR in .env"; return; }
     filename=$(printf '%s' "$body" | jq -r '.filename // empty' 2>/dev/null)
-    a=$(_backup_archive_path "$filename") || return
+    _backup_archive_path "$filename" || return
+    a="$BK_ARCHIVE"
     _backup_verify "$a"
     local man=""
     man=$(_backup_manifest "$a")
@@ -7850,8 +7856,13 @@ _backup_restore_run() {
     for vs in "${bk_ads[@]}"; do
         IFS=$'\t' read -r s v <<< "$vs"
         [[ "$v" == /* ]] || { bk_warns+=("$s: the backup's App-Data path is not a full path, skipped"); continue; }
-        if [[ ! -d "$v" ]] || ! dcs_appdata_marker_ok "$v" "$s"; then
-            bk_warns+=("$s: its App-Data $v is not there (drive not mounted?), so that part was not restored"); continue
+        # the folder must be this stack's (its marker names it), or an empty one made for it on a new machine or a new
+        # drive (the archive's copy brings the marker); a folder that is not there may be a drive that is not mounted
+        if [[ ! -d "$v" ]]; then
+            bk_warns+=("$s: its App-Data $v is not there (drive not mounted? on a new machine or a new drive, make the empty folder $v and restore again), so that part was not restored"); continue
+        fi
+        if ! dcs_appdata_marker_ok "$v" "$s" && ! { [[ -r "$v" && -x "$v" ]] && [[ -z "$(find "$v" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; }; then
+            bk_warns+=("$s: $v holds files but no DCS marker naming $s, so that part was not restored (empty the folder, or mount the right drive, and restore again)"); continue
         fi
         _backup_status restoring 82 appdata "Restoring the App-Data of $s..."
         local _aside="$v.before-restore-$ts"
@@ -7862,6 +7873,8 @@ _backup_restore_run() {
             _backup_rm "$v"; _backup_mv "$_aside" "$v"
             bk_warns+=("$s: its App-Data could not be written ($(tail -n 1 "$pre/$s-appdata.err" | cut -c1-200)); the folder as it was is back"); continue
         fi
+        # an empty folder set aside (a new machine's) is not worth keeping
+        rmdir -- "$_aside" 2>/dev/null
         bk_rads+=("$s")
     done
 
@@ -7934,7 +7947,8 @@ handle_backup_restore() {
     filename=$(printf '%s' "$body" | jq -r '.filename // empty' 2>/dev/null)
     confirm=$(printf '%s' "$body" | jq -r '.confirm // empty' 2>/dev/null)
     only=$(printf '%s' "$body" | jq -r '.stack // empty' 2>/dev/null)
-    archive=$(_backup_archive_path "$filename") || return
+    _backup_archive_path "$filename" || return
+    archive="$BK_ARCHIVE"
     [[ -z "$only" ]] || _api_validate_stack_name "$only" || return
     if [[ "$confirm" != "RESTORE" ]]; then
         _api_error 400 "Restore requires {\"confirm\": \"RESTORE\"} in request body"
@@ -10452,14 +10466,33 @@ _tree_copy() {
     tar -C "$src" "$@" -cf - . 2>/dev/null | tar -C "$dst" -xpf - 2>/dev/null
 }
 
-# Build a bundle. Sets RCV_FILE (its path), RCV_SIZE, RCV_STACKS, RCV_APPDATA, RCV_ERROR.
+# _recovery_appdata_dir STACK — the App-Data folder of a stack a bundle takes and gives back: its drive (an absolute
+# APP_DATA_DIR in its .env), else its own ./App-Data
+_recovery_appdata_dir() {
+    _stack_appdata_override "$1" || printf '%s' "$COMPOSE_DIR/$1/App-Data"
+}
+# _recovery_part STACK SUB DIR FILE [--exclude=...] — DIR as a tar part FILE of the bundle (owners and modes as numbers, read
+# the way a backup reads it, so the files of other users are in it), recorded in rcv_parts; 1 when it could not be read
+_recovery_part() {
+    local st="$1" sub="$2" dir="$3" file="$4" rc=0 ov=""
+    shift 4
+    _backup_part_tar appdata "$dir" "$@" > "$b/$file" 2>"$tmp/part.err"; rc=$?
+    if (( rc >= 2 )) || { [[ "$FLEET_READER" == docker:* ]] && (( rc != 0 )); } || ! tar -tf "$b/$file" >/dev/null 2>&1; then
+        rm -f "$b/$file"; return 1
+    fi
+    ov=$(_stack_appdata_override "$st") || ov=""
+    rcv_parts=$(jq -c --arg s "$st" --arg sub "$sub" --arg f "$file" --arg p "$ov" '. + [{stack: $s, sub: $sub, file: $f, appdata_path: $p}]' <<< "$rcv_parts")
+}
+
+# Build a bundle. Sets RCV_FILE (its path), RCV_SIZE, RCV_STACKS, RCV_APPDATA, RCV_WARNINGS (a JSON list), RCV_ERROR.
 # Included: root .env, the secret store with its key, accounts/rules/layouts,
 # schedules, every stack's files (App-Data only for Traefik, Authelia and the
-# stacks named in $2), templates and plugins. Never sessions, logs or caches.
+# stacks named in $2, wherever it lives: a drive of its own too), templates and plugins. Never sessions, logs or caches.
 _recovery_bundle_create() {
     local pass="$1" include_appdata="${2:-}"
-    local dest tmp b stamp host s sn d out
-    RCV_FILE="" RCV_SIZE=0 RCV_STACKS=0 RCV_APPDATA="" RCV_ERROR=""
+    local dest tmp b stamp host s sn d out ad rcv_parts='[]'
+    local -a rcv_warns=()
+    RCV_FILE="" RCV_SIZE=0 RCV_STACKS=0 RCV_APPDATA="" RCV_ERROR="" RCV_WARNINGS='[]'
     [[ -n "$pass" ]] || { RCV_ERROR="A passphrase is required"; return 1; }
     dest=$(_recovery_dir)
     mkdir -p "$dest" 2>/dev/null && chmod 700 "$dest" 2>/dev/null || { RCV_ERROR="Cannot write to $dest"; return 1; }
@@ -10488,29 +10521,37 @@ _recovery_bundle_create() {
     for f in crowdsec-whitelist.json automation-state.json; do
         [[ -f "$BASE_DIR/.data/$f" ]] && cp -p "$BASE_DIR/.data/$f" "$b/data/"
     done
-    mkdir -p "$b/stacks"
+    mkdir -p "$b/stacks" "$b/appdata"
+    _fleet_reader_pick
     for s in "$COMPOSE_DIR"/*/; do
         [[ -d "$s" ]] || continue
         s="${s%/}"; sn=$(basename "$s")
         _tree_copy "$s" "$b/stacks/$sn" --exclude=./App-Data --exclude=./VM-App-Data --exclude=./RUNS-IN-A-VM.txt --exclude='*.bak.*' --exclude='*.bak-repair' || { RCV_ERROR="Could not copy stack $sn"; rm -rf "$tmp"; return 1; }
         RCV_STACKS=$((RCV_STACKS + 1))
-        for d in Traefik Authelia; do
-            if [[ -d "$s/App-Data/$d" ]]; then
-                mkdir -p "$b/stacks/$sn/App-Data"
-                _tree_copy "$s/App-Data/$d" "$b/stacks/$sn/App-Data/$d" --exclude=logs --exclude=cache || true
+        # App-Data travels as a tar part per stack (appdata/<stack>.tar, or appdata/<stack>@Traefik.tar), owners kept: a
+        # copy staged here as this user would give every file to this user, and leave out the ones it cannot read
+        ad=$(_recovery_appdata_dir "$sn")
+        if [[ " $include_appdata " == *" $sn "* ]]; then
+            if [[ "$(_stack_appdata_state "$sn")" == missing ]]; then
+                RCV_ERROR="The App-Data of $sn ($ad) is not there: is the drive mounted? (or leave $sn out of the App-Data)"; rm -rf "$tmp"; return 1
             fi
-        done
-        if [[ " $include_appdata " == *" $sn "* && -d "$s/App-Data" ]]; then
-            mkdir -p "$b/stacks/$sn/App-Data"
-            # read the way a backup reads it: files of other users (a database's) are in the bundle too
-            _backup_part_tar dir "$s/App-Data" 2>/dev/null | tar -C "$b/stacks/$sn/App-Data" -xf - 2>/dev/null || true
-            RCV_APPDATA+="$sn "
+            if [[ -d "$ad" ]]; then
+                _recovery_part "$sn" "" "$ad" "appdata/$sn.tar" || { RCV_ERROR="Could not read the App-Data of $sn ($ad): $(head -c 300 "$tmp/part.err" 2>/dev/null)"; rm -rf "$tmp"; return 1; }
+                RCV_APPDATA+="$sn "
+            fi
+        else
+            for d in Traefik Authelia; do
+                [[ -d "$ad/$d" ]] || continue
+                _recovery_part "$sn" "$d" "$ad/$d" "appdata/$sn@$d.tar" --exclude=logs --exclude=cache \
+                    || rcv_warns+=("$sn: its $d data could not be read, so it is not in the bundle")
+            done
         fi
     done
     [[ -d "$BASE_DIR/.templates" ]] && _tree_copy "$BASE_DIR/.templates" "$b/templates"
     [[ -d "$BASE_DIR/.plugins" ]] && _tree_copy "$BASE_DIR/.plugins" "$b/plugins" --exclude='*/state' --exclude='*/execution.log'
-    printf '{"format": 1, "created": "%s", "host": "%s", "dcs_version": "%s", "stacks": %s, "app_data": "%s"}\n' \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$host" "$(_api_json_escape "${DCS_VERSION:-}")" "$RCV_STACKS" "${RCV_APPDATA% }" > "$b/manifest.json"
+    RCV_WARNINGS=$(printf '%s\n' "${rcv_warns[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+    jq -nc --arg host "$host" --arg v "${DCS_VERSION:-}" --argjson n "$RCV_STACKS" --arg ad "${RCV_APPDATA% }" --argjson parts "$rcv_parts" --argjson w "$RCV_WARNINGS" \
+        '{format: 1, created: (now | todate), host: $host, dcs_version: $v, stacks: $n, app_data: $ad, appdata_parts: $parts, warnings: $w}' > "$b/manifest.json"
     out="$dest/dcs-recovery-${host}-${stamp}.tar.gz.enc"
     if ! tar -czf - -C "$b" . 2>/dev/null | RCV_PASS="$pass" openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:RCV_PASS -out "$out" 2>/dev/null; then
         rm -rf "$tmp"; rm -f "$out"; RCV_ERROR="Encryption failed (is openssl installed?)"; return 1
@@ -10542,12 +10583,15 @@ _recovery_copy_remote() {
 }
 
 # Restore BUNDLE with PASS into this install. A light pre-restore snapshot is
-# kept under .snapshots/. Sets RCV_STACKS, RCV_USERS, RCV_ERROR.
+# kept under .snapshots/. Sets RCV_STACKS, RCV_USERS, RCV_APPDATA, RCV_WARNINGS (a JSON list: what did not come back), RCV_ERROR.
 _recovery_restore() {
-    local bundle="$1" pass="$2" tmp s sn
-    RCV_STACKS=0 RCV_USERS=0 RCV_ERROR=""
+    local bundle="$1" pass="$2" tmp s sn stage
+    local -a rcv_warns=()
+    RCV_STACKS=0 RCV_USERS=0 RCV_ERROR="" RCV_APPDATA="" RCV_WARNINGS='[]'
     [[ -f "$bundle" ]] || { RCV_ERROR="Bundle not found"; return 1; }
-    tmp=$(mktemp -d /tmp/dcs-restore-XXXXXX 2>/dev/null) || { RCV_ERROR="Cannot create a temporary directory"; return 1; }
+    # unpacked next to the bundles, not in /tmp (a small tmpfs on the DCS images, and App-Data can be large)
+    stage=$(_recovery_dir); mkdir -p "$stage" 2>/dev/null && chmod 700 "$stage" 2>/dev/null
+    tmp=$(mktemp -d "$stage/.restore-XXXXXX" 2>/dev/null) || { RCV_ERROR="Cannot create a temporary directory in $stage"; return 1; }
     chmod 700 "$tmp"
     if ! RCV_PASS="$pass" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:RCV_PASS -in "$bundle" 2>/dev/null | tar -xzf - -C "$tmp" 2>/dev/null; then
         rm -rf "$tmp"; RCV_ERROR="Wrong passphrase, or the file is not an intact DCS recovery bundle"; return 1
@@ -10578,18 +10622,58 @@ _recovery_restore() {
     mkdir -p "$COMPOSE_DIR"
     for s in "$tmp"/stacks/*/; do
         [[ -d "$s" ]] || continue
-        sn=$(basename "$s"); mkdir -p "$COMPOSE_DIR/$sn"
-        rsync -a "$s" "$COMPOSE_DIR/$sn/" 2>/dev/null || cp -rp "$s." "$COMPOSE_DIR/$sn/" 2>/dev/null || true
+        sn=$(basename "$s")
+        [[ "$sn" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { rcv_warns+=("a stack named \"$sn\" is not a plain name, skipped"); continue; }
+        mkdir -p "$COMPOSE_DIR/$sn"
+        _tree_copy "$s" "$COMPOSE_DIR/$sn" --exclude=./App-Data || rcv_warns+=("$sn: some of its files could not be written")
+        # a bundle made before 4.0.34 carries App-Data as files below the stack (Traefik, Authelia, the stacks asked for):
+        # written the way a backup restore writes, so a folder of another user (the container's) takes them too
+        if [[ -d "$s/App-Data" ]]; then
+            if tar -C "$s/App-Data" -cf - . 2>/dev/null | _backup_part_untar "$COMPOSE_DIR/$sn/App-Data" >/dev/null 2>"$tmp/part.err"; then
+                RCV_APPDATA+="$sn "
+            else
+                rcv_warns+=("$sn: its App-Data could not be written ($(tail -n 1 "$tmp/part.err" 2>/dev/null | cut -c1-200))")
+            fi
+        fi
         RCV_STACKS=$((RCV_STACKS + 1))
     done
+    # App-Data parts go back where the stack keeps its App-Data now: the drive its .env names, else its own folder.
+    # A drive folder must be this stack's (its marker names it) or empty (made for it on a new machine): a folder that is
+    # not there may be a drive that is not mounted, and nothing is written onto the disk below it.
+    local pst psub pfile base dst lst chk
+    while IFS=$'\t' read -r pst psub pfile; do
+        [[ "$psub" == - ]] && psub=""
+        [[ "$pst" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ && ( -z "$psub" || "$psub" == Traefik || "$psub" == Authelia ) && "$pfile" =~ ^appdata/[A-Za-z0-9@_.-]+\.tar$ && "$pfile" != *..* ]] \
+            || { rcv_warns+=("an App-Data part of the bundle is not a plain name ($pst $psub $pfile), skipped"); continue; }
+        [[ -f "$tmp/$pfile" ]] || { rcv_warns+=("$pst: its App-Data part $pfile is missing from the bundle"); continue; }
+        if base=$(_stack_appdata_override "$pst"); then
+            if [[ ! -d "$base" ]]; then
+                rcv_warns+=("$pst: its App-Data $base is not there (drive not mounted? on a new machine or a new drive, make the empty folder $base and restore again), so it was not restored"); continue
+            fi
+            if ! dcs_appdata_marker_ok "$base" "$pst" && ! { [[ -r "$base" && -x "$base" ]] && [[ -z "$(find "$base" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; }; then
+                rcv_warns+=("$pst: $base holds files but no DCS marker naming $pst, so its App-Data was not restored (empty the folder, or mount the right drive, and restore again)"); continue
+            fi
+        else
+            base="$COMPOSE_DIR/$pst/App-Data"
+        fi
+        dst="$base${psub:+/$psub}"
+        lst=$(tar -tvf "$tmp/$pfile" 2>/dev/null) || { rcv_warns+=("$pst: its App-Data part cannot be read"); continue; }
+        chk=$(_backup_listing_check "$lst") || { rcv_warns+=("$pst: its App-Data part was refused: ${chk#refuse: }"); continue; }
+        if _backup_part_untar "$dst" < "$tmp/$pfile" >/dev/null 2>"$tmp/part.err"; then
+            RCV_APPDATA+="$pst${psub:+/$psub} "
+        else
+            rcv_warns+=("$pst: its App-Data could not be written to $dst ($(tail -n 1 "$tmp/part.err" 2>/dev/null | cut -c1-200))")
+        fi
+    done < <(jq -r '.appdata_parts[]? | [.stack, (if (.sub // "") == "" then "-" else .sub end), .file] | @tsv' "$tmp/manifest.json" 2>/dev/null)
     [[ -d "$tmp/templates" ]] && _tree_copy "$tmp/templates" "$BASE_DIR/.templates"
     [[ -d "$tmp/plugins" ]] && _tree_copy "$tmp/plugins" "$BASE_DIR/.plugins"
     find "$COMPOSE_DIR" -path '*/App-Data/Traefik/acme.json' -exec chmod 600 {} \; 2>/dev/null || true
     rm -rf "$tmp"
+    RCV_WARNINGS=$(printf '%s\n' "${rcv_warns[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
     RCV_USERS=$(_api_user_count 2>/dev/null || echo 0)
     [[ "$RCV_USERS" =~ ^[0-9]+$ ]] || RCV_USERS=0
     [[ "$RCV_USERS" -gt 0 && ! -f "$SETUP_COMPLETE_MARKER" ]] && : > "$SETUP_COMPLETE_MARKER"
-    _audit_log "RECOVERY_RESTORE" "$(basename "$bundle"): $RCV_STACKS stacks, $RCV_USERS users"
+    _audit_log "RECOVERY_RESTORE" "$(basename "$bundle"): $RCV_STACKS stacks, $RCV_USERS users, app-data: ${RCV_APPDATA:-none}${rcv_warns[*]:+; not restored: ${rcv_warns[*]}}"
     return 0
 }
 
@@ -10605,6 +10689,14 @@ _recovery_bundles_json() {
         out+="{\"file\": \"$(_api_json_escape "$(basename "$f")")\", \"size\": $size, \"size_human\": \"$(_human_size "$size")\", \"created\": \"$created\", \"checksum\": $sha}"
     done < <(ls -1t "$dest"/dcs-recovery-*.tar.gz.enc 2>/dev/null || true)
     printf '%s]' "$out"
+}
+
+# _recovery_note — the App-Data a bundle restore wrote and what it could not, as one escaped sentence for a message
+_recovery_note() {
+    local t=""
+    [[ -n "${RCV_APPDATA:-}" ]] && t+=" App-Data restored: ${RCV_APPDATA% }."
+    t+=$(jq -r 'if length > 0 then " Not restored: " + join("; ") + "." else "" end' <<< "${RCV_WARNINGS:-[]}" 2>/dev/null)
+    _api_json_escape "$t"
 }
 
 # GET /recovery — Recovery bundles on this box and how they are made (destination, off-box copy, retention, passphrase set?)
@@ -10653,9 +10745,10 @@ handle_recovery_bundle() {
   \"size_human\": \"$(_human_size "$RCV_SIZE")\",
   \"stacks\": $RCV_STACKS,
   \"app_data\": $(_upd_json_list ${RCV_APPDATA}),
+  \"warnings\": ${RCV_WARNINGS:-[]},
   \"remote_copied\": $copied,
   \"note\": \"$(_api_json_escape "$note")\",
-  \"message\": \"Bundle written: $(_api_json_escape "$(basename "$out")") ($(_human_size "$RCV_SIZE"))${note:+; $(_api_json_escape "$note")}\"
+  \"message\": \"Bundle written: $(_api_json_escape "$(basename "$out")") ($(_human_size "$RCV_SIZE"))${note:+; $(_api_json_escape "$note")}$(_api_json_escape "$(jq -r 'if length > 0 then "; not in it: " + join("; ") else "" end' <<< "${RCV_WARNINGS:-[]}" 2>/dev/null)")\"
 }"
 }
 
@@ -10682,7 +10775,11 @@ handle_recovery_upload() {
     if ! _api_check_admin; then _api_error 403 "Admin access required"; return; fi
     local body="$1" name dest out
     name=$(printf '%s' "$body" | jq -r '.filename // empty' 2>/dev/null)
-    _recovery_name_ok "$name" || { _api_error 400 "Invalid bundle name (expected dcs-recovery-<host>-<stamp>.tar.gz.enc)"; return; }
+    # a bundle whose name the browser or a person changed (a " (1)" on a second download, a name of one's own) is kept
+    # under a name of the usual form: the name is only where it is stored, the passphrase and the content are what count
+    if ! _recovery_name_ok "$name"; then
+        name="dcs-recovery-uploaded-$(date +%Y%m%d-%H%M%S).tar.gz.enc"
+    fi
     dest=$(_recovery_dir); mkdir -p "$dest" 2>/dev/null && chmod 700 "$dest" 2>/dev/null
     out="$dest/$name"
     if ! printf '%s' "$body" | jq -r '.content_b64 // empty' 2>/dev/null | base64 -d > "$out" 2>/dev/null || [[ ! -s "$out" ]]; then
@@ -10718,9 +10815,11 @@ handle_recovery_restore() {
   \"file\": \"$(_api_json_escape "$name")\",
   \"stacks\": $RCV_STACKS,
   \"users\": $RCV_USERS,
+  \"app_data\": $(_upd_json_list ${RCV_APPDATA}),
+  \"warnings\": ${RCV_WARNINGS:-[]},
   \"restart_scheduled\": $([[ "$restart_after" == "true" && "$UPD_RESTART_METHOD" != "manual" ]] && echo true || echo false),
   \"restart\": $(_upd_restart_json),
-  \"message\": \"Restored $RCV_STACKS stacks and $RCV_USERS user accounts from $(_api_json_escape "$name"). Start the stacks from the Stacks page (or ./start.sh).\"
+  \"message\": \"Restored $RCV_STACKS stacks and $RCV_USERS user accounts from $(_api_json_escape "$name").$(_recovery_note) Start the stacks from the Stacks page (or ./start.sh).\"
 }"
 }
 
@@ -10734,7 +10833,9 @@ handle_setup_restore() {
     fi
     pass=$(printf '%s' "$body" | jq -r '.passphrase // empty' 2>/dev/null)
     [[ -n "$pass" ]] || { _api_error 400 "Passphrase required"; return; }
-    tmpf=$(mktemp /tmp/dcs-setup-restore-XXXXXX 2>/dev/null) || { _api_error 500 "Cannot create a temporary file"; return; }
+    # kept next to the bundles while it is restored, not in /tmp (a small tmpfs on the DCS images)
+    local _rdir; _rdir=$(_recovery_dir); mkdir -p "$_rdir" 2>/dev/null && chmod 700 "$_rdir" 2>/dev/null
+    tmpf=$(mktemp "$_rdir/.upload-XXXXXX" 2>/dev/null) || { _api_error 500 "Cannot create a temporary file in $_rdir"; return; }
     if ! printf '%s' "$body" | jq -r '.content_b64 // empty' 2>/dev/null | base64 -d > "$tmpf" 2>/dev/null || [[ ! -s "$tmpf" ]]; then
         rm -f "$tmpf"; _api_error 400 "The upload is not valid base64 or is empty"; return
     fi
@@ -10748,9 +10849,11 @@ handle_setup_restore() {
   \"stacks\": $RCV_STACKS,
   \"users\": $RCV_USERS,
   \"initialized\": $([[ "$RCV_USERS" -gt 0 ]] && echo true || echo false),
+  \"app_data\": $(_upd_json_list ${RCV_APPDATA}),
+  \"warnings\": ${RCV_WARNINGS:-[]},
   \"restart_scheduled\": $([[ "$UPD_RESTART_METHOD" != "manual" ]] && echo true || echo false),
   \"restart\": $(_upd_restart_json),
-  \"message\": \"Restored $RCV_STACKS stacks and $RCV_USERS user accounts. Sign in with the account you had before; then start the stacks from the Stacks page.\"
+  \"message\": \"Restored $RCV_STACKS stacks and $RCV_USERS user accounts.$(_recovery_note) Sign in with the account you had before; then start the stacks from the Stacks page.\"
 }"
 }
 

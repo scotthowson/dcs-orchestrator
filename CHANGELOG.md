@@ -5,6 +5,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recovery bundle App-Data** (checked end to end: bundle → download → upload → restore, on the same machine and on a
+  new one through the setup wizard). A stack whose App-Data is on a drive of its own was left out of the bundle without
+  a word when it was ticked; every App-Data file came back owned by DCS's user (a database container could no longer read
+  its own files); a restore over App-Data a container had written failed without a word and still answered "Restored";
+  root-owned Traefik and Authelia files (`acme.json`) were left out. App-Data now travels as a tar part per stack
+  (`appdata/<stack>.tar`, owners and modes as numbers, read and written the way a backup reads and writes), goes back to
+  the drive the stack's `.env` names, and the answers list what came back (`app_data`) and what did not (`warnings`).
+  Bundles made before keep restoring.
+- A bundle restore unpacks next to the bundles, not in `/tmp` (a small tmpfs on the DCS images), and so does the setup
+  wizard's upload.
+- An uploaded bundle whose name the browser changed (a second download is `… (1).enc`) was refused: it is kept under a
+  name of the usual form.
+- `POST /backups/restore` and `POST /backups/verify` with a name that is not there, a bad one or none answered nothing
+  (an empty reply): they answer 404 or 400 with the reason.
+- A backup restored on a new machine could never bring back the App-Data of a stack on a drive (the folder is not there,
+  and an empty one has no marker): an empty folder is now filled from the archive, marker and all, and the message for a
+  missing folder says to make it.
+
 ## [4.0.33] - 2026-10-05
 
 ### Added
