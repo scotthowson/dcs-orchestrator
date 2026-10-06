@@ -38,7 +38,16 @@ install() {
 }
 ping_ok() { [[ "$(curl -s -m 2 "http://127.0.0.1:$PORT/ping" 2>/dev/null)" == *'"ok": true'* ]]; }
 wait_up() { local i; for ((i = 0; i < ${1:-80}; i++)); do ping_ok && return 0; sleep 0.25; done; return 1; }
-workers() { pgrep -f -- "$W/.scripts/api-server.sh --worker " 2>/dev/null | sort | tr '\n' ' '; }
+# the pool's workers are the listener's own children: a request a worker is answering runs in a subshell of that worker with
+# the same command line, so matching the command line alone counts those too (2, 3, 4… while requests run). Once the
+# listener is gone, every process with that command line counts (a worker left behind must show)
+workers() {
+    if [[ -n "${MAIN:-}" ]] && kill -0 "$MAIN" 2>/dev/null; then
+        pgrep -P "$MAIN" -f -- "$W/.scripts/api-server.sh --worker " 2>/dev/null | sort | tr '\n' ' '
+    else
+        pgrep -f -- "$W/.scripts/api-server.sh --worker " 2>/dev/null | sort | tr '\n' ' '
+    fi
+}
 log_plain() { sed 's/\x1b\[[0-9;]*m//g' "$W/logs/listener.log"; }
 
 echo "API worker pool"
@@ -62,7 +71,9 @@ wait_up 80 || { echo "  FAIL the API did not come up"; log_plain | tail -20; exi
 MAIN=$(cat "$W/.data/api-server.pid" 2>/dev/null)
 check "served through socat"                       socat "$(log_plain | awk '/Transport/{print $2; exit}')"
 check "two workers announced"                      "2" "$(log_plain | sed -n 's/^API workers: \([0-9]*\).*/\1/p' | head -1)"
-check "two worker processes run"                   2 "$(workers | wc -w)"
+# the listener answers as soon as its first worker is up; the second follows a moment later (slower in CI's containers)
+for _i in $(seq 1 40); do _n=$(workers | wc -w); [[ "$_n" -ge 2 ]] && break; sleep 0.25; done
+check "two worker processes run"                   2 "$_n"
 # a worker's socket file is away for a moment between two connections: the count is taken once both are back
 # the run dir is the listener's own: .data/run-<its pid> (a listener that replaces this one keeps its own sockets)
 for _ in $(seq 1 50); do [[ "$(ls "$W/.data/run-$MAIN"/w*.sock 2>/dev/null | wc -l)" -eq 2 ]] && break; sleep 0.2; done
