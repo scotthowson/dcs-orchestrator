@@ -80,6 +80,19 @@ get_system_info() {
 # MAIN STATUS CHECK
 # =============================================================================
 
+# On-demand containers (Sablier stops them while idle and starts them on the first request): asleep is not down.
+# The list is the API's own (_sablier_names reads the routes), so this notice and the dashboard always agree.
+_ntfy_on_demand_names() {
+    [[ -n "${BASE_DIR:-}" && -f "$BASE_DIR/.scripts/api-server.sh" ]] || return 0
+    ( set --; source "$BASE_DIR/.scripts/api-server.sh" >/dev/null 2>&1 && _sablier_names ) 2>/dev/null || true
+}
+# _ntfy_asleep NAME — 0 when NAME is an on-demand container asleep with a running Sablier to wake it
+_ntfy_asleep() {
+    [[ -n "${_NTFY_ON_DEMAND+x}" ]] || _NTFY_ON_DEMAND=$(_ntfy_on_demand_names)
+    grep -qxF -- "$1" <<< "$_NTFY_ON_DEMAND" || return 1
+    [[ "$(docker inspect -f '{{.State.Running}}' Sablier 2>/dev/null)" == true ]]
+}
+
 check_containers_status() {
     local server_name="${SERVER_NAME:-Docker Server}"
 
@@ -120,7 +133,10 @@ check_containers_status() {
         status=$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)
         health=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null)
 
-        if [[ "$status" != "true" ]]; then
+        if [[ "$status" != "true" ]] && _ntfy_asleep "$container"; then
+            status_details+="$container (asleep, on demand) "
+            (( healthy_count++ ))
+        elif [[ "$status" != "true" ]]; then
             critical_down+=("$container")
             critical_issues+=("$container (STOPPED)")
         elif [[ "$health" == "unhealthy" ]]; then
@@ -143,7 +159,10 @@ check_containers_status() {
         status=$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)
         health=$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null)
 
-        if [[ "$status" != "true" ]]; then
+        if [[ "$status" != "true" ]] && _ntfy_asleep "$container"; then
+            status_details+="$container (asleep, on demand) "
+            (( healthy_count++ ))
+        elif [[ "$status" != "true" ]]; then
             important_down+=("$container")
         elif [[ "$health" == "unhealthy" ]]; then
             status_details+="$container (unhealthy) "

@@ -34,6 +34,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **On-demand containers are asleep, not down — everywhere.** A container Sablier stopped while idle (it starts on the
+  first request) is its own calm state in every count, card, score and alert: `GET /status`, `/stacks`, `/containers`,
+  `/fleet/overview` (the Proxmox page's VM cards), `/feed/summary`, `/maintenance/report`, the event stream and
+  `/topology` carry the asleep counts next to running/total (new fields only); the health score, the incident logic,
+  "stopped on its own" alerts and the `container_stopped` automation condition ignore a Sablier stop (the App-Data
+  drive guard's own stop no longer alerts either), and the startup notice lists a critical or important container that
+  sleeps as asleep, not STOPPED. What still matters stands out: an on-demand container whose Sablier is not running
+  ("can't wake", `summary.sablier_running`, `on_demand_stuck`) and on-demand containers a prune removed, hub and VMs
+  (`on_demand_missing_members`). `/feed/summary` counts an asleep stack as up (`stacks_asleep` beside it).
+
 - **One name: DCS Orchestrator.** The dashboard is no longer called "DCS Manager"; it is the dashboard of DCS
   Orchestrator. The install folder (`~/.Docker-Compose-Skeleton-AIO`) stays where it is.
 - **The dashboard image is `ghcr.io/scotthowson/dcs-orchestrator-ui`.** The old name,
