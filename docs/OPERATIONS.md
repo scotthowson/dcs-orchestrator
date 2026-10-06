@@ -214,7 +214,12 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 
 1. The archive is checked, and every part listed: an entry with `..`, an absolute name, a hard link out, or a file under a
    link is refused before anything is touched. Links that point outside are left out of the install's files.
-2. The stacks it restores are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT` seconds, 20).
+2. The stacks it restores are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT` seconds, 20). **A stack whose
+   containers do not stop is skipped**: its folder, App-Data and volumes stay exactly as they are and nothing of it is
+   started; everything else is restored. The result names it in `skipped` (`[{stack, reason}]`, the reason with Docker's
+   own words), in `warnings` and in `message` — *media-services was not restored: its containers did not stop (…). Stop it
+   and restore that stack alone.* — and the Backups page shows it in red. *(Before 4.0.35 its data was replaced under the
+   running containers, with a warning.)*
 3. Each stack's folder as it is now is **set aside** in `.data/pre-restore/<time>/` (a rename, nothing is copied), then the
    archive's copy takes its place, owners and modes as they were. A database's `-wal` written after the backup cannot
    be replayed over the restored database: the folder is the backup's, file for file. The link to a VM's App-Data goes back.
@@ -224,7 +229,7 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
    Restart the API afterwards so it reads the restored `.env` (the result says so).
 6. The containers start again.
 
-`{"stack": "sonarr"}` restores that stack alone (from a full backup or its own). The newest two sets in
+`{"stack": "sonarr"}` restores that stack alone (the way to finish a stack that was skipped, once it is stopped) (from a full backup or its own). The newest two sets in
 `.data/pre-restore` are kept, and the newest two `<path>.before-restore-<time>` beside a drive's App-Data
 (`BACKUP_PRE_RESTORE_KEEP`); older ones are removed when a restore is done — never the one it just made — and named in its
 result (`pruned`) and in the audit log. A backup made before 4.0.28 (no manifest) is unpacked over the install as
@@ -256,8 +261,40 @@ file, so a backup of many gigabytes never sits in the page's memory), and its `.
 (`sha256sum -c`). On a hub a VM's archive downloads the same way: the hub streams it from the VM
 (`GET /fleet/members/{id}/backups/{file}/download`). *Upload a backup* puts an archive kept elsewhere into
 `BACKUP_DEST_DIR` (on a VM through the hub): the archive itself is the request body (`POST /backups/upload`, at most
-`API_MAX_UPLOAD_SIZE`, 128 MB), written aside and listed only once it reads back whole as a DCS backup — its manifest,
-every part it names, nothing unsafe to unpack; anything else is refused with the reason, and nothing of it stays. It keeps
+`API_MAX_BACKUP_UPLOAD_SIZE`, 20 GB), written aside and listed only once it reads back whole as a DCS backup — its manifest,
+every part it names, nothing unsafe to unpack; anything else is refused with the reason, and nothing of it stays.
+
+Large uploads stream: the API's front hands an upload to a process of its own that knows the caller before it reads a byte
+of the body, and the body goes from the connection to the disk as it arrives — never into memory, never buffered in
+`.data` (an upload of 400 MB keeps the API's processes at the memory they use idle). Before it reads the body the API
+checks the size against `API_MAX_BACKUP_UPLOAD_SIZE` (`413`) and the room free in `BACKUP_DEST_DIR`, keeping 64 MB to
+spare (`507 Insufficient Storage`, with both sizes); `GET /backups/config` gives both (`upload: {max_bytes, free_bytes}`)
+and the Backups page checks a file against them before it sends it, then shows the upload's progress. An upload cut off
+half way (a closed tab, a dropped connection, nothing sent for `API_UPLOAD_IDLE_SECS`, 300 s) leaves nothing behind: the
+partial file is removed at once, and one left by a killed API process is swept the next time. **On a hub**, an upload
+into a VM streams through the hub as it arrives (nothing of it is kept on the hub's disk); the hub asks the VM its limit and
+its free room first and refuses with the VM's numbers, and a VM whose DCS is older than these uploads answers for itself.
+The limit is the smaller of the hub's and the VM's `API_MAX_BACKUP_UPLOAD_SIZE`.
+
+What sits in front of the API must let a large body through, and for long enough:
+
+- **The dashboard's container** (nginx) passes the upload routes on without a size limit of its own and without buffering
+  them (`client_max_body_size 0`, `proxy_request_buffering off`), with an hour between two reads or writes; every other
+  API route keeps a 1 MB limit there.
+- **Traefik** (the DCS template): no DCS route uses a body-limit middleware — the `limit` middleware in
+  `custom_routes/core-infrastructure/traefik.yml` buffers and caps bodies at 200 MB, so never add it to the dashboard's
+  route. Traefik v3 also stops reading a request after 60 s by default (`respondingTimeouts.readTimeout`), which cuts any
+  upload that takes longer; the template sets it to 6 hours on `websecure`. On an install whose Traefik came from an
+  older template, add this under `entryPoints: websecure:` in `Stacks/<stack>/App-Data/Traefik/traefik.yml` and restart
+  Traefik:
+
+  ```yaml
+      transport:
+        respondingTimeouts:
+          readTimeout: 6h
+  ```
+- **Cloudflare** (a proxied DNS record or a Tunnel) refuses request bodies over 100 MB on its Free and Pro plans: upload a
+  larger archive over the LAN (`http://<server>:3000`, or the API's port), or copy it into `BACKUP_DEST_DIR` by hand. It keeps
 its own name when that is a backup's name, else it gets one from when it was made (a browser's `… (1).tar.gz`); the same
 archive twice is stored once. An uploaded archive counts toward `BACKUP_RETENTION_COUNT` by the time it was made: restore
 it before the next backups push it out. By hand: `curl -H "Authorization: Bearer $TOKEN" -o x.tar.gz
@@ -284,7 +321,11 @@ server? Restore a recovery bundle*. Then sign in with your old account and start
 install, the Backup page restores a bundle the way a backup is restored:
 
 1. The configuration as it is now is kept as a snapshot (`.snapshots/pre-restore-<time>.tar.gz`).
-2. The stacks whose App-Data the bundle brings back are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT`).
+2. The stacks whose App-Data the bundle brings back are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT`). A stack
+   whose containers do not stop keeps its App-Data exactly as it is, and nothing of it is started; the rest of the
+   bundle is restored. The answer names it in `skipped` (`[{stack, reason}]`) and leads its message with it — *media-services
+   was not restored: its containers did not stop (…). Stop it and restore the bundle again.* *(Before 4.0.35 its
+   App-Data was replaced while it ran.)*
 3. Their App-Data as it is now is **set aside**, whole — in `.data/pre-restore/<time>/appdata/<stack>` (for Traefik's
    files `…/appdata/<stack>/Traefik`), or for App-Data on a drive of its own beside it, `<path>.before-restore-<time>`
    (a rename on the same drive) — so old and new files never mix, and the restore can be undone by moving the folder
@@ -297,7 +338,13 @@ The answer says which stacks were stopped (`stopped`) and started (`started`), w
 done (`warnings`): nothing is skipped without a word. The restore runs to the end even when the browser's connection
 drops (Traefik or the dashboard's own container can be among the stacks it stops); `GET /recovery` keeps its result as
 `last_restore`. (Earlier versions wrote the bundle's App-Data over the App-Data there, under running containers, and kept nothing.)
-A bundle whose name the browser changed (`… (1).enc`) is kept under a name of the usual form.
+A bundle whose name the browser changed (`… (1).enc`) is kept under a name of the usual form, and one whose name is taken
+gets a name of its own (nothing is overwritten). The Backup page uploads a bundle as the file itself, streamed like a
+backup archive (`POST /recovery/upload?filename=` with `Content-Type: application/octet-stream`, at most
+`API_MAX_BACKUP_UPLOAD_SIZE`, `507` when the bundles' folder has no room); a file that is not an encrypted bundle is
+refused. The setup wizard's restore still sends the bundle inside its request (`API_MAX_UPLOAD_SIZE`, 128 MB, about
+96 MB of bundle): for a larger bundle on a new machine, create the admin in the wizard, then upload and restore the
+bundle on the Backup page.
 
 A stack's App-Data on a drive goes back to the path its `.env` names: the folder must be there (mount the drive; on a
 new drive make the empty folder), otherwise that part is skipped and the result says so (`warnings`), nothing is written

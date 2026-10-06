@@ -34,8 +34,29 @@ while IFS= read -r -t 10 h; do
     hl="${h%%$'\r'}"
     [[ -z "$hl" ]] && break
     (( ++n > 200 )) && answer "431 Request Header Fields Too Large" "" "Too many headers"
-    if [[ "${hl,,}" == content-length:* ]]; then cl="${hl#*:}"; cl="${cl//[[:space:]]/}"; [[ "$cl" =~ ^[0-9]{1,9}$ ]] || cl=0; fi
+    if [[ "${hl,,}" == content-length:* ]]; then cl="${hl#*:}"; cl="${cl//[[:space:]]/}"; [[ "$cl" =~ ^[0-9]{1,15}$ ]] || cl=0; fi
 done
+path="${line#* }"; path="${path%% *}"; path="${path%%\?*}"
+
+# An upload (a backup archive, a recovery bundle: up to API_MAX_BACKUP_UPLOAD_SIZE, 20 GB) is never buffered here: a process
+# of its own reads the request line and the headers from a pipe and then the body straight from the client, as it arrives,
+# once it knows the caller (it refuses a stranger before a byte of the body is read). The body never touches this disk.
+if [[ "${line%% *}" == POST ]]; then
+    case "$path" in
+        /backups/upload|/recovery/upload|/fleet/members/*/backups/upload)
+            api="${DCS_API_SELF:-$(dirname "$0")/api-server.sh}"
+            [[ -x "$api" ]] || answer "503 Service Unavailable" $'Retry-After: 2\r\n' "The API is starting"
+            rm -f "$tmp"; trap - EXIT
+            # the reader of the body ends with the request (a client that sends nothing more must not keep it waiting)
+            exec {cin}<&0
+            exec {up}< <(printf '%s' "$req"; (( cl > 0 )) && exec head -c "$cl" <&"$cin")
+            upid=$!
+            "$api" --handle-request <&"$up"
+            exec {up}<&-
+            kill "$upid" 2>/dev/null
+            exit 0 ;;
+    esac
+fi
 (( cl <= 134217728 )) || answer "413 Content Too Large" "" "The body is larger than 128 MB"
 { printf 'DCS-PEER %s\r\n' "$peer"; printf '%s' "$req"; (( cl > 0 )) && head -c "$cl"; } > "$tmp"
 
@@ -48,7 +69,6 @@ oneshot() {
     exit 0
 }
 # a stream stays open: it would take a worker out of the pool for as long as its dashboard is open
-path="${line#* }"; path="${path%% *}"; path="${path%%\?*}"
 case "$path" in */stream) oneshot ;; esac
 
 # A worker's socket file is away for a moment between two connections (socat removes it on close, the next one binds it

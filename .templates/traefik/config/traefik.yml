@@ -57,6 +57,11 @@ entryPoints:
     address: ':443'
     forwardedHeaders:
       trustedIPs: *trustedIps
+    # Traefik v3 stops reading a request after 60 s by default, body included: a large upload from the browser (a backup
+    # archive on the dashboard, up to 20 GB) takes longer than that. Idle connections still close after 180 s.
+    transport:
+      respondingTimeouts:
+        readTimeout: 6h
     http:
       tls:
         certResolver: letsencrypt

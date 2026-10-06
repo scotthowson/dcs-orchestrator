@@ -12,10 +12,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   memory. `GET /backups/{file}/download` streams one with a session too (its SHA-256 in `X-Checksum-SHA256`), and
   `GET /backups/{file}/checksum` gives its size and `.sha256`. On a hub a VM's archive streams from the VM
   (`GET /fleet/members/{id}/backups/{file}/download`). `POST /backups/upload` takes an archive as the request body (at
-  most `API_MAX_UPLOAD_SIZE`), writes it aside and lists it only once it reads back whole as a DCS backup (manifest,
+  most `API_MAX_BACKUP_UPLOAD_SIZE`, 20 GB, see below), writes it aside and lists it only once it reads back whole as a DCS backup (manifest,
   every part, nothing unsafe to unpack); junk, a cut-short file, a tar.gz that is not a DCS backup and a checksum that
   does not match are refused with the reason, and nothing of them stays. A browser-renamed file gets a backup's name
   from its manifest; the same archive twice is stored once. `POST /fleet/members/{id}/backups/upload` puts one into a VM.
+- **Uploads of up to 20 GB, streamed to disk.** `POST /backups/upload`, its VM variant through a hub and the bundle
+  upload (`POST /recovery/upload`, now also the file itself as the body) take up to `API_MAX_BACKUP_UPLOAD_SIZE` (20 GiB);
+  every other route keeps its small limit. The worker pool's front no longer buffers an upload (it capped every body at
+  128 MB and wrote it to `.data` first): a process of its own reads the body from the connection once it knows the
+  caller, straight to the destination — measured with a 400 MB archive, the API's processes stay at their idle memory.
+  The room free in `BACKUP_DEST_DIR` is checked first (`507 Insufficient Storage`, with both sizes; 64 MB kept spare),
+  `GET /backups/config` and `GET /recovery` say the limit and the room (`upload`), and an upload cut off half way, or
+  silent for `API_UPLOAD_IDLE_SECS` (300 s), leaves nothing behind. Through a hub the upload streams on to the VM as it
+  arrives (nothing kept on the hub), after the VM's own limit and room are asked. The dashboard image's nginx passes the
+  upload routes on unbuffered and without a size cap, and the Traefik template reads a request for up to 6 hours (Traefik
+  v3 cut every request at 60 s). A bundle upload that is not an encrypted bundle is refused, and one whose name is taken
+  no longer overwrites it.
 - **A restore-from-scratch drill** in CI (`tests/restore-drill.sh`, as root on Debian 13): an install with stacks, App-Data
   on a drive of its own and Traefik's files is backed up and bundled, both are downloaded, the install is wiped, and it
   comes back from the uploaded backup and, again from nothing, from the bundle through the setup wizard; every file is
@@ -23,6 +35,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A stack whose containers do not stop is skipped by a restore**, a backup's and a recovery bundle's alike: its data
+  (a backup restore: its folder, App-Data and volumes; a bundle: its App-Data) stays exactly as it is and nothing of it
+  is started, while everything else is restored. The answer names it: `skipped: [{stack, reason}]` (Docker's own words
+  in the reason), a warning, and the message — "media-services was not restored: its containers did not stop (…). Stop
+  it and restore that stack alone." The audit log says it too. Before, its data was replaced under the running
+  containers, with a warning.
 - **A recovery bundle restore stops, sets aside and starts again**, as a backup restore does (`POST /recovery/restore`
   and the setup wizard's `POST /setup/restore`): the stacks whose App-Data the bundle brings back are stopped, their
   App-Data as it is now is set aside whole (`.data/pre-restore/<time>/appdata/<stack>`, or beside a drive's App-Data

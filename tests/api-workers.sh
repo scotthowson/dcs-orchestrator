@@ -34,7 +34,7 @@ install() {
     cp -r "$ROOT/.lib/." "$W/.lib/"; cp -r "$ROOT/.config/." "$W/.config/"
     grep -vE '^(API_BIND|API_AUTH_ENABLED|API_INSECURE_NO_AUTH|API_TRUSTED_PROXIES|API_IP_WHITELIST|API_PORT|API_WORKERS)=' "$ROOT/.env.example" > "$W/.env"
     printf 'services:\n  demo:\n    image: alpine:3\n    command: ["sleep","infinity"]\n' > "$W/Stacks/demo/docker-compose.yml"
-    printf 'API_PORT=%s\nMETRICS_ENABLED=false\nDDNS_ENABLED=false\nAPI_AUTH_ENABLED=true\n' "$PORT" >> "$W/.env"
+    printf 'API_PORT=%s\nMETRICS_ENABLED=false\nDDNS_ENABLED=false\nAPI_AUTH_ENABLED=true\nBACKUP_DEST_DIR=%s\n' "$PORT" "$W/backups" >> "$W/.env"
 }
 ping_ok() { [[ "$(curl -s -m 2 "http://127.0.0.1:$PORT/ping" 2>/dev/null)" == *'"ok": true'* ]]; }
 wait_up() { local i; for ((i = 0; i < ${1:-80}; i++)); do ping_ok && return 0; sleep 0.25; done; return 1; }
@@ -103,6 +103,17 @@ curl -sN -m 6 "http://127.0.0.1:$PORT/stream?token=$TOKEN" >/dev/null 2>&1 &
 sleep 1.5
 _t0=$(date +%s%N); _pc=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/ping"); _ms=$(( ($(date +%s%N) - _t0) / 1000000 ))
 check "two open streams do not take the two workers" "200 fast" "$_pc $( (( _ms < 1500 )) && echo fast || echo "slow (${_ms} ms)")"
+# an upload is never buffered by the front (it buffers other bodies, up to 128 MB): it streams to a process of its own,
+# which knows the caller before it reads a byte of the body
+head -c 157286400 /dev/zero > "$W/big.bin"
+R=$(curl -s -m 120 -X POST -T "$W/big.bin" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' "http://127.0.0.1:$PORT/backups/upload?filename=x.tar.gz" -w '\n%{http_code}')
+check "upload: 150 MB pass the front and reach the archive check" "400 Not a backup archive" "$(tail -1 <<< "$R") $(sed '$d' <<< "$R" | jq -r '.message' 2>/dev/null | cut -d: -f1)"
+check "upload: nothing of it was buffered or kept (run dir, destination)" "0 0" "$(find "$W/.data" -name 'req-*' -size +1M | wc -l) $(find "$W/backups" -name '.upload-*' 2>/dev/null | wc -l)"
+check "upload: a stranger is refused, and hears why"  401 "$(curl -s -m 60 -o /dev/null -w '%{http_code}' -X POST -T "$W/big.bin" -H 'Content-Type: application/octet-stream' "http://127.0.0.1:$PORT/backups/upload")"
+curl -s -m 1 --limit-rate 20M -o /dev/null -X POST -T "$W/big.bin" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' "http://127.0.0.1:$PORT/backups/upload?filename=x.tar.gz"
+sleep 1.5
+check "upload: one cut off half way leaves nothing, no process" "0 0" "$(find "$W/backups" -name '.upload-*' 2>/dev/null | wc -l) $(pgrep -fc -- "^head -c 157286400" 2>/dev/null || true)"
+rm -f "$W/big.bin"
 # every worker busy (no socket to connect to): the request is answered by a process of its own, not refused
 mkdir -p "$W/norun"
 check "no free worker: answered all the same"      yes "$(printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_DIR="$W/norun" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout 20 bash "$W/.scripts/api-dispatch.sh" 2>/dev/null | grep -q '"ok": true' && echo yes || echo no)"

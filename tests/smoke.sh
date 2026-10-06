@@ -1473,7 +1473,7 @@ sed -i '/^SMOKE_SETUP_MARK=/d' "$WORK/.env"
 UPB=$(base64 -w0 "$WORK/.data/recovery/$RBF")
 check "recovery: upload accepted"       200 "$(auth_request POST /recovery/upload "{\"filename\":\"dcs-recovery-smoke-20260101-000000.tar.gz.enc\",\"content_b64\":\"$UPB\"}" | status_of)"
 # a name the browser changed (a " (1)" on a second download) or a bad one is never used: the file is kept under one of ours
-check "recovery: a renamed upload is kept under a name of ours" "200 yes" "$(_UPR=$(auth_request POST /recovery/upload '{"filename":"../evil (1).enc","content_b64":"AAAA"}'); printf '%s %s' "$(status_of <<< "$_UPR")" "$(body_of <<< "$_UPR" | jq -r .file | grep -qE '^dcs-recovery-uploaded-[0-9]{8}-[0-9]{6}\.tar\.gz\.enc$' && echo yes || echo no)")"
+check "recovery: a renamed upload is kept under a name of ours" "200 yes" "$(_UPR=$(auth_request POST /recovery/upload '{"filename":"../evil (1).enc","content_b64":"U2FsdGVkX18AAAAAAAAAAA=="}'); printf '%s %s' "$(status_of <<< "$_UPR")" "$(body_of <<< "$_UPR" | jq -r .file | grep -qE '^dcs-recovery-uploaded-[0-9]{8}-[0-9]{6}\.tar\.gz\.enc$' && echo yes || echo no)")"
 check "recovery: nothing written outside the bundles' folder" no "$([[ -e "$WORK/.data/evil (1).enc" || -e "$WORK/evil (1).enc" ]] && echo yes || echo no)"
 check "recovery: three bundles listed"  3 "$(auth_request GET /recovery | body_of | jq -r '.bundles | length')"
 check "secret stored for schedules"     200 "$(auth_request POST /secrets '{"key":"RECOVERY_PASSPHRASE","value":"smoke-pass-123"}' | status_of)"

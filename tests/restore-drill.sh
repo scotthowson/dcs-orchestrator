@@ -10,7 +10,8 @@
 # link target, and owner when root. Anything missing, extra or different fails the drill and is named.
 # Then a bundle is restored over a running install: the stacks whose App-Data it brings back are stopped and started
 # again (only those that ran), the App-Data that was there is set aside whole (old and new files never mix), and the
-# copies kept from before a restore are pruned to BACKUP_PRE_RESTORE_KEEP.
+# copies kept from before a restore are pruned to BACKUP_PRE_RESTORE_KEEP. Last, a stack whose containers will not stop
+# is skipped by both restores: its data stays as it is, nothing of it is started, and the answer names it.
 #
 # No Docker daemon is needed or touched: a stand-in `docker` on PATH answers for the stacks' containers (which ones run,
 # what was stopped and started) and refuses images, volumes and helper containers. The request handler is driven over
@@ -31,7 +32,7 @@ FAKE="$W/fakebin"                  # the stand-in docker
 PASS=0; FAIL=0
 ROOTED=false; [[ "$(id -u)" == 0 ]] && ROOTED=true
 ADMIN_USER=drill; ADMIN_PASS='Drill-Pass-12345'; BUNDLE_PASS='Bundle-Pass-6789'
-mkdir -p "$OFF" "$FAKE/state/run" "$FAKE/state/off"
+mkdir -p "$OFF" "$FAKE/state/run" "$FAKE/state/off" "$FAKE/state/stuck"
 
 ok()   { PASS=$((PASS + 1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | head -40 | sed 's/^/         /'; return 0; }
@@ -58,9 +59,14 @@ case "${1:-}" in
         for a in "$@"; do [[ "$a" == label=com.docker.compose.project=* ]] && ids_of "${a#label=com.docker.compose.project=}"; done
         exit 0 ;;
     stop)
-        shift; [[ "${1:-}" == -t ]] && shift 2
-        for id in "$@"; do [[ -f "$st/run/$id" ]] && mv "$st/run/$id" "$st/off/$id"; echo "stop $id" >> "$st/actions.log"; done
-        exit 0 ;;
+        # a container named in state/stuck will not stop (Docker says so and the stop fails, as a hung one does)
+        shift; [[ "${1:-}" == -t ]] && shift 2; rc=0
+        for id in "$@"; do
+            echo "stop $id" >> "$st/actions.log"
+            if [[ -f "$st/stuck/$id" ]]; then echo "Error response from daemon: cannot stop container: $id: tried to kill container, but did not receive an exit event" >&2; rc=1; continue; fi
+            [[ -f "$st/run/$id" ]] && mv "$st/run/$id" "$st/off/$id"
+        done
+        exit "$rc" ;;
     start)
         shift
         for id in "$@"; do [[ -f "$st/off/$id" ]] && mv "$st/off/$id" "$st/run/$id"; echo "start $id" >> "$st/actions.log"; done
@@ -241,6 +247,15 @@ R=$(req_file POST "/backups/upload" "$W/plain.tar.gz")
 check "upload: a tar.gz that is not a DCS backup is refused" "400 yes" "$(code <<< "$R") $(body <<< "$R" | jq -r '.message' | grep -q 'no manifest' && echo yes || echo no)"
 check "upload: a wrong checksum is refused" 400 "$(req_file POST "/backups/upload?filename=$ARCH&sha256=$(printf '0%.0s' {1..64})" "$OFF/$ARCH" | code)"
 check "upload: no session, no upload" 401 "$(TOKEN=nope req_file POST "/backups/upload?filename=$ARCH" "$OFF/$ARCH" | code)"
+# a disk without room for it: refused before a byte is stored (a stand-in df says how much is free)
+mkdir -p "$W/tinydisk"; printf '#!/bin/sh\necho "Filesystem 1B-blocks Used Available Use%% Mounted on"\necho "/dev/tiny 100000000 99000000 1000000 99%% /"\n' > "$W/tinydisk/df"; chmod +x "$W/tinydisk/df"
+R=$(API_ENV=(PATH="$W/tinydisk:$FAKE:$PATH" DOCKER_COMPOSE_CMD="docker compose" DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1); req_file POST "/backups/upload?filename=$ARCH" "$OFF/$ARCH")
+check "upload: no room for it is a 507, said why" "507 yes" "$(code <<< "$R") $(body <<< "$R" | jq -r '.message' | grep -q '^Not enough room for this archive: .* free' && echo yes || echo no)"
+check "upload: the room and the limit are in GET /backups/config" "yes 21474836480" "$(req GET /backups/config | body | jq -r '"\(.upload.free_bytes > 0 | if . then "yes" else "no" end) \(.upload.max_bytes)"')"
+printf 'API_MAX_BACKUP_UPLOAD_SIZE=100000\n' >> "$INST/.env"
+R=$(req_file POST "/backups/upload?filename=$ARCH" "$OFF/$ARCH")
+check "upload: over API_MAX_BACKUP_UPLOAD_SIZE is a 413 that names it" "413 yes" "$(code <<< "$R") $(body <<< "$R" | jq -r '.message' | grep -q 'takes uploads up to 98 KB (API_MAX_BACKUP_UPLOAD_SIZE' && echo yes || echo no)"
+sed -i '/^API_MAX_BACKUP_UPLOAD_SIZE=/d' "$INST/.env"
 check "upload: nothing of the refused ones is left" "" "$(find "$BK" -mindepth 1 -maxdepth 1 2>/dev/null | grep -v '/recovery$')"
 R=$(req_file POST "/backups/upload?filename=$ARCH&sha256=$(cut -c1-64 "$OFF/$ARCH.sha256")" "$OFF/$ARCH")
 check "upload: stored under its own name, checked" "200 $ARCH true false" "$(code <<< "$R") $(body <<< "$R" | jq -r '"\(.filename) \(.verified) \(.renamed)"')"
@@ -287,6 +302,11 @@ printf 'CHANGED\n' > "$S/proxy/App-Data/Traefik/traefik.yml"
 mkdir -p "$S/proxy/App-Data/other"; printf 'other\n' > "$S/proxy/App-Data/other/x.txt"
 jq -nc --rawfile b <(base64 -w0 "$OFF/$BUN") --arg f "$BUN" '{filename: $f, content_b64: $b}' > "$W/up.json"
 check "bundle upload" 200 "$(req POST /recovery/upload "$(cat "$W/up.json")" | code)"
+R=$(req_file POST "/recovery/upload?filename=$BUN&sha256=$(sha256sum < "$OFF/$BUN" | cut -c1-64)" "$OFF/$BUN")
+check "bundle upload (the file itself, streamed): kept byte for byte, under a name of its own (that one is taken)" "200 yes yes" "$(code <<< "$R") $(F=$(body <<< "$R" | jq -r '.file'); [[ "$F" != "$BUN" && "$F" == dcs-recovery-uploaded-* ]] && echo yes || echo no) $(F=$(body <<< "$R" | jq -r '.file'); cmp -s "$OFF/$BUN" "$BK/recovery/$F" && echo yes || echo no)"
+rm -f "$BK/recovery/$(body <<< "$R" | jq -r '.file')" "$BK/recovery/$(body <<< "$R" | jq -r '.file').sha256"
+R=$(req_file POST "/recovery/upload?filename=dcs-recovery-junk.tar.gz.enc" "$W/junk.tar.gz")
+check "bundle upload: a file that is not a bundle is refused, nothing kept" "400 yes 0" "$(code <<< "$R") $(body <<< "$R" | jq -r '.message' | grep -q 'Not a DCS recovery bundle' && echo yes || echo no) $(find "$BK/recovery" -maxdepth 1 \( -name '*junk*' -o -name '.upload-*' \) | wc -l)"
 R=$(req POST /recovery/restore "{\"file\":\"$BUN\",\"passphrase\":\"$BUNDLE_PASS\",\"confirm\":true,\"restart\":false}")
 check "restore: done, nothing left undone" "200 []" "$(code <<< "$R") $(body <<< "$R" | jq -c '.warnings')"
 check "restore: the stacks that ran were stopped and started again, the stopped one left alone" '["drive","web"] ["drive","web"]' "$(body <<< "$R" | jq -c '.stopped, .started' | tr '\n' ' ' | sed 's/ $//')"
@@ -329,6 +349,35 @@ ST=$(wait_idle)
 check "prune: a backup restore with BACKUP_PRE_RESTORE_KEEP=1 keeps its own set alone" "1 $(jq -r '.last_restore.kept_before' <<< "$ST")" "$(find "$INST/.data/pre-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) $(find "$INST/.data/pre-restore" -mindepth 1 -maxdepth 1 -type d)"
 check "prune: …and one copy beside the drive" 1 "$(find "$W/disk2/appdata" -mindepth 1 -maxdepth 1 -name 'drive-app.before-restore-*' | wc -l)"
 check "prune: …named in its result" true "$(jq -r '.last_restore.pruned | length > 0' <<< "$ST")"
+
+# =============================================================================
+echo "A stack whose containers will not stop is skipped, by a backup restore and by a bundle restore"
+rm -f "$FAKE"/state/run/* "$FAKE"/state/off/*
+container web-1 web run; container drive-1 drive run; : > "$FAKE/state/stuck/drive-1"; : > "$FAKE/state/actions.log"
+printf 'CHANGED\n' > "$S/web/App-Data/html/index.html"; printf 'CHANGED\n' > "$DRV/conf/settings.conf"; printf 'mine\n' > "$S/drive/local-note.txt"
+R=$(req POST /backups/restore "{\"filename\":\"$ARCH\",\"confirm\":\"RESTORE\"}")
+check "skip (backup): the restore runs" 200 "$(code <<< "$R")"
+ST=$(wait_idle)
+check "skip (backup): drive is named, with Docker's reason" "drive yes" "$(jq -r '.last_restore.skipped | (map(.stack) | join(",")), (.[0].reason | test("did not stop .*did not receive an exit event") | if . then "yes" else "no" end)' <<< "$ST" | tr '\n' ' ' | sed 's/ $//')"
+check "skip (backup): …in the warnings and the message, as the owner reads it" "yes yes" \
+    "$(jq -r '.last_restore | (.warnings | any(startswith("drive was not restored: its containers did not stop (") and endswith("). Stop it and restore that stack alone."))), (.message | test("^drive was not restored: .*Stop it and restore that stack alone\\.$"))' <<< "$ST" | sed 's/true/yes/; s/false/no/' | tr '\n' ' ' | sed 's/ $//')"
+check "skip (backup): the other stacks were restored" "proxy,web" "$(jq -r '.last_restore.stacks | sort | join(",")' <<< "$ST")"
+check "skip (backup): drive's App-Data and folder are untouched" "CHANGED mine" "$(cat "$DRV/conf/settings.conf" "$S/drive/local-note.txt" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+check "skip (backup): web's App-Data is the archive's" "<h1>hello</h1>" "$(cat "$S/web/App-Data/html/index.html")"
+check "skip (backup): web stopped and started, drive asked to stop and never started" "stop drive-1 stop web-1 start web-1" "$( { grep '^stop ' "$FAKE/state/actions.log" | sort; grep '^start ' "$FAKE/state/actions.log"; } | tr '\n' ' ' | sed 's/ $//')"
+check "skip (backup): both run now (drive never stopped)" "drive-1 web-1" "$(running)"
+check "skip (backup): written in the audit log" yes "$(grep '"action":"backup_restore"' "$INST/.data/audit.jsonl" | tail -1 | grep -q 'not restored (containers did not stop): drive' && echo yes || echo no)"
+# the bundle: drive's App-Data stays, web's comes back
+: > "$FAKE/state/actions.log"
+printf 'CHANGED\n' > "$S/web/App-Data/html/index.html"
+R=$(req POST /recovery/restore "{\"file\":\"$BUN\",\"passphrase\":\"$BUNDLE_PASS\",\"confirm\":true,\"restart\":false}")
+check "skip (bundle): done, drive skipped with its reason" "200 drive yes" "$(code <<< "$R") $(body <<< "$R" | jq -r '(.skipped | map(.stack) | join(",")) + " " + (.skipped[0].reason | test("^its containers did not stop \\(Error response from daemon") | if . then "yes" else "no" end)')"
+check "skip (bundle): the message leads with it" yes "$(body <<< "$R" | jq -r '.message' | grep -q 'drive was not restored: its containers did not stop (.*). Stop it and restore the bundle again.' && echo yes || echo no)"
+check "skip (bundle): web stopped and started again, drive neither" '["web"] ["web"]' "$(body <<< "$R" | jq -c '.stopped, .started' | tr '\n' ' ' | sed 's/ $//')"
+check "skip (bundle): web's App-Data restored, drive's not" "web <h1>hello</h1> CHANGED" "$(body <<< "$R" | jq -r '[.app_data[] | select(startswith("drive") | not)] | map(select(. == "web")) | join(",")') $(cat "$S/web/App-Data/html/index.html") $(cat "$DRV/conf/settings.conf")"
+check "skip (bundle): docker never started drive-1" "stop drive-1 stop web-1 start web-1" "$(grep -E '^(stop|start) ' "$FAKE/state/actions.log" | tr '\n' ' ' | sed 's/ $//')"
+check "skip (bundle): GET /recovery remembers it" drive "$(req GET /recovery | body | jq -r '.last_restore.skipped | map(.stack) | join(",")')"
+rm -f "$FAKE/state/stuck/drive-1"
 
 echo
 echo "passed $PASS, failed $FAIL"

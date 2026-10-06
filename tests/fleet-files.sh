@@ -216,7 +216,12 @@ check "vm upload: through the hub, checked by the VM, named from its manifest" "
 check "vm upload: in the VM's BACKUP_DEST_DIR, with its .sha256" yes "$(f=$(jq -r '.filename' <<< "$U"); [[ -f "$MBK/$f" && -f "$MBK/$f.sha256" ]] && echo yes || echo no)"
 printf 'junk\n' > "$W/junk.bin"
 check "vm upload: junk is refused, the VM's reason passed on" "Not a backup archive" "$(_vm_up "$W/junk.bin" x.tar.gz | jq -r '.message' 2>/dev/null | cut -d: -f1)"
+check "vm upload: streamed through, byte for byte" yes "$(f=$(jq -r '.filename' <<< "$U"); cmp -s "$W/mini.tar.gz" "$MBK/$f" && echo yes || echo no)"
 check "vm upload: nothing of it stays, on the VM or the hub" "0 0" "$(find "$MBK" -name '.upload-*' | wc -l) $(find "$HUB/.data" -maxdepth 1 -name 'run-upload-*' | wc -l)"
+head -c 5000 /dev/urandom > "$W/five-kb.bin"; printf 'API_MAX_BACKUP_UPLOAD_SIZE=1000\n' >> "$MEM/.env"
+U=$(curl -s -m 60 -X POST -H "Authorization: Bearer $HT" -H 'Content-Type: application/octet-stream' --data-binary "@$W/five-kb.bin" -w '\n%{http_code}' "http://127.0.0.1:$HP/fleet/members/$MID/backups/upload?filename=x.tar.gz")
+check "vm upload: over the VM's own limit, the hub refuses it first and says so" "413 yes" "$(tail -1 <<< "$U") $(sed '$d' <<< "$U" | jq -r '.message' 2>/dev/null | grep -q 'takes uploads up to 1000 B (API_MAX_BACKUP_UPLOAD_SIZE in its .env)' && echo yes || echo no)"
+sed -i '/^API_MAX_BACKUP_UPLOAD_SIZE=/d' "$MEM/.env"
 
 echo "A save on the hub reaches the member"
 NEW=$'services:\n  demo:\n    image: alpine:3.20\n    command: ["sleep","infinity"]\n'
