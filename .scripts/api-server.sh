@@ -10050,15 +10050,24 @@ handle_stack_activity() {
 # SYSTEM UPDATE MANAGEMENT
 # =============================================================================
 
+# The compose file of the dashboard: the first stack whose compose file has `container_name: DCS-UI`, quoted or not, any
+# spacing, a trailing comment allowed. Prints its path; 1 when no stack has it.
+_dcs_ui_compose_file() {
+    local cf
+    for cf in "$COMPOSE_DIR"/*/docker-compose.yml; do
+        grep -qE "^[[:space:]]*container_name[[:space:]]*:[[:space:]]*([\"']DCS-UI[\"']|DCS-UI)[[:space:]]*(#.*)?\$" "$cf" 2>/dev/null || continue
+        printf '%s' "$cf"; return 0
+    done
+    return 1
+}
+
 # The dashboard image the core-infrastructure stack runs, as its compose file names it: a release says :latest, a release
 # candidate pins its own tag (tests/lint.sh keeps the tag and VERSION in step), so the update check and the update follow the file.
 _dcs_ui_image() {
     local cf img=""
-    for cf in "$COMPOSE_DIR"/*/docker-compose.yml; do
-        grep -q 'container_name: DCS-UI' "$cf" 2>/dev/null || continue
+    if cf=$(_dcs_ui_compose_file); then
         img=$(sed -n -E "s/^[[:space:]]+image:[[:space:]]*[\"']?(ghcr\.io\/[^\"'[:space:]]+-ui:[^\"'[:space:]]+)[\"']?[[:space:]]*(#.*)?\$/\1/p" "$cf" | head -1)
-        break
-    done
+    fi
     [[ "$img" == *'$'* ]] && img=""
     printf '%s' "${img:-ghcr.io/scotthowson/dcs-orchestrator-ui:latest}"
 }
@@ -10083,13 +10092,9 @@ _dcs_ui_registry_ref() {
 
 _DCS_UI_MIGRATE_ERR=""
 _dcs_ui_image_migrate() {
-    local cf="" f tmp re rev ref
+    local cf="" tmp re rev ref
     _DCS_UI_MIGRATE_ERR=""
-    for f in "$COMPOSE_DIR"/*/docker-compose.yml; do
-        grep -q 'container_name: DCS-UI' "$f" 2>/dev/null || continue
-        cf="$f"; break
-    done
-    [[ -n "$cf" ]] || return 0
+    cf=$(_dcs_ui_compose_file) || return 0
     cf=$(readlink -f -- "$cf") && [[ -f "$cf" ]] || return 0
     re="^([[:space:]]+image:[[:space:]]*[\"']?)${_DCS_UI_OLD_REPO//./\\.}([:@\"'[:space:]]|\$)"
     # …and the old name as the default of a variable (image: ${UI_IMAGE:-ghcr.io/…/docker-compose-skeleton-ui:latest})
@@ -10171,6 +10176,13 @@ _check_ui_image_update() {
     fi
 }
 
+# A `docker pull` that failed because the registry could not be reached (no network, no DNS, a timeout), as opposed to one
+# the registry answered (unknown tag, denied). Args: $1 — pull's exit status, $2 — its output.
+_dcs_pull_failed_offline() {
+    [[ "$1" == 124 ]] && return 0   # timeout(1): the registry never answered
+    grep -qiE 'dial tcp|no such host|lookup [^ ]+( on [^ ]+)?: |name resolution|could not resolve|network is unreachable|no route to host|connection refused|connection reset|i/o timeout|tls handshake timeout|context deadline exceeded|server misbehaving|request canceled while waiting for connection' <<< "$2"
+}
+
 # POST /system/ui-update/apply — Pull latest DCS-UI image and recreate container
 handle_ui_update_apply() {
     if ! _api_check_admin; then _api_error 403 "Admin access required"; return; fi
@@ -10183,32 +10195,35 @@ handle_ui_update_apply() {
         return
     fi
 
-    # Pull the latest image, under its current name; a compose file that still says the old name gets the same
-    # image under that name too, so the recreate below runs the new build either way
-    local pull_output pull_ref
-    pull_ref=$(_dcs_ui_registry_ref "$ui_image")
-    if ! pull_output=$(timeout 120 docker pull "$pull_ref" 2>&1); then
-        _api_error 500 "Failed to pull image: $pull_output"
-        return
-    fi
-    if [[ "$pull_ref" != "$ui_image" ]] && ! docker tag "$pull_ref" "$ui_image" >/dev/null 2>&1; then
-        _api_error 500 "Pulled $pull_ref but could not tag it as $ui_image"
-        return
-    fi
-
     # Find the compose file that has DCS-UI
-    local compose_file=""
-    local stack_dir=""
-    for _cf in "$COMPOSE_DIR"/*/docker-compose.yml; do
-        if grep -q 'container_name: DCS-UI' "$_cf" 2>/dev/null; then
-            compose_file="$_cf"
-            stack_dir=$(dirname "$_cf")
-            break
-        fi
-    done
-
-    if [[ -z "$compose_file" ]]; then
+    local compose_file="" stack_dir=""
+    if ! compose_file=$(_dcs_ui_compose_file); then
         _api_error 404 "DCS-UI compose file not found"
+        return
+    fi
+    stack_dir=$(dirname "$compose_file")
+
+    # Pull the latest image, under its current name; a compose file that still says the old name gets the same
+    # image under that name too, so the recreate below runs the new build either way. Without a network the
+    # dashboard is recreated from the image this machine already has (by the name the compose file uses), if any.
+    local pull_output pull_ref pull_rc=0 offline=false
+    pull_ref=$(_dcs_ui_registry_ref "$ui_image")
+    pull_output=$(timeout 120 docker pull "$pull_ref" 2>&1) || pull_rc=$?
+    if (( pull_rc != 0 )); then
+        if ! _dcs_pull_failed_offline "$pull_rc" "$pull_output"; then
+            _api_error 500 "Failed to pull image: $pull_output"
+            return
+        fi
+        # the compose file's name, or the registry name tagged locally under it (a file still on the old name)
+        if ! timeout 10 docker image inspect "$ui_image" >/dev/null 2>&1 \
+            && ! { [[ "$pull_ref" != "$ui_image" ]] && timeout 10 docker image inspect "$pull_ref" >/dev/null 2>&1 \
+                   && timeout 10 docker tag "$pull_ref" "$ui_image" >/dev/null 2>&1; }; then
+            _api_error 500 "No network, and the dashboard image $ui_image is not on this machine: connect the server to the internet and try again (${pull_output:0:300})"
+            return
+        fi
+        offline=true
+    elif [[ "$pull_ref" != "$ui_image" ]] && ! docker tag "$pull_ref" "$ui_image" >/dev/null 2>&1; then
+        _api_error 500 "Pulled $pull_ref but could not tag it as $ui_image"
         return
     fi
 
@@ -10218,7 +10233,12 @@ handle_ui_update_apply() {
     local _ov; _ov=$(dcs_stack_appdata_override "$stack_dir/.env") || _ov=""
     ( [[ -z "$_ov" ]] || export APP_DATA_DIR="$_ov"; $DOCKER_COMPOSE_CMD -f "$compose_file" "${env_args[@]}" up -d --force-recreate --no-deps dcs-ui ) </dev/null >/dev/null 2>&1 &
 
-    _api_success "{\"success\": true, \"message\": \"DCS-UI is being updated. The page will reconnect automatically.\"}"
+    if [[ "$offline" == true ]]; then
+        _api_success "$(jq -nc --arg img "$ui_image" '{success: true, offline: true, image: $img,
+            message: "No network: recreated from the image already on this machine. The page will reconnect automatically."}')"
+    else
+        _api_success "{\"success\": true, \"message\": \"DCS-UI is being updated. The page will reconnect automatically.\"}"
+    fi
 }
 
 # =============================================================================

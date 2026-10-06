@@ -13,6 +13,7 @@ services:
       done'
     healthcheck:
       test: ["CMD", "true"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 5s
