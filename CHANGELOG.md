@@ -3,10 +3,18 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [4.0.36] - 2026-10-06
 
 ### Added
 
+- **Waiting OS updates and a needed restart, at a glance.** `GET /system/os-updates` (any signed-in role) says how many
+  package updates wait on the server and how many are security fixes (dnf 4/5, apt from the lists it already has,
+  Arch `checkupdates`), whether a restart is needed to finish them, and whether automatic updates are on
+  (dnf-automatic, unattended-upgrades). An unprivileged look, without sudo, runs in the background at most every 6 h
+  (`OS_UPDATES_INTERVAL`), sooner after a restart or a package change, and answers from `.data/os-updates.json`;
+  `?refresh=1` (admin, once in 5 minutes) looks again, `?fleet=1` on a hub adds every VM, `OS_UPDATES_CHECK=false`
+  turns it off, and `--os-updates-check` runs one look in the foreground. The dashboard's "Needs your attention" card
+  uses it.
 - **A second step at sign-in to your apps (Authelia).** `GET/POST /authelia/second-step` keeps a setting in `.env`
   (`AUTHELIA_SECOND_STEP` = `off`, the default and what every server had so far, `all` or `apps`, with
   `AUTHELIA_SECOND_STEP_APPS` naming the apps) and writes it into Authelia's access rules: the rule DCS generates for
