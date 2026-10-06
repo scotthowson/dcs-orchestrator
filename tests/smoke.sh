@@ -3644,7 +3644,7 @@ check "rehost: hosts moved, others left"     'sonarr.new.test api.new.test keep.
 
 # the second step at sign-in (Authelia): the rule DCS manages and its own block, rewritten in a copy of the file and nowhere else
 _SSD="$WORK/step-fixture"; mkdir -p "$_SSD/base"; : > "$_SSD/base/.env"
-printf -- '---\ntotp:\n  issuer: smoke.test\n\naccess_control:\n  default_policy: deny\n  rules:\n    - domain:\n        - "auth.smoke.test"\n      policy: bypass\n    # dcs-main-rule: DCS sets the policy of this rule (one_factor: a password; two_factor: a password and a code or a passkey)\n    - domain:\n        - "*.smoke.test"\n      subject:\n        - "group:admins"\n      policy: one_factor\n    - domain: '"'"'mine.smoke.test'"'"'\n      policy: one_factor\n\nsession:\n  name: authelia_session\n  cookies:\n    - domain: smoke.test\n      authelia_url: "https://auth.smoke.test"\n' > "$_SSD/configuration.yml"
+printf -- '---\ntotp:\n  issuer: smoke.test\n\naccess_control:\n  default_policy: deny\n  rules:\n    - domain:\n        - "auth.smoke.test"\n      policy: bypass\n    # dcs-second-step: enrol (written by DCS: a name nothing is routed to, kept at two_factor so that Authelia offers the registration of a device under auth.<domain>/settings; leave it)\n    - domain:\n        - "second-step.smoke.test"\n      subject:\n        - "group:admins"\n      policy: two_factor\n    # dcs-main-rule: DCS sets the policy of this rule (one_factor: a password; two_factor: a password and a code or a passkey)\n    - domain:\n        - "*.smoke.test"\n      subject:\n        - "group:admins"\n      policy: one_factor\n    - domain: '"'"'mine.smoke.test'"'"'\n      policy: one_factor\n\nsession:\n  name: authelia_session\n  cookies:\n    - domain: smoke.test\n      authelia_url: "https://auth.smoke.test"\n' > "$_SSD/configuration.yml"
 command cp -f "$_SSD/configuration.yml" "$_SSD/configuration.orig"
 _step() { _lib eval "BASE_DIR='$_SSD/base'; _find_traefik_domain() { echo smoke.test; }; $1"; }
 _stepset() { _step "rc=0; _authelia_step_apply '$1' '$2' '$_SSD/configuration.yml' || rc=\$?; echo \"\$rc \$AUTHELIA_STEP_CHANGED\""; }
@@ -3656,7 +3656,7 @@ check "2fa: …with two factors"               1 "$(sed -n '/# dcs-second-step: 
 check "2fa: …in front of the rule for *."    yes "$(awk '/dcs-second-step: end/ {e = NR} /"\*\.smoke\.test"/ {w = NR} END {print (e && w > e) ? "yes" : "no"}' "$_SSD/configuration.yml")"
 check "2fa: the rule for * keeps one factor" 2 "$(grep -c 'policy: one_factor' "$_SSD/configuration.yml")"
 check "2fa: a rule added by hand stays"      1 "$(grep -c "domain: 'mine.smoke.test'" "$_SSD/configuration.yml")"
-check "2fa: read back"                       'one_factor|dash pve|1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: read back"                       'one_factor|dash pve|1|1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
 check "2fa: the same again changes nothing"  "0 false" "$(_stepset apps 'dash pve')"
 # another domain: the domain sync twins DCS's names, and the setting written again gives the same file
 printf 'PROXY_DOMAINS_EXTRA="other.test"\n' > "$_SSD/base/.env"
@@ -3664,12 +3664,24 @@ _step "_authelia_domains_sync '$_SSD/configuration.yml' '' ''" >/dev/null
 check "2fa: the domain sync twins the names" 'dash.smoke.test dash.other.test pve.smoke.test pve.other.test' "$(sed -n '/# dcs-second-step: begin/,/# dcs-second-step: end/p' "$_SSD/configuration.yml" | grep -oE '"[a-z.]+\.(smoke|other)\.test"' | tr -d '"' | paste -sd' ')"
 check "2fa: …and the setting agrees with it" "0 false" "$(_stepset apps 'dash pve')"
 check "2fa: all"                             "0 true" "$(_stepset all '')"
-check "2fa: all: the rule for * asks for two" 1 "$(grep -c 'policy: two_factor' "$_SSD/configuration.yml")"
+check "2fa: all: the rule for * asks for two" 2 "$(grep -c 'policy: two_factor' "$_SSD/configuration.yml")"
 check "2fa: all: DCS's block is gone"        0 "$(grep -c 'dcs-second-step' "$_SSD/configuration.yml")"
-check "2fa: all: read back"                  'two_factor||1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: all: read back"                  'two_factor||1|1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
 check "2fa: off"                             "0 true" "$(_stepset off '')"
 printf '' > "$_SSD/base/.env"; _step "_authelia_domains_sync '$_SSD/configuration.yml' '' 'other.test'" >/dev/null 2>&1
 check "2fa: off and one domain: the file as it was" same "$(cmp -s "$_SSD/configuration.yml" "$_SSD/configuration.orig" && echo same || echo differs)"
+# an older file without the registration rule (second-step.<domain>, two_factor): the read says so, any write puts it in, and
+# the write after that changes nothing
+sed '/# dcs-second-step: enrol/,/policy: two_factor/d' "$_SSD/configuration.orig" > "$_SSD/configuration.yml"
+check "2fa: an older file: no enrol rule"    'one_factor||1|0' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: …off still writes it in"         "0 true" "$(_stepset off '')"
+check "2fa: …the file is the generated one"  same "$(cmp -s "$_SSD/configuration.yml" "$_SSD/configuration.orig" && echo same || echo differs)"
+check "2fa: …and then nothing changes"       "0 false" "$(_stepset off '')"
+# its marker alone (the rule taken out by hand): written again, not swallowing the rule after it
+sed '/# dcs-second-step: enrol/,/policy: two_factor/{/enrol/!d}' "$_SSD/configuration.orig" > "$_SSD/configuration.yml"
+check "2fa: a stale enrol marker: read"      'one_factor||1|0' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: …written again in its place"     "0 true" "$(_stepset off '')"
+check "2fa: …the file is the generated one"  same "$(cmp -s "$_SSD/configuration.yml" "$_SSD/configuration.orig" && echo same || echo differs)"
 # an older file without the marker: the rule for *.<domain> is found and marked; a file without such a rule is left alone
 sed '/# dcs-main-rule/d' "$_SSD/configuration.orig" > "$_SSD/configuration.yml"
 check "2fa: an unmarked rule is found"       "0 true" "$(_stepset all '')"
@@ -3681,7 +3693,7 @@ sed 's/# dcs-second-step: end//' <(_step "P=smoke.test DOMS=smoke.test APPS=dash
 check "2fa: a begin line without its end"    "3 false" "$(_stepset off '')"
 # what a new Authelia gets: the generator hands its file and its domain over
 _step "_authelia_rules_rewrite '$_SSD/configuration.orig' '$_SSD/generated.yml' all '' smoke.test" >/dev/null
-check "2fa: a new configuration follows it"  1 "$(grep -c 'policy: two_factor' "$_SSD/generated.yml" 2>/dev/null)"
+check "2fa: a new configuration follows it"  2 "$(grep -c 'policy: two_factor' "$_SSD/generated.yml" 2>/dev/null)"
 # the verification code: the file notifier's last message, as Authelia 4.39 writes it
 printf 'Date: %s m=+25.676920121\nRecipient: {Smoke Tester smoke@smoke.test}\nSubject: Confirm your identity\nA ONE-TIME CODE HAS BEEN GENERATED TO COMPLETE A REQUESTED ACTION\n\nHi Smoke Tester,\n\nThe following one-time code should only be used in the prompt displayed in your browser.\n\n----------------------------------------\n\n7U3W3FLB\n\n----------------------------------------\n\nTo revoke the code, click the link below:\n\nhttps://auth.smoke.test/revoke/one-time-code?id=VJpiOp-ZR1m832oT1cQsdg\n' "$(date -u '+%Y-%m-%d %H:%M:%S.868920051 +0000 UTC')" > "$_SSD/notifications.txt"
 check "2fa: the code read from the message"  "$(printf 'Confirm your identity\tSmoke Tester smoke@smoke.test\t7U3W3FLB')" "$(_step "_authelia_notification_parse '$_SSD/notifications.txt'" | cut -f2- | sed 's/[{}]//g')"
@@ -3699,6 +3711,7 @@ printf 'http:\n  routers:\n    open:\n      rule: "Host(`open.smoke.test`)"\n   
 _ENV1=$(cat "$WORK/.env")
 _SSG=$(auth_request GET /authelia/second-step | body_of)
 check "2fa api: off by default"              "off off true" "$(jq -r '"\(.mode) \(.live.mode) \(.in_sync)"' <<< "$_SSG" 2>/dev/null)"
+check "2fa api: the enrol rule is seen"      "true second-step.smoke.test" "$(jq -r '"\(.live.enrol) \(.enrol_host)"' <<< "$_SSG" 2>/dev/null)"
 check "2fa api: the sign-in address"         https://auth.smoke.test "$(jq -r '.sign_in_url' <<< "$_SSG" 2>/dev/null)"
 check "2fa api: the apps behind Authelia"    dash "$(jq -r '[.choices[].name] | join(" ")' <<< "$_SSG" 2>/dev/null)"
 check "2fa api: the file notifier is seen"   true "$(jq -r '.file_notifier' <<< "$_SSG" 2>/dev/null)"
@@ -3720,6 +3733,14 @@ check "2fa api: the verification code"       "7U3W3FLB Confirm your identity tru
 check "2fa api: a viewer gets no code"       403 "$(viewer_request GET /authelia/verification-code | status_of)"
 : > "$_SSK/App-Data/Authelia/config/notifications.txt"
 check "2fa api: no message yet"              "true false" "$(auth_request GET /authelia/verification-code | body_of | jq -r '"\(.file_notifier) \(.found)"' 2>/dev/null)"
+# an older Authelia without the registration rule: the read says so, Repair puts it in (the setting as it is), again changes nothing
+sed '/# dcs-second-step: enrol/,/policy: two_factor/d' "$_SSD/live.orig" > "$_SSK/App-Data/Authelia/config/configuration.yml"
+check "2fa api: an older file: enrol false"  "false off" "$(auth_request GET /authelia/second-step | body_of | jq -r '"\(.live.enrol) \(.live.mode)"' 2>/dev/null)"
+check "2fa api: a viewer may not repair"     403 "$(viewer_request POST /authelia/second-step/repair | status_of)"
+check "2fa api: repair writes it"            "true false" "$(auth_request POST /authelia/second-step/repair | body_of | jq -r '"\(.changed) \(.restarted)"' 2>/dev/null)"
+check "2fa api: …the file is the generated one" same "$(cmp -s "$_SSK/App-Data/Authelia/config/configuration.yml" "$_SSD/live.orig" && echo same || echo differs)"
+check "2fa api: …enrol true, still off"      "true off true" "$(auth_request GET /authelia/second-step | body_of | jq -r '"\(.live.enrol) \(.live.mode) \(.in_sync)"' 2>/dev/null)"
+check "2fa api: repair again: nothing"       false "$(auth_request POST /authelia/second-step/repair | body_of | jq -r '.changed' 2>/dev/null)"
 printf 'access_control:\n  default_policy: deny\n  rules:\n    - domain: "app.smoke.test"\n      policy: one_factor\n' > "$_SSK/App-Data/Authelia/config/configuration.yml"
 check "2fa api: no rule to manage: 409"      409 "$(auth_request POST /authelia/second-step '{"mode":"all"}' | status_of)"
 check "2fa api: …and the setting unchanged"  off "$(_lib eval "BASE_DIR='$WORK'; _authelia_step_mode")"

@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `423` in total.
+Every endpoint below is `424` in total.
 
 ## Access levels
 
@@ -535,6 +535,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/fleet/hub/domain` | admin | The hub hands this member the fleet's proxy domain {domain, force}: written as PROXY_DOMAIN when this DCS has none yet (or the example.com placeholder), so the routes it writes for its stacks carry the fleet's domain; a domain of its own (a Traefik here) is kept unless force is true |
 | POST | `/domains` | admin | Add a domain {domain}: one Cloudflare token covers it; it gets its wildcard certificate, its sign-in (auth.<domain>) and its apex record (admin) |
 | POST | `/authelia/second-step` | admin | Set the second step at sign-in {mode: off\|all\|apps, apps: ["dash","traefik"]}: kept in .env and written into Authelia's access rules (only the rules DCS manages; a copy of the file is kept), then Authelia restarts to read it. off brings back a password alone (admin) |
+| POST | `/authelia/second-step/repair` | admin | Put DCS's registration rule (second-step.<domain>, two_factor, marked "# dcs-second-step: enrol") back into Authelia's access rules when an older file lacks it, the setting as it is; a copy of the file is kept and Authelia restarts to read it (admin) |
 | POST | `/domains/vm-default` | admin | The domain new VMs get {domain} ("" = this server's own) (admin) |
 | POST | `/fleet/members/{id}/domain` | admin | The VM answers under another of the hub's domains {domain} ("" = the hub's own): its routes move to it at once (admin) |
 | POST | `/fleet/docker-engine/update` | admin | Bring the Docker Engine up to date on members {members: ["id", …] or "all"} (each VM the hub built has passwordless sudo, so no password travels); the answer says what each member started |

@@ -3,6 +3,22 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Registering a device for the second step was impossible.** Authelia only offers the registration of a device (its
+  settings page said "There are no protected applications that require a second factor method") when its default
+  policy or at least one access rule asks for `two_factor`, and DCS wrote `one_factor` alone for `*.<domain>`. DCS now
+  keeps one rule of its own in every mode, marked `# dcs-second-step: enrol`: `second-step.<domain>` (a name nothing is
+  routed to), the same subject as the main rule, `two_factor`. A new Authelia gets it from its template, every rewrite of
+  the rules puts it back, and `GET /authelia/second-step` says whether it is there (`live.enrol`, `enrol_host`).
+  `POST /authelia/second-step/repair` (admin) writes it into an older Authelia's configuration with the setting as it is
+  (a copy of the file is kept, Authelia restarts to read it). With it, the settings page offers a one-time password and
+  a passkey while every real app still asks for a password alone in `off` mode; in `all` or `apps` mode a person with no
+  device registered is not locked out: Authelia's sign-in says the resource needs two-factor authentication and links
+  to the registration.
+
 ## [4.0.36] - 2026-10-06
 
 ### Added
