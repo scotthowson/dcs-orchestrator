@@ -2504,6 +2504,10 @@ handle_status() {
         fi
     fi
 
+    # on-demand containers asleep (Sablier stopped them on purpose): part of "stopped" as Docker counts it, healthy all the same
+    local sleeping_containers=0; [[ -n "${dinfo:-}" ]] && sleeping_containers=$(_sablier_asleep_count)
+    [[ "$sleeping_containers" =~ ^[0-9]+$ ]] || sleeping_containers=0
+
     # Volumes and networks (fast, no heavy operations)
     total_volumes=$(timeout 3 docker volume ls -q 2>/dev/null | wc -l)
     total_networks=$(timeout 3 docker network ls --format '{{.Name}}' 2>/dev/null | grep -cv '^bridge$\|^host$\|^none$') || total_networks=0
@@ -2557,7 +2561,7 @@ handle_status() {
     gpu_json=$(jq -c 'map(select(.utilization != null)) | first // null | if . == null then null else . + {fan_speed: (.fan_speed // 0)} end' <<< "$gpus_json" 2>/dev/null) || gpu_json=null
     [[ -n "$gpu_json" ]] || gpu_json=null
 
-    _api_success "{\"timestamp\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\", \"hostname\": \"$(_api_json_escape "$(_hostname)")\", \"server_name\": \"$(_api_json_escape "${SERVER_NAME:-}")\", \"uptime_seconds\": $uptime_seconds, \"docker\": {\"containers\": {\"total\": $total_containers, \"running\": $running_containers, \"stopped\": $stopped_containers}, \"images\": $total_images, \"volumes\": $total_volumes, \"networks\": $total_networks}, \"stacks\": {\"total\": ${#stacks[@]}, \"running\": $running_stacks}, \"system\": {\"load_average\": $load_avg, \"memory_mb\": {\"total\": $mem_total, \"available\": $mem_available}, \"swap_mb\": {\"total\": $swap_total, \"free\": $swap_free}, \"gpu\": $gpu_json, \"gpus\": $gpus_json, \"disk\": $disk_usage, \"cpu_count\": $cpu_count}}"
+    _api_success "{\"timestamp\": \"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\", \"hostname\": \"$(_api_json_escape "$(_hostname)")\", \"server_name\": \"$(_api_json_escape "${SERVER_NAME:-}")\", \"uptime_seconds\": $uptime_seconds, \"docker\": {\"containers\": {\"total\": $total_containers, \"running\": $running_containers, \"stopped\": $stopped_containers, \"sleeping\": $sleeping_containers}, \"images\": $total_images, \"volumes\": $total_volumes, \"networks\": $total_networks}, \"stacks\": {\"total\": ${#stacks[@]}, \"running\": $running_stacks}, \"system\": {\"load_average\": $load_avg, \"memory_mb\": {\"total\": $mem_total, \"available\": $mem_available}, \"swap_mb\": {\"total\": $swap_total, \"free\": $swap_free}, \"gpu\": $gpu_json, \"gpus\": $gpus_json, \"disk\": $disk_usage, \"cpu_count\": $cpu_count}}"
 }
 
 # Internal variant — returns JSON to stdout (used by export handler)
@@ -2577,13 +2581,16 @@ handle_system_info_internal() {
 # GET /health — Health report for every container (running, unhealthy, stopped, restart loops) On a hub, ?fleet=1 adds every member's containers (member, member_name, vmid) and per-member summaries
 handle_health() {
     local -a results=()
-    local total=0 healthy=0 unhealthy=0 stopped=0 sleeping=0
+    local total=0 healthy=0 unhealthy=0 stopped=0 sleeping=0 od_stuck=0
     # the first minutes after a boot the stacks are still being started: a container not up yet is not news
     local _hw_boot=false; (( $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 999999) <= ${HEALTH_WATCH_BOOT_GRACE:-300} )) && _hw_boot=true
     # Containers Sablier stops on purpose are idle, not down
     local -A _on_demand=()
     local _sn
     while IFS= read -r _sn; do [[ -n "$_sn" ]] && _on_demand["$_sn"]=1; done < <(_sablier_names)
+    # ...as long as Sablier runs to wake them (null: nothing here starts on demand)
+    local _sab_up=null; local -A _asleep=()
+    (( ${#_on_demand[@]} > 0 )) && { _sablier_up && _sab_up=true || _sab_up=false; }
 
     # Get restart threshold from config
     local _restart_threshold=5
@@ -2619,9 +2626,10 @@ handle_health() {
         total=$(( total + 1 ))
 
         if [[ "$state" != "running" && -n "${_on_demand[$name]:-}" ]]; then
-            sleeping=$(( sleeping + 1 ))
-            # stopped on purpose: its last health check is history, not a problem
+            sleeping=$(( sleeping + 1 )); _asleep["$name"]=1
+            # stopped on purpose: its last health check is history, not a problem (unless nothing can wake it)
             health="sleeping"
+            [[ "$_sab_up" == false ]] && od_stuck=$(( od_stuck + 1 ))
         elif [[ "$state" != "running" ]]; then
             stopped=$(( stopped + 1 ))
             _bad_names+=("$name"); _stopped_names+=("$name")
@@ -2640,7 +2648,7 @@ handle_health() {
             [[ "$_hw_boot" == true ]] || _fire_notifications "container_unhealthy" "container=$name" "status=restarting (${restart_count}x)" "stack=$cstack" 2>/dev/null
         fi
 
-        results+=("{\"name\": \"$(_api_json_escape "$name")\", \"state\": \"$state\", \"health\": \"$health\", \"restart_count\": ${restart_count:-0}, \"on_demand\": $([[ -n "${_on_demand[$name]:-}" ]] && echo true || echo false)}")
+        results+=("{\"name\": \"$(_api_json_escape "$name")\", \"state\": \"$state\", \"health\": \"$health\", \"restart_count\": ${restart_count:-0}, \"on_demand\": $([[ -n "${_on_demand[$name]:-}" ]] && echo true || echo false), \"sablier_up\": $([[ -n "${_on_demand[$name]:-}" ]] && echo "$_sab_up" || echo null)}")
     done <<< "$inspect_data"
 
     # Status logic: stopped containers are expected/normal and don't affect health.
@@ -2687,7 +2695,9 @@ handle_health() {
         case "$_tr_kind" in
             stopped)   _container_intended "$_tr_name" "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$_tr_name" 2>/dev/null)" || _tr_stopped+=("$_tr_name") ;;
             unhealthy) _tr_unhealthy+=("$_tr_name") ;;
-            recovered) _container_intended "$_tr_name" "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$_tr_name" 2>/dev/null)" || _tr_recovered+=("$_tr_name") ;;
+            # an on-demand container that fell asleep left the "bad" list without coming back: it is not news either way
+            recovered) [[ -n "${_asleep[$_tr_name]:-}" ]] && continue
+                       _container_intended "$_tr_name" "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$_tr_name" 2>/dev/null)" || _tr_recovered+=("$_tr_name") ;;
         esac
     done < <(_health_transitions "${_stopped_names[*]}" "${_unhealthy_names[*]}")
     _health_announce container_stopped "stopped on its own" ${_tr_stopped[@]+"${_tr_stopped[@]}"}
@@ -2712,7 +2722,7 @@ handle_health() {
 
     local _od_missing
     _od_missing=$(_sablier_missing | tr '\n' ' ')
-    _api_success "{\"status\": \"$overall\", \"summary\": {\"total\": $total, \"healthy\": $healthy, \"unhealthy\": $unhealthy, \"stopped\": $stopped, \"sleeping\": $sleeping, \"on_demand_missing\": $(_upd_json_list ${_od_missing})}, \"containers\": $containers_json, \"api\": {\"uptime_seconds\": $api_uptime, \"requests_total\": ${api_requests:-0}, \"errors_total\": ${api_errors:-0}, \"memory_kb\": ${api_mem_kb:-0}, \"pid\": ${api_pid_val:-0}}, \"docker\": {\"reachable\": $([[ "$docker_down" == "true" ]] && echo false || echo true), \"error\": \"$(_api_json_escape "$docker_err")\"}}"
+    _api_success "{\"status\": \"$overall\", \"summary\": {\"total\": $total, \"healthy\": $healthy, \"unhealthy\": $unhealthy, \"stopped\": $stopped, \"sleeping\": $sleeping, \"sablier_running\": $_sab_up, \"on_demand_stuck\": $od_stuck, \"on_demand_missing\": $(_upd_json_list ${_od_missing})}, \"containers\": $containers_json, \"api\": {\"uptime_seconds\": $api_uptime, \"requests_total\": ${api_requests:-0}, \"errors_total\": ${api_errors:-0}, \"memory_kb\": ${api_mem_kb:-0}, \"pid\": ${api_pid_val:-0}}, \"docker\": {\"reachable\": $([[ "$docker_down" == "true" ]] && echo false || echo true), \"error\": \"$(_api_json_escape "$docker_err")\"}}"
 }
 
 # Internal variant — returns JSON to stdout (used by export handler)
@@ -2783,8 +2793,10 @@ _backup_stack_times_record() {
 
 # GET /stacks — All stacks with running-container counts
 handle_stacks() {
-    local stacks _SAB_NAMES _down_od=""
+    local stacks _SAB_NAMES _down_od="" _sab_up=null
     _SAB_NAMES=$(_sablier_names 2>/dev/null)
+    # asleep is fine while Sablier runs to wake them (null: nothing here starts on demand)
+    [[ -n "$_SAB_NAMES" ]] && { _sablier_up && _sab_up=true || _sab_up=false; }
     read -ra stacks <<< "$(_api_get_stacks)"
     # on-demand containers that are not running (Sablier wakes them on a request): "<project>" per container, one docker call
     [[ -n "$_SAB_NAMES" ]] && _down_od=$(timeout 10 docker ps -a --filter status=created --filter status=exited --format '{{.Names}}	{{.Label "com.docker.compose.project"}}' 2>/dev/null \
@@ -2823,7 +2835,7 @@ handle_stacks() {
         [[ "$_upd" =~ ^[0-9]+$ ]] || _upd=0; [[ "$_ports" == \[* ]] || _ports='[]'; [[ -n "$_lb" ]] || _lb=null
         _links=$(_stack_card_hosts "$stack" "$_rdir" | jq -Rsc 'split("\n") | map(select(length > 0) | "https://" + .)') || _links='[]'
         [[ "$_links" == \[* ]] || _links='[]'
-        entries+=("{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $zc, \"hub_only\": $ho, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $has_env, \"compose_file\": \"$(_api_json_escape "$compose_file")\", \"total_containers\": $_tot, \"cpu_percent\": $_cpu, \"mem_percent\": $_mem, \"updates_available\": $_upd, \"ports\": $_ports, \"links\": $_links, \"last_backup\": $_lb}")
+        entries+=("{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $zc, \"sablier_up\": $_sab_up, \"hub_only\": $ho, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $has_env, \"compose_file\": \"$(_api_json_escape "$compose_file")\", \"total_containers\": $_tot, \"cpu_percent\": $_cpu, \"mem_percent\": $_mem, \"updates_available\": $_upd, \"ports\": $_ports, \"links\": $_links, \"last_backup\": $_lb}")
     done
 
     local json
@@ -2881,10 +2893,11 @@ handle_stack_detail() {
     containers_json=$(printf '%s,' "${container_entries[@]}")
     containers_json="[${containers_json%,}]"
     # every container of the stack, a sleeping one too (Sablier stopped it on purpose): each says whether it starts on demand
-    local _sabn; _sabn=$(_sablier_names 2>/dev/null)
-    containers_json=$(jq -c --arg n "$_sabn" '($n | split("\n") | map(select(. != ""))) as $od
+    local _sabn _sabu=null; _sabn=$(_sablier_names 2>/dev/null)
+    [[ -n "$_sabn" ]] && { _sablier_up && _sabu=true || _sabu=false; }
+    containers_json=$(jq -c --arg n "$_sabn" --argjson up "$_sabu" '($n | split("\n") | map(select(. != ""))) as $od
         | map(. + {on_demand: (((.name // "") | ltrimstr("/")) as $x | ($od | index($x)) != null)})
-        | map(. + {sleeping: (.on_demand and ((.state // "") | ascii_downcase) != "running")})' <<< "$containers_json" 2>/dev/null || printf '%s' "$containers_json")
+        | map(. + {sleeping: (.on_demand and ((.state // "") | ascii_downcase) != "running"), sablier_up: (if .on_demand then $up else null end)})' <<< "$containers_json" 2>/dev/null || printf '%s' "$containers_json")
 
     # Get images used
     local -a image_entries=()
@@ -2902,7 +2915,7 @@ handle_stack_detail() {
 
     local asleep=false; [[ "$status" == stopped ]] && _stack_asleep "$stack" && asleep=true
     local _zc; _zc=$(jq -r '[.[] | select(.sleeping == true)] | length' <<< "$containers_json" 2>/dev/null); [[ "$_zc" =~ ^[0-9]+$ ]] || _zc=0
-    _api_success "{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $_zc, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $([[ -f "$env_file" ]] && echo true || echo false), \"services\": $services_json, \"containers\": $containers_json, \"images\": $images_json}"
+    _api_success "{\"name\": \"$stack\", \"status\": \"$status\", \"running_containers\": $count, \"sleeping\": $asleep, \"sleeping_containers\": $_zc, \"sablier_up\": $_sabu, \"app_data\": $(_stack_appdata_json "$stack"), \"has_env\": $([[ -f "$env_file" ]] && echo true || echo false), \"services\": $services_json, \"containers\": $containers_json, \"images\": $images_json}"
 }
 
 # GET /stacks/{stack}/containers — Containers of one stack
@@ -3398,6 +3411,7 @@ _CONTAINERS_JQ='
                 ports: .Ports,
                 restart_count: 0,
                 on_demand: ($sab[.Names] // false),
+                sablier_up: (if ($sab[.Names] // false) then $sabup else null end),
                 stack: ((.Labels // "") | split(",") | map(select(startswith("com.docker.compose.project="))) | .[0] // "" | sub("^com.docker.compose.project="; "")),
                 cpu_percent: ($st[.Names].cpu // null),
                 mem_percent: ($st[.Names].mem // null)
@@ -3442,8 +3456,9 @@ handle_containers() {
 
         # Build containers JSON — read stats cache via --slurpfile (avoids shell arg size limits)
         local containers_json
-        local _sab_json; _sab_json=$(_sablier_names_json)
-        containers_json=$(printf '%s\n' "$raw_json" | jq -s --argjson now "$now_epoch" --argjson sab "$_sab_json" --slurpfile stats "$_stats_cache" "$_CONTAINERS_JQ" 2>/dev/null)
+        local _sab_json _sab_up=null; _sab_json=$(_sablier_names_json)
+        [[ "$_sab_json" != '{}' ]] && { _sablier_up && _sab_up=true || _sab_up=false; }
+        containers_json=$(printf '%s\n' "$raw_json" | jq -s --argjson now "$now_epoch" --argjson sab "$_sab_json" --argjson sabup "$_sab_up" --slurpfile stats "$_stats_cache" "$_CONTAINERS_JQ" 2>/dev/null)
 
         if [[ -n "$containers_json" ]]; then
             local total
@@ -3500,8 +3515,9 @@ handle_container_detail() {
     now_epoch=$(date +%s)
 
     local full_json
-    local _sab_json; _sab_json=$(_sablier_names_json)
-    full_json=$(printf '%s' "$_full_inspect" | jq -c --argjson now "$now_epoch" --argjson sab "$_sab_json" '
+    local _sab_json _sab_up=null; _sab_json=$(_sablier_names_json)
+    [[ "$_sab_json" != '{}' ]] && { _sablier_up && _sab_up=true || _sab_up=false; }
+    full_json=$(printf '%s' "$_full_inspect" | jq -c --argjson now "$now_epoch" --argjson sab "$_sab_json" --argjson sabup "$_sab_up" '
         .[0] | {
             name: (.Name | ltrimstr("/")),
             state: .State.Status,
@@ -3526,6 +3542,7 @@ handle_container_detail() {
             restart_policy: .HostConfig.RestartPolicy.Name,
             compose_project: (.Config.Labels["com.docker.compose.project"] // ""),
             on_demand: ($sab[(.Name | ltrimstr("/"))] // false),
+            sablier_up: (if ($sab[(.Name | ltrimstr("/"))] // false) then $sabup else null end),
             compose_service: (.Config.Labels["com.docker.compose.service"] // ""),
             compose_dir: (.Config.Labels["com.docker.compose.project.working_dir"] // "")
         }' 2>/dev/null)
@@ -4459,9 +4476,11 @@ handle_events() {
     events_raw=$(docker events --since '1h' --until "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --format '{{.Time}}|{{.Type}}|{{.Action}}|{{.Actor.Attributes.name}}' 2>/dev/null | tail -50)
 
     local -a entries=()
+    # on_demand: Sablier starts the container on the first request (its stop is falling asleep, not a crash)
+    local _od; _od=" $(_sablier_names 2>/dev/null | tr '\n' ' ') "
     while IFS='|' read -r timestamp type action name; do
         [[ -z "$timestamp" ]] && continue
-        entries+=("{\"timestamp\": $timestamp, \"type\": \"$(_api_json_escape "$type")\", \"action\": \"$(_api_json_escape "$action")\", \"name\": \"$(_api_json_escape "$name")\"}")
+        entries+=("{\"timestamp\": $timestamp, \"type\": \"$(_api_json_escape "$type")\", \"action\": \"$(_api_json_escape "$action")\", \"name\": \"$(_api_json_escape "$name")\", \"on_demand\": $([[ "$type" == container && -n "$name" && "$_od" == *" $name "* ]] && echo true || echo false)}")
     done <<< "$events_raw"
 
     local json
@@ -6441,6 +6460,8 @@ handle_maintenance_report() {
     running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
     total_containers=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')
     stopped=$(( total_containers - running ))
+    # of the stopped ones, those asleep on demand (Sablier stops them on purpose; a prune leaves them alone)
+    local sleeping; sleeping=$(_sablier_asleep_count); [[ "$sleeping" =~ ^[0-9]+$ ]] || sleeping=0
     total_images=$(docker images -q 2>/dev/null | wc -l | tr -d ' ')
     dangling_images=$(docker images -f 'dangling=true' -q 2>/dev/null | wc -l | tr -d ' ')
     total_volumes=$(docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')
@@ -6470,7 +6491,7 @@ handle_maintenance_report() {
         log_size=$(du -sh "$log_dir" 2>/dev/null | cut -f1)
     fi
 
-    _api_success "{\"containers\": {\"total\": $total_containers, \"running\": $running, \"stopped\": $stopped}, \"images\": {\"total\": $total_images, \"dangling\": $dangling_images}, \"volumes\": {\"total\": $total_volumes, \"dangling\": $dangling_volumes}, \"networks\": {\"total\": $total_networks, \"custom\": $custom_networks}, \"docker_df\": \"$docker_df\", \"app_data_size\": \"$(_api_json_escape "$app_data_size")\", \"log_size\": \"$(_api_json_escape "$log_size")\"}"
+    _api_success "{\"containers\": {\"total\": $total_containers, \"running\": $running, \"stopped\": $stopped, \"sleeping\": $sleeping}, \"images\": {\"total\": $total_images, \"dangling\": $dangling_images}, \"volumes\": {\"total\": $total_volumes, \"dangling\": $dangling_volumes}, \"networks\": {\"total\": $total_networks, \"custom\": $custom_networks}, \"docker_df\": \"$docker_df\", \"app_data_size\": \"$(_api_json_escape "$app_data_size")\", \"log_size\": \"$(_api_json_escape "$log_size")\"}"
 }
 
 # GET /maintenance/orphans — Containers, volumes and networks no stack references; ?fleet=1 on a hub lists every VM's too, each row tagged member, member_name, vmid
@@ -6665,7 +6686,7 @@ handle_maintenance_report_fleet() {
         | def total(f): ([$v[] | f | num] | add // 0);
         {fleet: true,
          totals: {
-           containers: {total: total(.containers.total), running: total(.containers.running), stopped: total(.containers.stopped)},
+           containers: {total: total(.containers.total), running: total(.containers.running), stopped: total(.containers.stopped), sleeping: total(.containers.sleeping)},
            images: {total: total(.images.total), dangling: total(.images.dangling)},
            volumes: {total: total(.volumes.total), dangling: total(.volumes.dangling)},
            networks: {total: total(.networks.total), custom: total(.networks.custom)},
@@ -14500,6 +14521,19 @@ _sablier_names_json() {
     printf '%s\n' "$names" | jq -R . | jq -sc 'map({(.): true}) | add // {}'
 }
 
+# The states of a container, the same everywhere (counts, the health score, alerts, automations): running; ASLEEP — one
+# Sablier starts on demand, stopped on purpose (healthy: the first request wakes it); stopped (a problem unless its stack
+# was stopped on purpose); unhealthy; restarting. An asleep container is never counted, alerted or scored as down — unless
+# Sablier itself is not running: then nothing can wake it, and that is a problem ("on demand, but Sablier is not running").
+# _sablier_up — this server's Sablier runs (the one that wakes its on-demand containers: the template's, or a VM's own)
+_sablier_up() { [[ "$(timeout 5 docker inspect -f '{{.State.Running}}' Sablier 2>/dev/null)" == true ]]; }
+# _sablier_asleep_count — how many of this server's on-demand containers are asleep right now (one docker call)
+_sablier_asleep_count() {
+    local names; names=$(_sablier_names 2>/dev/null); [[ -n "$names" ]] || { printf '0'; return 0; }
+    timeout 10 docker ps -a --format '{{.Names}}\t{{.State}}' 2>/dev/null \
+        | awk -F'\t' 'NR == FNR { od[$0] = 1; next } ($1 in od) && $2 != "running" { n++ } END { print n + 0 }' <(printf '%s\n' "$names") - 2>/dev/null || printf '0'
+}
+
 # The name Traefik knows a plugin by: its key under experimental.plugins whose moduleName
 # (any case: Traefik reads modulename too) is MODULE. A middleware must use this key —
 # "plugin: <key>:" — or Traefik refuses it and the router answers 404. Nothing when the
@@ -21200,6 +21234,9 @@ _automation_condition_met() {
         container_stopped)
             local names
             names=$(docker ps -a --filter status=exited --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep -v $'\t''Exited (0)' | cut -f1)
+            # asleep on demand is not stopped: Sablier stops those on purpose (often with a non-zero code) and wakes them itself
+            local _od; _od=$(_sablier_names 2>/dev/null)
+            [[ -n "$_od" && -n "$names" ]] && names=$(grep -vxF -f <(printf '%s\n' "$_od") <<< "$names")
             [[ "$target" != "*" ]] && names=$(grep -Fx -- "$target" <<< "$names")
             [[ -n "$names" ]] || return 1
             _AC_MATCHED=$(tr '\n' ' ' <<< "$names"); _AC_DETAIL="stopped: ${_AC_MATCHED% }"
@@ -21409,7 +21446,8 @@ _appdata_guard_tick() {
             continue
         fi
         ids=$(_backup_stack_running "$s" 2>/dev/null) || ids=""
-        if [[ -n "$ids" ]]; then compose_with_secrets "$COMPOSE_DIR/$s/docker-compose.yml" "$COMPOSE_DIR/$s/.env" stop >/dev/null 2>&1 || true; fi
+        # stopped by DCS on purpose (and said so below): the health watch must not also call it "stopped on its own"
+        if [[ -n "$ids" ]]; then _container_mark_intended_stack "$s"; compose_with_secrets "$COMPOSE_DIR/$s/docker-compose.yml" "$COMPOSE_DIR/$s/.env" stop >/dev/null 2>&1 || true; fi
         if [[ "$was" != missing ]]; then
             _notify_send "💾 $s was not started" "$s was not started: its App-Data $p is not there — is the drive mounted?" high "warning" "appdata" "$(jq -nc --arg s "$s" --arg p "$p" '{stack: $s, path: $p, state: "missing"}')" >/dev/null 2>&1 || true
             st=$(jq -c --arg s "$s" '. + {($s): "missing"}' <<< "$st")
@@ -21951,6 +21989,8 @@ _topology_local_json() {
     # Build network map: network_name -> containers[]
     declare -A network_containers
     declare -A container_ips   # container_ips["cname|netname"] = "ip"
+    # containers Sablier starts on demand (asleep is not down)
+    local _topo_od; _topo_od=" $(_sablier_names 2>/dev/null | tr '\n' ' ') "
 
     # Get all running containers with their networks
     while IFS= read -r container_id; do
@@ -21998,7 +22038,7 @@ _topology_local_json() {
             ips_json="[]"
         fi
 
-        nodes+=("{\"id\": \"$(_api_json_escape "$cname")\", \"state\": \"$cstate\", \"health\": \"$chealth\", \"image\": \"$(_api_json_escape "$cimage")\", \"stack\": \"$(_api_json_escape "$cstack")\", \"networks\": $container_nets_json, \"ports\": \"$(_api_json_escape "$cports")\", \"ip_addresses\": $ips_json}")
+        nodes+=("{\"id\": \"$(_api_json_escape "$cname")\", \"state\": \"$cstate\", \"health\": \"$chealth\", \"on_demand\": $([[ "$_topo_od" == *" $cname "* ]] && echo true || echo false), \"image\": \"$(_api_json_escape "$cimage")\", \"stack\": \"$(_api_json_escape "$cstack")\", \"networks\": $container_nets_json, \"ports\": \"$(_api_json_escape "$cports")\", \"ip_addresses\": $ips_json}")
     done < <(docker ps -a -q 2>/dev/null)
 
     # Build edges: containers sharing a network
@@ -25148,9 +25188,14 @@ handle_health_fleet() {
         | $own
         | .containers |= map(. + {member: null, member_name: $n, vmid: null})
         | .containers += $m.items
-        | .summary = (reduce ($members[] | .summary // {}) as $s ({total: 0, healthy: 0, unhealthy: 0, stopped: 0, sleeping: 0};
-              .total += (($s.total | numbers) // 0) | .healthy += (($s.healthy | numbers) // 0) | .unhealthy += (($s.unhealthy | numbers) // 0) | .stopped += (($s.stopped | numbers) // 0) | .sleeping += (($s.sleeping | numbers) // 0)))
+        | .summary = (reduce ($members[] | .summary // {}) as $s ({total: 0, healthy: 0, unhealthy: 0, stopped: 0, sleeping: 0, on_demand_stuck: 0};
+              .total += (($s.total | numbers) // 0) | .healthy += (($s.healthy | numbers) // 0) | .unhealthy += (($s.unhealthy | numbers) // 0) | .stopped += (($s.stopped | numbers) // 0) | .sleeping += (($s.sleeping | numbers) // 0)
+              | .on_demand_stuck += (($s.on_demand_stuck | numbers) // 0)))
         | .summary.on_demand_missing = ($own.summary.on_demand_missing // [])
+        # ...and those of each VM (recreated with POST /fleet/members/<id>/api/sablier/repair)
+        | .summary.on_demand_missing_members = [$members[] | select(.id != null) | {id, name, vmid, missing: ((.summary.on_demand_missing // []) | map(strings))} | select((.missing | length) > 0)]
+        # Sablier runs where it is needed: false when one DCS has on-demand containers and no Sablier to wake them
+        | .summary.sablier_running = ([$members[] | .summary.sablier_running // null | booleans] | if length == 0 then null else all end)
         | ([$members[] | select(.reachable == false)] | length) as $silent
         | .status = ([$members[] | .status] as $st | if ($st | index("critical")) != null then "critical" elif ($st | index("degraded")) != null or $silent > 0 then "degraded" else $own.status end)
         | .unreachable = $silent
@@ -25254,6 +25299,9 @@ _fleet_overview_json() {
                     containers: $rows,
                     containers_running: ([$rows[] | select(((.state // .status // "") | tostring) | test("^running"))] | length),
                     containers_total: ($rows | length),
+                    # on demand and asleep (Sablier stopped them on purpose): fine, not down; stuck = asleep with no Sablier to wake them
+                    containers_sleeping: ([$rows[] | select(.on_demand == true and ((((.state // .status // "") | tostring) | test("^running")) | not))] | length),
+                    containers_stuck: ([$rows[] | select(.on_demand == true and .sablier_up == false and ((((.state // .status // "") | tostring) | test("^running")) | not))] | length),
                     images: (($dk.images | numbers) // 0), networks: (($dk.networks | numbers) // 0), volumes: (($dk.volumes | numbers) // 0),
                     disk_pct: (($ds.system.disk.percent // "") | tostring | sub("%$"; "") | tonumber? // null)}' > "$tmp/$id.json" 2>/dev/null
         ) &
@@ -25264,8 +25312,8 @@ _fleet_overview_json() {
     local out
     out=$(jq -nc --argjson j "$j" --argjson live "$live" --arg v "$DCS_VERSION" --arg n "${SERVER_NAME:-}" --arg host "$(_hostname)" --argjson t "$(date +%s)" \
         '{at: $t, hub: {version: $v, name: $n, hostname: $host},
-          members: [$j.members[] | . as $m | (([$live[] | select(.id == $m.id)] | .[0]) // {reachable: false, error: "no answer", stacks: [], containers: [], stacks_total: 0, containers_running: 0, containers_total: 0, images: 0, networks: 0, volumes: 0}) as $l | (del(.identity.machine_id) + $l) | .placements = ($m.stacks // [])],
-          totals: {members: ($j.members | length), reachable: ([$live[] | select(.reachable)] | length), stacks: ([$live[].stacks_total] | add // 0), containers_running: ([$live[].containers_running] | add // 0), containers_total: ([$live[].containers_total] | add // 0), images: ([$live[].images] | add // 0), networks: ([$live[].networks] | add // 0), volumes: ([$live[].volumes] | add // 0)}}')
+          members: [$j.members[] | . as $m | (([$live[] | select(.id == $m.id)] | .[0]) // {reachable: false, error: "no answer", stacks: [], containers: [], stacks_total: 0, containers_running: 0, containers_total: 0, containers_sleeping: 0, containers_stuck: 0, images: 0, networks: 0, volumes: 0}) as $l | (del(.identity.machine_id) + $l) | .placements = ($m.stacks // [])],
+          totals: {members: ($j.members | length), reachable: ([$live[] | select(.reachable)] | length), stacks: ([$live[].stacks_total] | add // 0), containers_running: ([$live[].containers_running] | add // 0), containers_total: ([$live[].containers_total] | add // 0), containers_sleeping: ([$live[].containers_sleeping // 0] | add // 0), images: ([$live[].images] | add // 0), networks: ([$live[].networks] | add // 0), volumes: ([$live[].volumes] | add // 0)}}')
     mkdir -p "$(dirname "$FLEET_SNAPSHOT")" 2>/dev/null
     (umask 077; printf '%s\n' "$out" > "$FLEET_SNAPSHOT.tmp") && mv -f "$FLEET_SNAPSHOT.tmp" "$FLEET_SNAPSHOT"
     # nothing a member answered is written back as a placement: the stacks a member answers for are the hub's to give (a
@@ -28556,14 +28604,15 @@ _dash_feed_authorized() {
 handle_feed_summary() {
     local rows='[]'
     if command -v docker >/dev/null 2>&1; then
-        rows=$(timeout 10 docker ps -a --format '{{.State}}\t{{.Label "com.docker.compose.project"}}' 2>/dev/null \
-            | jq -Rsc '[split("\n")[] | select(length > 0) | split("\t") | {state: .[0], stack: (.[1] // "")}]' 2>/dev/null)
+        # on_demand: Sablier starts it on the first request (asleep is fine, never down)
+        rows=$(timeout 10 docker ps -a --format '{{.State}}\t{{.Label "com.docker.compose.project"}}\t{{.Names}}' 2>/dev/null \
+            | jq -Rsc --argjson od "$(_sablier_names_json 2>/dev/null || echo '{}')" '[split("\n")[] | select(length > 0) | split("\t") | {state: .[0], stack: (.[1] // ""), on_demand: ($od[.[2] // ""] // false)}]' 2>/dev/null)
         [[ "$rows" == \[* ]] || rows='[]'
     fi
     # a hub: the stacks and containers its VMs run count too (the fleet as a whole, from the snapshot the hub keeps anyway)
     if _fleet_has_members 2>/dev/null; then
         local _fs _fr; _fs=$(_fleet_snapshot 2>/dev/null)
-        _fr=$(jq -c '[.members[]? | select(.reachable) | (.containers // [])[] | {state: (.state // ""), stack: (.stack // "")}]' <<< "$_fs" 2>/dev/null) || _fr='[]'
+        _fr=$(jq -c '[.members[]? | select(.reachable) | (.containers // [])[] | {state: (.state // ""), stack: (.stack // ""), on_demand: (.on_demand == true)}]' <<< "$_fs" 2>/dev/null) || _fr='[]'
         [[ "$_fr" == \[* ]] && rows=$(jq -c --argjson f "$_fr" '. + $f' <<< "$rows" 2>/dev/null || printf '%s' "$rows")
     fi
     # the machine: how busy the processor is (two readings of /proc/stat a quarter of a second apart), the memory in use, and the
@@ -28597,10 +28646,13 @@ handle_feed_summary() {
     local lb; lb=$(jq -c '.last_backup // null' "$API_AUTH_DIR/backup-status.json" 2>/dev/null) || lb=null; [[ "$lb" == \{* ]] || lb=null
     _api_success "$(jq -nc --argjson r "$rows" --arg v "${DCS_VERSION:-}" --arg n "${SERVER_NAME:-}" --argjson now "$(date +%s)" --argjson sys "$sys" --argjson lb "$lb" '
         {ok: true, version: $v, name: $n, time: $now, system: $sys, last_backup: $lb,
-         containers: {total: ($r | length), running: ([$r[] | select(.state == "running")] | length)},
-         stacks: ([$r[] | select(.stack != "")] | group_by(.stack) | map({name: .[0].stack, total: length, running: ([.[] | select(.state == "running")] | length)}) | sort_by(.name)),
+         # asleep (on demand, stopped by Sablier on purpose) counts as fine: a stack is up when each container runs or sleeps
+         containers: {total: ($r | length), running: ([$r[] | select(.state == "running")] | length), sleeping: ([$r[] | select(.on_demand and .state != "running")] | length)},
+         stacks: ([$r[] | select(.stack != "")] | group_by(.stack) | map({name: .[0].stack, total: length, running: ([.[] | select(.state == "running")] | length),
+                   sleeping: ([.[] | select(.on_demand and .state != "running")] | length)}) | sort_by(.name)),
          stacks_total: ([$r[] | select(.stack != "") | .stack] | unique | length),
-         stacks_up: ([$r[] | select(.stack != "")] | group_by(.stack) | map(select(all(.[]; .state == "running"))) | length)}')"
+         stacks_up: ([$r[] | select(.stack != "")] | group_by(.stack) | map(select(all(.[]; .state == "running" or .on_demand))) | length),
+         stacks_asleep: ([$r[] | select(.stack != "")] | group_by(.stack) | map(select(all(.[]; .on_demand and .state != "running"))) | length)}')"
 }
 # GET /summary — The server at a glance for whoever is signed in or holds an API key: the same answer as /feed/summary (version, stacks, containers, the machine's load and disk)
 handle_summary() { handle_feed_summary; }
@@ -29929,6 +29981,8 @@ handle_health_score() {
     # containers Sablier stops on purpose are asleep, not down: they are counted apart and stay out of the score
     local -A _hs_od=()
     while IFS= read -r _hs_name; do [[ -n "$_hs_name" ]] && _hs_od["$_hs_name"]=1; done < <(_sablier_names 2>/dev/null)
+    # ...while Sablier runs to wake them: without it an asleep container cannot come back, and it counts as stopped
+    (( ${#_hs_od[@]} > 0 )) && ! _sablier_up && _hs_od=()
     # "docker ps" failing is a Docker that does not answer, not an empty list: every container is down
     _hs_ps=$(timeout 10 docker ps -a --format '{{.Names}}\t{{.State}}\t{{.Status}}' 2>/dev/null) || _hs_rc=$?
     (( _hs_rc != 0 )) && docker_down=true
@@ -31471,7 +31525,13 @@ handle_sse_stream() {
         elif [[ "${QUERY_PARAMS[fleet]:-}" == "1" ]]; then _sp_ids=$(_fleet_load | jq -r '.members[] | select(.reachable != false) | .id' 2>/dev/null); fi
     fi
     if [[ -z "${QUERY_PARAMS[member]:-}" ]]; then
+        # a container Sablier starts on demand is marked (dcs_on_demand): its stop is falling asleep, not a crash
+        local _ev_od; _ev_od=" $(_sablier_names 2>/dev/null | tr '\n' ' ') "
         docker events --format '{{json .}}' 2>/dev/null > >(while IFS= read -r event_line; do
+            if [[ "$_ev_od" != "  " && "$event_line" == *'"Type":"container"'* ]]; then
+                _ev_n=$(jq -r '.Actor.Attributes.name // ""' <<< "$event_line" 2>/dev/null)
+                [[ -n "$_ev_n" && "$_ev_od" == *" $_ev_n "* ]] && event_line=$(jq -c '. + {dcs_on_demand: true}' <<< "$event_line" 2>/dev/null || printf '%s' "$event_line")
+            fi
             printf "event: docker-event\ndata: %s\n\n" "$event_line" 2>/dev/null || exit 0
         done) &
         events_pid=$!
@@ -31484,7 +31544,7 @@ handle_sse_stream() {
     done
 
     # Periodic metrics loop (every 5 seconds)
-    local iteration=0
+    local iteration=0 _sse_od=""
     while true; do
         # Send heartbeat/metrics
         local load1
@@ -31505,20 +31565,23 @@ handle_sse_stream() {
         local mem_pct=0
         [[ $mem_total -gt 0 ]] && mem_pct=$(awk "BEGIN { printf \"%.1f\", (($mem_total - $mem_available) / $mem_total) * 100 }")
 
-        local running=0 total=0 _st
-        while IFS= read -r _st; do
+        local running=0 total=0 sleeping=0 _st _sn
+        # the on-demand names (Sablier wakes them) are read again once a minute: an asleep one is counted apart, not as down
+        (( iteration % 12 == 0 )) && { _sse_od=" $(_sablier_names 2>/dev/null | tr '\n' ' ') "; }
+        while IFS=$'\t' read -r _st _sn; do
             [[ -z "$_st" ]] && continue
             total=$((total + 1))
-            [[ "$_st" == "running" ]] && running=$((running + 1))
-        done < <(timeout 3 docker ps -a --format '{{.State}}' 2>/dev/null)
+            if [[ "$_st" == "running" ]]; then running=$((running + 1))
+            elif [[ "${_sse_od:-}" == *" $_sn "* ]]; then sleeping=$((sleeping + 1)); fi
+        done < <(timeout 3 docker ps -a --format '{{.State}}\t{{.Names}}' 2>/dev/null)
 
         local ts
         ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
         # (one VM's stream carries that VM's own metrics, forwarded as they come)
         if [[ -z "${QUERY_PARAMS[member]:-}" ]] || ! _fleet_has_members; then
-            printf "event: metrics\ndata: {\"ts\":\"%s\",\"cpu_pct\":%s,\"mem_pct\":%s,\"containers_running\":%d,\"containers_total\":%d}\n\n" \
-                "$ts" "$cpu_pct" "$mem_pct" "$running" "$total" 2>/dev/null || break
+            printf "event: metrics\ndata: {\"ts\":\"%s\",\"cpu_pct\":%s,\"mem_pct\":%s,\"containers_running\":%d,\"containers_total\":%d,\"containers_sleeping\":%d}\n\n" \
+                "$ts" "$cpu_pct" "$mem_pct" "$running" "$total" "$sleeping" 2>/dev/null || break
         fi
 
         # Heartbeat comment to keep connection alive
