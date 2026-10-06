@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `413` in total.
+Every endpoint below is `419` in total.
 
 ## Access levels
 
@@ -113,7 +113,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 |--------|------|--------|-------------|
 | GET | `/setup/status` | public | Always available, no auth. Reports whether the server needs setup; a node answers its role and the hub that manages it (null until it joined one) |
 | GET | `/setup/defaults` | public | Defaults and detected system values for the setup wizard (anonymous until setup is complete, admin afterwards; the saved .env values only to the admin once one exists) |
-| POST | `/setup/restore` | public | First-run only: restore a recovery bundle sent by the setup wizard {content_b64, passphrase}; once an admin exists, only that admin |
+| POST | `/setup/restore` | public | First-run only: restore a recovery bundle sent by the setup wizard {content_b64, passphrase}; once an admin exists, only that admin. App-Data already here is set aside and stacks that run are stopped and started again, as POST /recovery/restore does |
 | POST | `/setup/configure` | user | Apply the setup wizard's settings and stack list |
 | POST | `/setup/complete` | user | Mark first-run setup as finished |
 
@@ -351,6 +351,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/backups` | admin | Fleet merged |
 | GET | `/backups/status` | admin | Progress of the running backup or restore, or the last result (with what was missing, if anything) |
 | GET | `/backups/config` | admin | Backup source, destination and retention |
+| GET | `/backups/{file}/download` | admin | Download a backup archive, streamed from disk (its SHA-256 in the X-Checksum-SHA256 header); a one-time ?ticket= from POST /backups/download-link stands in for the session |
+| GET | `/backups/{file}/checksum` | admin | Size and SHA-256 of a backup archive (from its .sha256), to check a download against |
 | GET | `/snapshots` | admin | Fleet merged |
 | GET | `/rollback/{stack}/snapshots/{snapshot}` | user | Content of a rollback snapshot |
 | GET | `/rollback/{stack}/snapshots` | user | Rollback snapshots of a stack |
@@ -364,6 +366,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/backups/cancel` | admin | Kill a running backup (its paused containers are resumed, its partial files removed) |
 | POST | `/backups/verify` | admin | Check a backup without restoring it: its .sha256, gzip and tar read it to the end, every part its manifest names is in it {filename} |
 | POST | `/backups/restore` | admin | Restore a backup (confirmation required): the stacks it holds are stopped, set aside in .data/pre-restore, restored with their volumes and owners, and started again; {stack} restores that stack alone |
+| POST | `/backups/upload` | admin | Store a backup archive sent as the request body (application/octet-stream, at most API_MAX_UPLOAD_SIZE) in BACKUP_DEST_DIR ?filename=&sha256=: listed only once it reads back whole as a DCS backup (manifest, every part, nothing unsafe to unpack); kept under its own name, or one made from its manifest |
+| POST | `/backups/download-link` | admin | A one-time link (two minutes) that downloads a backup archive in the browser, with its size and SHA-256 {filename, member}: this server's archive, or on a hub a VM's (it streams through the hub) |
 | POST | `/snapshots/create` | admin | A configuration snapshot (every stack's configuration files, .env files, accounts and rules, templates, encrypted secrets, routes, schedules; no App-Data); ?fleet=1 on a hub takes one here and one on every member at the same moment (each DCS keeps its own, listed together by GET /snapshots?fleet=1), the answer says what each DCS did |
 | POST | `/snapshots/{snapshot}/restore` | admin | Restore a snapshot (confirmation required, policy-scanned): a snapshot of the current state is taken first; the stacks' files go back (and into the VM of a stack that runs in one), with routes, schedules, templates and settings |
 | POST | `/rollback/{stack}/restore` | admin | Restore a stack from a rollback snapshot (policy-scanned) |
@@ -470,7 +474,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/domains` | user | This server's domains: the primary one (the hub's stacks), the others, the default domain for new VMs, which VMs use which, and whether each has its certificate and sign-in |
 | GET | `/summary` | user | The server at a glance for whoever is signed in or holds an API key: the same answer as /feed/summary (version, stacks, containers, the machine's load and disk) |
 | GET | `/power` | user | UPS status: mains or battery, charge, runtime, load, and whether the watch loop runs |
-| GET | `/recovery` | admin | Recovery bundles on this box and how they are made (destination, off-box copy, retention, passphrase set?) |
+| GET | `/recovery` | admin | Recovery bundles on this box and how they are made (destination, off-box copy, retention, passphrase set?), and the result of the last bundle restore |
 | GET | `/fleet/images` | user | Every image on the hub and on each member in one list, each tagged with where it runs (member null = the hub); the counts add up across the fleet, registry_checked_at is the oldest check, last_update_at the newest pull |
 | GET | `/proxmox/status` | user | The Proxmox link: configured, reachable, version, node and VM counts, and what to fix when it is not |
 | GET | `/proxmox/nodes` | user | Every Proxmox node with CPU, memory, disk and uptime |
@@ -497,6 +501,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/fleet/identity` | user | What a hub needs to match this server to a guest: hostname, SMBIOS uuid, addresses, API port, version |
 | GET | `/fleet/feed` | user | This server's routes in Traefik feed form, for the hub to merge into its own feed (needs no feed token; the routes point at this host's published ports) |
 | GET | `/fleet/members/{id}/api/{path}` | user | Forward the call (GET, POST, PUT or DELETE) to that member with the hub's account; the caller's own role is checked against the inner path as if it were local (streams and auth are not forwarded) |
+| GET | `/fleet/members/{id}/backups/{file}/download` | admin | Download a VM's backup archive through the hub, streamed from the VM (a one-time ?ticket= from POST /backups/download-link with that member stands in for the session) |
 | GET | `/fleet/members/{id}/terminal` | admin | Can the hub open a shell in this VM: its ssh key, the VM's address and a live test {available, member, member_name, vmid, host, user, reason} |
 | GET | `/fleet/members/{id}/folders` | user | The folders of the Proxmox host a VM of the fleet has (virtiofs): what Proxmox maps, what the VM is given, where the VM mounts it and which containers use it; whether the token may share folders (it needs the role PVEMappingAdmin on /mapping/dir) and the steps under way. ?op=1: the steps alone (for polling) |
 | GET | `/fleet/members/{id}` | user | One member, with a live check that it answers |
@@ -535,6 +540,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/fleet/members/{id}/sync` | admin | Pull the files of every stack a VM runs into the hub's Stacks/ folders; {direction: "push"} sends the hub's copies into the VM instead; {stacks: [names]} limits it. The answer lists what moved and what failed |
 | POST | `/fleet/members/{id}/terminal/exec` | admin | Run a shell command inside a VM over the hub's ssh key {terminal_token, command, cwd?}: the hub's own Terminal session unlocks it; the same command guard, rate limit, 60 s limit and audit log as the host terminal |
 | POST | `/fleet/members/{id}/api/{path}` | admin | Forward the call (GET, POST, PUT or DELETE) to that member with the hub's account; the caller's own role is checked against the inner path as if it were local (streams and auth are not forwarded) |
+| POST | `/fleet/members/{id}/backups/upload` | admin | Upload a backup archive into a VM's BACKUP_DEST_DIR through the hub (the body and ?filename= as POST /backups/upload takes them); the VM checks it as it checks its own uploads |
 | POST | `/fleet/members/{id}/folders` | admin | Share a folder of the Proxmox host with a VM {name, path?, mount?, readonly?, restart?}: the mapping on Proxmox (made from path when name is new), the virtiofs device on the VM, a restart of the VM when it runs (restart: false leaves that to you), the mount in the VM (default /mnt/<name>) and a restart of the stacks that already name the folder. Answers at once (202); GET …/folders?op=1 follows the steps |
 | POST | `/fleet/members/{id}/folders/*/mount` | admin | Mount a folder the VM was given, in the VM, now {mount?, readonly?}: the line in its /etc/fstab and the mount (after a VM that was off is started, or to change read-only); the stacks that name the folder are restarted |
 | POST | `/fleet/members/{id}/folders/*/use` | admin | Mount a folder the VM was given, in the VM, now {mount?, readonly?}: the line in its /etc/fstab and the mount (after a VM that was off is started, or to change read-only); the stacks that name the folder are restarted |
@@ -544,7 +550,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/themes` | admin | Store a theme: the document itself {schema: 1, name, title, mode, palette: {accent, accentSecondary, bg, surface, surfaceRaised, border, text, textMuted, success, warning, danger, info}, font, radius, css}; replaces a theme of the same name; CSS that loads or runs something is cut out and reported (stripped) |
 | POST | `/themes/import` | admin | Fetch a theme document from an https address {url, replace} (256 KB at most) and store it; 409 when the name is taken and replace is not true |
 | POST | `/recovery/bundle` | admin | Write an encrypted recovery bundle now {passphrase?, include_app_data: [stacks], copy_remote} |
-| POST | `/recovery/restore` | admin | Restore a bundle from this box {file, passphrase, confirm, restart}; a pre-restore snapshot is kept |
+| POST | `/recovery/restore` | admin | Restore a bundle from this box {file, passphrase, confirm, restart}: the configuration is replaced (a pre-restore snapshot is kept); the stacks whose App-Data it holds are stopped, their App-Data set aside (.data/pre-restore, or <path>.before-restore-<time> on a drive), restored, and started again |
 | POST | `/recovery/upload` | admin | Store a bundle sent by the browser {filename, content_b64} |
 | POST | `/fleet/images/check` | admin | Registry check on the hub and on every member at once (each compares digests with its registries, no pulls); the answer counts per DCS |
 | PUT | `/themes/active` | admin | The theme every dashboard follows {name} ("" = the default look); it must be stored here first |

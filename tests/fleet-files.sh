@@ -196,6 +196,28 @@ check "hub: a note says where the stack and its data are" yes "$(grep -q 'runs i
 check "hub: the next read is the hub's own copy"    "$(cat "$HUB/Stacks/demo/docker-compose.yml")" "$(hub GET /stacks/demo/compose | jq -r '.content' 2>/dev/null)"
 check "hub: audit says the files were adopted"      yes "$(grep -q 'fleet_stack_adopted' "$HUB/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
 
+echo "A VM's backup archives, downloaded and uploaded through the hub"
+MBK="$W/member-backups"; mkdir -p "$MBK"; printf 'BACKUP_DEST_DIR=%s\n' "$MBK" >> "$MEM/.env"
+VMA="Docker-Compose-Backup-2026-01-02_030405.tar.gz"
+head -c 400000 /dev/urandom > "$MBK/$VMA"; (cd "$MBK" && sha256sum "$VMA" > "$VMA.sha256")
+L=$(hub POST /backups/download-link "{\"filename\":\"$VMA\",\"member\":\"$MID\"}")
+check "vm archive: a one-time link on the hub, the VM's checksum with it" "/fleet/members/$MID/backups/$VMA/download $(cut -c1-64 "$MBK/$VMA.sha256")" "$(jq -r '"\(.url | sub("[?]ticket=.*"; "")) \(.sha256)"' <<< "$L" 2>/dev/null)"
+curl -s -m 60 -o "$W/vm-dl.bin" "http://127.0.0.1:$HP$(jq -r '.url' <<< "$L")"
+check "vm archive: streamed from the VM through the hub, byte for byte" "$(sha256sum < "$MBK/$VMA")" "$(sha256sum < "$W/vm-dl.bin")"
+check "vm archive: the link is used up"             401 "$(curl -s -m 20 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HP$(jq -r '.url' <<< "$L")")"
+check "vm archive: one the VM does not have is a 404" 404 "$(hub_code POST /backups/download-link "{\"filename\":\"Docker-Compose-Backup-2020-01-01_000000.tar.gz\",\"member\":\"$MID\"}")"
+check "vm archive: the JSON proxy refuses a file route" 400 "$(hub_code GET "/fleet/members/$MID/api/backups/$VMA/download")"
+mkdir -p "$W/mini/.dcs-backup"
+jq -n '{format: 2, created_at: "2026-01-03T04:05:06Z", kind: "full", stack: "", parts: [], complete: true, warnings: []}' > "$W/mini/.dcs-backup/manifest.json"
+tar -czf "$W/mini.tar.gz" -C "$W/mini" ./.dcs-backup/manifest.json
+_vm_up() { curl -s -m 60 -X POST -H "Authorization: Bearer $HT" -H 'Content-Type: application/octet-stream' --data-binary "@$1" "http://127.0.0.1:$HP/fleet/members/$MID/backups/upload?filename=$2"; }
+U=$(_vm_up "$W/mini.tar.gz" 'mini%20(1).tar.gz')
+check "vm upload: through the hub, checked by the VM, named from its manifest" "true true" "$(jq -r '"\(.success) \(.renamed)"' <<< "$U" 2>/dev/null)"
+check "vm upload: in the VM's BACKUP_DEST_DIR, with its .sha256" yes "$(f=$(jq -r '.filename' <<< "$U"); [[ -f "$MBK/$f" && -f "$MBK/$f.sha256" ]] && echo yes || echo no)"
+printf 'junk\n' > "$W/junk.bin"
+check "vm upload: junk is refused, the VM's reason passed on" "Not a backup archive" "$(_vm_up "$W/junk.bin" x.tar.gz | jq -r '.message' 2>/dev/null | cut -d: -f1)"
+check "vm upload: nothing of it stays, on the VM or the hub" "0 0" "$(find "$MBK" -name '.upload-*' | wc -l) $(find "$HUB/.data" -maxdepth 1 -name 'run-upload-*' | wc -l)"
+
 echo "A save on the hub reaches the member"
 NEW=$'services:\n  demo:\n    image: alpine:3.20\n    command: ["sleep","infinity"]\n'
 R=$(hub POST /stacks/demo/compose "$(jq -nc --arg c "$NEW" '{content: $c}')")

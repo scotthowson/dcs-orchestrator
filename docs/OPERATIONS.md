@@ -225,8 +225,10 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 6. The containers start again.
 
 `{"stack": "sonarr"}` restores that stack alone (from a full backup or its own). The newest two sets in
-`.data/pre-restore` are kept (`BACKUP_PRE_RESTORE_KEEP`). A backup made before 4.0.28 (no manifest) is unpacked over the
-install as before, minus links that point outside.
+`.data/pre-restore` are kept, and the newest two `<path>.before-restore-<time>` beside a drive's App-Data
+(`BACKUP_PRE_RESTORE_KEEP`); older ones are removed when a restore is done — never the one it just made — and named in its
+result (`pruned`) and in the audit log. A backup made before 4.0.28 (no manifest) is unpacked over the install as
+before, minus links that point outside.
 
 By hand, on any machine: `tar -xzOf Docker-Compose-Backup-….tar.gz ./.dcs-backup/manifest.json` lists the parts, and
 `tar -xzOf Docker-Compose-Backup-….tar.gz ./.dcs-backup/stacks/<stack>.tar | sudo tar --numeric-owner -xpf - -C Stacks/<stack>`
@@ -248,6 +250,20 @@ app data live on; with the QEMU guest agent the file system is frozen for a cons
 
 `.scripts/backup-server.sh [stack]` makes the same backup in the foreground (the scheduler's `backup` action makes it too).
 
+**Download and upload.** Each archive on the Backups page has *Download*: the browser saves the archive
+itself, streamed from the disk (a one-time link from `POST /backups/download-link`, good for two minutes and that one
+file, so a backup of many gigabytes never sits in the page's memory), and its `.sha256` beside it to check the copy
+(`sha256sum -c`). On a hub a VM's archive downloads the same way: the hub streams it from the VM
+(`GET /fleet/members/{id}/backups/{file}/download`). *Upload a backup* puts an archive kept elsewhere into
+`BACKUP_DEST_DIR` (on a VM through the hub): the archive itself is the request body (`POST /backups/upload`, at most
+`API_MAX_UPLOAD_SIZE`, 128 MB), written aside and listed only once it reads back whole as a DCS backup — its manifest,
+every part it names, nothing unsafe to unpack; anything else is refused with the reason, and nothing of it stays. It keeps
+its own name when that is a backup's name, else it gets one from when it was made (a browser's `… (1).tar.gz`); the same
+archive twice is stored once. An uploaded archive counts toward `BACKUP_RETENTION_COUNT` by the time it was made: restore
+it before the next backups push it out. By hand: `curl -H "Authorization: Bearer $TOKEN" -o x.tar.gz
+http://host:9876/backups/<file>/download`, and `curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream'
+--data-binary @x.tar.gz "http://host:9876/backups/upload?filename=<file>"`.
+
 ## The recovery bundle
 
 One encrypted file (AES-256) that rebuilds the install on another machine: the root `.env`, the secret
@@ -265,9 +281,23 @@ which the DCS VM images do not have)*.
 
 **To restore** on a new machine: install DCS, and in the wizard's *Admin* step open *Moving from another
 server? Restore a recovery bundle*. Then sign in with your old account and start the stacks. On a running
-install, the Backup page restores a bundle after taking a snapshot of the current state (its configuration: App-Data the
-bundle holds is written over the App-Data there, which that snapshot does not keep; stop those stacks first). A bundle
-whose name the browser changed (`… (1).enc`) is kept under a name of the usual form.
+install, the Backup page restores a bundle the way a backup is restored:
+
+1. The configuration as it is now is kept as a snapshot (`.snapshots/pre-restore-<time>.tar.gz`).
+2. The stacks whose App-Data the bundle brings back are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT`).
+3. Their App-Data as it is now is **set aside**, whole — in `.data/pre-restore/<time>/appdata/<stack>` (for Traefik's
+   files `…/appdata/<stack>/Traefik`), or for App-Data on a drive of its own beside it, `<path>.before-restore-<time>`
+   (a rename on the same drive) — so old and new files never mix, and the restore can be undone by moving the folder
+   back. An empty folder (a new machine's) is simply filled.
+4. The bundle's copy goes in its place, owners and modes as they were.
+5. The containers that ran start again; a stack that was stopped stays stopped.
+
+The answer says which stacks were stopped (`stopped`) and started (`started`), where each App-Data went (`set_aside`:
+`{stack, part, path, kept_in}`, and `kept_before`), what older copies were removed (`pruned`), and what could not be
+done (`warnings`): nothing is skipped without a word. The restore runs to the end even when the browser's connection
+drops (Traefik or the dashboard's own container can be among the stacks it stops); `GET /recovery` keeps its result as
+`last_restore`. (Earlier versions wrote the bundle's App-Data over the App-Data there, under running containers, and kept nothing.)
+A bundle whose name the browser changed (`… (1).enc`) is kept under a name of the usual form.
 
 A stack's App-Data on a drive goes back to the path its `.env` names: the folder must be there (mount the drive; on a
 new drive make the empty folder), otherwise that part is skipped and the result says so (`warnings`), nothing is written

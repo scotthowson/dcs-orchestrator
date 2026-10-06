@@ -98,6 +98,7 @@ doc_path() {
         "/images/*"*)                   p="${p/\*/\{image\}}" ;;
         "/templates/*"*)                p="${p/\*/\{template\}}" ;;
         "/snapshots/*"*)                p="${p/\*/\{snapshot\}}" ;;
+        "/backups/*"*)                  p="${p/\*/\{file\}}" ;;
         "/secrets/*"*)                  p="${p/\*/\{key\}}" ;;
         "/schedules/*"*)                p="${p/\*/\{id\}}" ;;
         "/automations/*"*)              p="${p/\*/\{id\}}" ;;
@@ -108,6 +109,7 @@ doc_path() {
         "/health/score/*")              p="/health/score/{stack}" ;;
         "/export/*")                    p="/export/{health|system|config}" ;;
         "/fleet/members/*/api/*")       p="/fleet/members/{id}/api/{path}" ;;
+        "/fleet/members/*/backups/*/download") p="/fleet/members/{id}/backups/{file}/download" ;;
         "/fleet/members/*"*)            p="${p/\*/\{id\}}" ;;
         "/fleet/jobs/*"*)               p="${p/\*/\{id\}}" ;;
         "/fleet/templates/*")           p="/fleet/templates/{vmid}" ;;
