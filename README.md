@@ -26,7 +26,7 @@
 
 <p align="center">
   <a href="docs/TEMPLATES.md"><img src="https://img.shields.io/badge/templates-200-34d399?style=flat-square" alt="200 templates"></a>
-  <a href="docs/API.md"><img src="https://img.shields.io/badge/REST_API-360%2B_endpoints-22d3ee?style=flat-square" alt="360+ API endpoints"></a>
+  <a href="docs/API.md"><img src="https://img.shields.io/badge/REST_API-420%2B_endpoints-22d3ee?style=flat-square" alt="420+ API endpoints"></a>
   <a href="docs/VM-IMAGES.md"><img src="https://img.shields.io/badge/VM_images-8-a78bfa?style=flat-square" alt="8 VM images"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-fbbf24?style=flat-square" alt="MIT license"></a>
 </p>
@@ -44,7 +44,7 @@
 
 DCS Orchestrator deploys, runs and watches your containers. Every stack stays a plain
 `docker-compose.yml` that you can read and run by hand. Around it, DCS adds what a homelab or a
-small server needs: 150+ ready templates, Traefik with wildcard HTTPS, Cloudflare DNS, Authelia
+small server needs: 200 ready templates, Traefik with wildcard HTTPS, Cloudflare DNS, Authelia
 single sign-on, CrowdSec, updates with rollback, backups and a recovery bundle, health scores,
 notifications, a Discord bot and a REST API.
 
@@ -53,13 +53,26 @@ Docker and DCS in it, moves the stack in and then drives the whole host as one m
 
 > [!NOTE]
 > DCS Orchestrator was called **Docker Compose Skeleton AIO** until 4.0. It is the same project:
-> the install directory, the settings and the API stay the same.
+> the settings and the API stay the same, and the install directory keeps its old name,
+> `~/.Docker-Compose-Skeleton-AIO`, on purpose: the updater and the VMs a hub builds rely on it.
+
+## 🙋 About this project
+
+DCS Orchestrator started as a passion project at home: I wanted one place to run the Docker stacks on my
+own server, and it grew from there. Most of the code was written with AI assistance (Claude, through
+Claude Code), with me directing the work, testing it on my own machines and deciding what ships. I have
+three kids and not all the time in the world, so answers to issues and pull requests may be slow. It
+works for me in daily use, but if you run it for other people, read what it does before you trust it
+with their data, and keep backups of your own: DCS has backups, snapshots and a recovery bundle
+([Operations → Backups](docs/OPERATIONS.md#backups-and-snapshots)), and a restore drill runs in CI, but
+nothing replaces a copy you made yourself. Bug reports and contributions are welcome; security problems
+go through [SECURITY.md](SECURITY.md).
 
 <table>
   <tr>
     <td width="33%"><a href="docs/img/screens/dashboard.png"><img src="docs/img/screens/dashboard.png" alt="The dashboard: stacks, containers, health and resources at a glance"></a></td>
     <td width="33%"><a href="docs/img/screens/proxmox.png"><img src="docs/img/screens/proxmox.png" alt="The Proxmox page: the node, this hub with its Proxmox tags, and every guest with the DCS it runs"></a></td>
-    <td width="33%"><a href="docs/img/screens/templates.png"><img src="docs/img/screens/templates.png" alt="The template gallery: 151 templates grouped by category"></a></td>
+    <td width="33%"><a href="docs/img/screens/templates.png"><img src="docs/img/screens/templates.png" alt="The template gallery: 200 templates grouped by category"></a></td>
   </tr>
   <tr>
     <td align="center"><sub>Dashboard</sub></td>
@@ -85,8 +98,8 @@ Docker and DCS in it, moves the stack in and then drives the whole host as one m
 | 📄 **It is just Compose** | A stack is a folder: `Stacks/<name>/docker-compose.yml` and its `.env`. Read it, edit it, run it by hand with `./compose.sh`. Your containers keep running when DCS stops. |
 | 🖥️ **The VM is the stack** | On Proxmox, the hub builds one VM per stack and runs exactly that stack in it; the stack's files stay on the hub (`Stacks/<name>/`), pushed into the VM on every save. Proxmox isolates, snapshots and backs up each VM; the hub shows them all as one. |
 | 🔋 **Batteries included** | Reverse proxy with HTTPS, DNS records, single sign-on, intrusion detection, updates, backups, health and alerts. The setup wizard wires them up for you. |
-| 🎛️ **One place to run it** | A web dashboard (also as Android, Linux and Windows apps), a REST API with 330+ endpoints and a Discord bot, all with the same accounts and roles. |
-| 🪶 **Nothing to compile** | The API is a Bash program behind `socat`; `jq` and Docker Compose do the work. It runs wherever Docker runs. |
+| 🎛️ **One place to run it** | A web dashboard (also as Android, Linux and Windows apps), a REST API with 420+ endpoints and a Discord bot, all with the same accounts and roles. |
+| 🪶 **Nothing to compile** | The API is a Bash program: a small pool of worker processes behind `socat`; `jq` and Docker Compose do the work. It runs wherever Docker runs. |
 
 ## 🚀 Get started
 
@@ -123,7 +136,7 @@ walk you through it.
 </p>
 
 - **The dashboard** (`DCS-UI`, a container on port 3000) serves the web app and forwards `/api/` to the API.
-- **The API** (port 9876) is one Bash process per request. It runs `docker compose` in `Stacks/<name>/`,
+- **The API** (port 9876) is a small pool of Bash worker processes. It runs `docker compose` in `Stacks/<name>/`,
   writes Traefik routes and Cloudflare records, keeps metrics, schedules and backups, and checks every
   caller's role.
 - **The proxy** is a set of templates the wizard deploys for you: Traefik, Authelia and CrowdSec.
@@ -167,7 +180,7 @@ walk you through it.
 - **One-click DCS updates** from a release channel, with your edits kept and a rollback tag. [Operations](docs/OPERATIONS.md#updating-dcs)
 - **Unattended updates** that roll back by themselves when the health score drops. [Operations](docs/OPERATIONS.md#unattended-updates)
 - **Automatic image updates** that pull and recreate only the containers on an older copy. [Operations](docs/OPERATIONS.md#image-updates)
-- **Backups and snapshots** of the whole install or one stack, on a schedule. [Operations](docs/OPERATIONS.md#backups-and-snapshots)
+- **Backups and snapshots** of the whole install or one stack, on a schedule; download an archive, upload one kept elsewhere (up to 20 GB, streamed to disk), verify it, and restore it: the data it replaces is set aside first, never overwritten. [Operations](docs/OPERATIONS.md#backups-and-snapshots)
 - **A recovery bundle:** one encrypted file that rebuilds the whole install on a new machine. [Operations](docs/OPERATIONS.md#the-recovery-bundle)
 
 </details>
@@ -175,7 +188,8 @@ walk you through it.
 <details open>
 <summary><b>Health, alerts and automation</b></summary>
 
-- **A health score** from 0 to 100 for the server, each stack and each container, with history. [Operations](docs/OPERATIONS.md#health)
+- **A health score** from 0 to 100 for the server, each stack and each container, with history. Containers that sleep on demand (Sablier) count as asleep, not down. [Operations](docs/OPERATIONS.md#health)
+- **Needs your attention:** a dashboard card with only what is broken or waiting on you (stopped or unhealthy containers, a VM that does not answer, a missing App-Data drive, a failed or old backup, a full disk, image and DCS updates, waiting OS security updates and a restart the server needs), worst first, each with the page that fixes it.
 - **Metrics and trends** kept for up to two years at hourly detail. [Configuration](docs/CONFIGURATION.md#metrics-and-logs)
 - **Notifications** to Discord and ntfy with rules and cooldowns, plus generic webhooks. [Discord guide](docs/DISCORD.md)
 - **Schedules and automations:** backups, prunes, updates and your own scripts on cron. [Operations](docs/OPERATIONS.md#schedules-and-automations)
@@ -198,11 +212,11 @@ walk you through it.
 <details open>
 <summary><b>People, apps and the API</b></summary>
 
-- **Accounts and roles:** admin, viewer and bot, with optional TOTP 2FA and invite-only sign-up. [Operations](docs/OPERATIONS.md#users-and-roles)
+- **Accounts and roles:** admin, viewer and bot, with optional TOTP 2FA and invite-only sign-up; the Users page also sets the second step Authelia asks for at sign-in to your apps (off, every app, or chosen apps). [Operations](docs/OPERATIONS.md#users-and-roles)
 - **A Discord bot** with slash commands, buttons and confirmations. [Discord guide](docs/DISCORD.md#3-the-bot)
-- **A web terminal**, a file browser, live logs, topology and uptime pages. [Operations](docs/OPERATIONS.md#stacks-and-containers)
+- **A web terminal**, a file browser, live logs, a topology map and each container's last 30 minutes on the Health page. [Operations](docs/OPERATIONS.md#stacks-and-containers)
 - **Themes:** eight built-in looks and a Theme Studio; theme.park themes for your apps. [Operations](docs/OPERATIONS.md#themes)
-- **A REST API** with 330+ endpoints, each with its access level. [API reference](docs/API.md)
+- **A REST API** with 420+ endpoints, each with its access level. [API reference](docs/API.md)
 - **Security by default:** accounts are required off loopback, and a fresh install answers only its setup. [Security](SECURITY.md)
 
 </details>

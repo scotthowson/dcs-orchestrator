@@ -989,7 +989,7 @@ once; a full DCS without an admin yet saves the join for its wizard), `--join-to
 - **Addresses**: a range next to the hub (the wizard proposes `.200` upwards on the hub's
   subnet) on the bridge the hub shares with the VMs; the hub reaches each VM at
   `http://<address>:9876`, the VMs reach the hub at `FLEET_SELF_URL`.
-- **DCS's own backups** stay per VM (Backup page); the hub's `.env`, `.data` and secret store
+- **DCS's own backups** stay per VM (Backups page); the hub's `.env`, `.data` and secret store
   are tiny and are covered by the VM backup.
 
 ---

@@ -21,6 +21,7 @@ Everything here is Bash 4+, Docker Compose v2 and `jq`. There is no build step.
 | `.config/settings.cfg` | The default of every setting |
 | `.lib/` | Libraries the scripts source: logging, Docker helpers, secrets, metrics, the scheduler, health scores, plugins, rollback, setup checks |
 | `.scripts/api-server.sh` | The REST API: the router `handle_request` and the `handle_*` handlers |
+| `.scripts/api-dispatch.sh` | The front `socat` runs per connection: reads the request and hands it to a worker of the pool |
 | `.scripts/api-docs.sh` | Generates `docs/API.md` and the `GET /` catalogue from the router |
 | `.scripts/fleet-bootstrap.sh` | What the hub runs inside a new VM: Docker, the hub's code, the member setup, the join |
 | `.scripts/*.sh` (others) | Tools with `--help`: install-service, stack-manager, health-check, maintenance… |
@@ -35,9 +36,13 @@ The API writes its state to `.api-auth/`, `.data/`, `.secrets/` and `logs/`; git
 
 ## How the API works
 
-- **One process per request.** `socat` (or `ncat`) listens and starts `api-server.sh --handle-request`
-  for every connection; the handler reads the request on stdin and writes the answer to stdout. The
-  listener is supervised, so SIGTERM stops it cleanly.
+- **A pool of workers.** `socat` listens and runs the small front (`.scripts/api-dispatch.sh`) for every
+  connection; the front reads the request and hands it to a free worker, a copy of `api-server.sh` that
+  has read the script once (`API_WORKERS`, automatic when empty: twice the cores, 4 to 8). A request runs
+  in a subshell of the worker, so nothing it sets survives into the next; an event stream, or a request
+  that finds no free worker, gets a process of its own. `API_WORKERS=0` (and an `ncat` host) is the old
+  transport: one `api-server.sh --handle-request` per connection, the request on stdin and the answer on
+  stdout, which is also how the smoke tests drive it. The listener is supervised, so SIGTERM stops it cleanly.
 - **Roles in one place.** `_api_route_allowed METHOD PATH` decides who may call what. New routes that
   change something or expose a secret are admin-only there; handlers check again.
 - **`.env` is data.** It is parsed as `KEY=value` lines and never sourced by the API. Writes go through

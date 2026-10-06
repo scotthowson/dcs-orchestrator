@@ -34,9 +34,18 @@ There are four ways to run DCS. Pick one, install, then read
 *New in 4.0.* A ready VM with Docker and DCS inside. It starts DCS as a hub on its first boot, and
 you finish in the browser.
 
-> [!NOTE]
-> Coming with 4.0: a download link for the image and a one-line importer for the Proxmox shell.
-> Until then, build the image yourself and import it by hand, as shown below.
+**The one command.** Every release carries the eight images, their `SHA256SUMS` and `dcs-proxmox.sh`,
+which downloads an image, checks it and makes the VM. On the Proxmox shell, as root:
+
+```bash
+curl -fsSLO https://github.com/scotthowson/dcs-orchestrator/releases/latest/download/dcs-proxmox.sh
+bash dcs-proxmox.sh hub debian-13 --ip 192.168.1.20/24 --gateway 192.168.1.1 --dns 1.1.1.1
+```
+
+It takes your public keys from `/root/.ssh/*.pub` for the user `dcs` (`--ssh-key FILE` names another),
+starts the VM and prints its address: carry on at step 5. Every option, and which distribution to pick:
+[VM images](VM-IMAGES.md#put-one-on-proxmox). The steps below do the same by hand, from an image you build
+yourself.
 
 **1. Build the image.** On any Linux machine with Docker and git. No root needed; the tools run in containers.
 

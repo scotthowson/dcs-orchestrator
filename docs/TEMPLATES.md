@@ -82,8 +82,9 @@ The Traefik template's *Start containers on demand* switch deploys Sablier with 
   hacker-terminal, matrix).
 - DCS puts the Sablier middleware last in the route's chain, so a visitor passes CrowdSec and Authelia
   before anything wakes up.
-- Health, Uptime and the Containers page show such apps as **on demand**, not stopped, and they raise
-  no "container stopped" alert. Prunes leave them alone.
+- Health, the Containers page, the stack cards and the Discord bot show such apps as **asleep** (on
+  demand), not stopped: they count in no health score, raise no "container stopped" alert, and prunes
+  leave them alone. What does stand out is an on-demand container whose Sablier is not running.
 
 ## Traefik add-ons
 

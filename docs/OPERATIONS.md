@@ -54,7 +54,7 @@ Work with a stack by hand through `./compose.sh`, not a bare `docker compose`: o
 | `logs-viewer.sh` | An interactive log viewer |
 | `image-tracker.sh` | Image age and staleness |
 | `docker-network-info.sh` | A map of the Docker networks |
-| `backup-server.sh` | The Backup page's backup, in the foreground (`[stack]` for one stack) |
+| `backup-server.sh` | The Backups page's backup, in the foreground (`[stack]` for one stack) |
 | `proxy-reconcile.sh` | Probes every Traefik route and restarts Traefik once when none answer |
 
 Each one prints its options with `--help`.
@@ -312,13 +312,13 @@ file came back owned by DCS's user, and a restore over App-Data a container had 
 volumes are not in a bundle: that is a backup's job. It needs no rsync *(before 4.0.28 it refused to run without it,
 which the DCS VM images do not have)*.
 
-1. Store a passphrase as the secret `RECOVERY_PASSPHRASE` (the Backup page asks for it).
+1. Store a passphrase as the secret `RECOVERY_PASSPHRASE` (the Backups page asks for it).
 2. Optional: set `RECOVERY_REMOTE` to an rsync target or a mounted drive for an off-box copy.
-3. Make a bundle on the Backup page, or add a schedule with the action `recovery`.
+3. Make a bundle on the Backups page, or add a schedule with the action `recovery`.
 
 **To restore** on a new machine: install DCS, and in the wizard's *Admin* step open *Moving from another
 server? Restore a recovery bundle*. Then sign in with your old account and start the stacks. On a running
-install, the Backup page restores a bundle the way a backup is restored:
+install, the Backups page restores a bundle the way a backup is restored:
 
 1. The configuration as it is now is kept as a snapshot (`.snapshots/pre-restore-<time>.tar.gz`).
 2. The stacks whose App-Data the bundle brings back are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT`). A stack
@@ -339,12 +339,12 @@ done (`warnings`): nothing is skipped without a word. The restore runs to the en
 drops (Traefik or the dashboard's own container can be among the stacks it stops); `GET /recovery` keeps its result as
 `last_restore`. (Earlier versions wrote the bundle's App-Data over the App-Data there, under running containers, and kept nothing.)
 A bundle whose name the browser changed (`… (1).enc`) is kept under a name of the usual form, and one whose name is taken
-gets a name of its own (nothing is overwritten). The Backup page uploads a bundle as the file itself, streamed like a
+gets a name of its own (nothing is overwritten). The Backups page uploads a bundle as the file itself, streamed like a
 backup archive (`POST /recovery/upload?filename=` with `Content-Type: application/octet-stream`, at most
 `API_MAX_BACKUP_UPLOAD_SIZE`, `507` when the bundles' folder has no room); a file that is not an encrypted bundle is
 refused. The setup wizard's restore still sends the bundle inside its request (`API_MAX_UPLOAD_SIZE`, 128 MB, about
 96 MB of bundle): for a larger bundle on a new machine, create the admin in the wizard, then upload and restore the
-bundle on the Backup page.
+bundle on the Backups page.
 
 A stack's App-Data on a drive goes back to the path its `.env` names: the folder must be there (mount the drive; on a
 new drive make the empty folder), otherwise that part is skipped and the result says so (`warnings`), nothing is written
