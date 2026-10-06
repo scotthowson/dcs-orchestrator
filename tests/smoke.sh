@@ -3642,6 +3642,89 @@ _RHD="$WORK/rehost"; mkdir -p "$_RHD/x"; printf 'http:\n  routers:\n    a:\n    
 check "rehost: files changed"                1 "$(_lib eval "_find_traefik_routes_dir() { echo '$_RHD'; }; _routes_rehost new.test 'smoke.test other.test'")"
 check "rehost: hosts moved, others left"     'sonarr.new.test api.new.test keep.elsewhere.org' "$(grep -oE 'Host\(`[^`]+`\)' "$_RHD/x/r.yml" | sed -E 's/Host\(`(.*)`\)/\1/' | paste -sd' ')"
 
+# the second step at sign-in (Authelia): the rule DCS manages and its own block, rewritten in a copy of the file and nowhere else
+_SSD="$WORK/step-fixture"; mkdir -p "$_SSD/base"; : > "$_SSD/base/.env"
+printf -- '---\ntotp:\n  issuer: smoke.test\n\naccess_control:\n  default_policy: deny\n  rules:\n    - domain:\n        - "auth.smoke.test"\n      policy: bypass\n    # dcs-main-rule: DCS sets the policy of this rule (one_factor: a password; two_factor: a password and a code or a passkey)\n    - domain:\n        - "*.smoke.test"\n      subject:\n        - "group:admins"\n      policy: one_factor\n    - domain: '"'"'mine.smoke.test'"'"'\n      policy: one_factor\n\nsession:\n  name: authelia_session\n  cookies:\n    - domain: smoke.test\n      authelia_url: "https://auth.smoke.test"\n' > "$_SSD/configuration.yml"
+command cp -f "$_SSD/configuration.yml" "$_SSD/configuration.orig"
+_step() { _lib eval "BASE_DIR='$_SSD/base'; _find_traefik_domain() { echo smoke.test; }; $1"; }
+_stepset() { _step "rc=0; _authelia_step_apply '$1' '$2' '$_SSD/configuration.yml' || rc=\$?; echo \"\$rc \$AUTHELIA_STEP_CHANGED\""; }
+check "2fa: apps written"                    "0 true" "$(_stepset apps 'dash pve')"
+check "2fa: a copy of the file as it was"    yes "$(ls "$_SSD"/configuration.yml.bak-* >/dev/null 2>&1 && cmp -s "$(ls "$_SSD"/configuration.yml.bak-* | head -1)" "$_SSD/configuration.orig" && echo yes || echo no)"
+check "2fa: DCS's block names the apps"      'dash.smoke.test pve.smoke.test' "$(sed -n '/# dcs-second-step: begin/,/# dcs-second-step: end/p' "$_SSD/configuration.yml" | grep -oE '"[a-z.]+\.smoke\.test"' | tr -d '"' | paste -sd' ')"
+check "2fa: …for the same people"            1 "$(sed -n '/# dcs-second-step: begin/,/# dcs-second-step: end/p' "$_SSD/configuration.yml" | grep -c '"group:admins"')"
+check "2fa: …with two factors"               1 "$(sed -n '/# dcs-second-step: begin/,/# dcs-second-step: end/p' "$_SSD/configuration.yml" | grep -c 'policy: two_factor')"
+check "2fa: …in front of the rule for *."    yes "$(awk '/dcs-second-step: end/ {e = NR} /"\*\.smoke\.test"/ {w = NR} END {print (e && w > e) ? "yes" : "no"}' "$_SSD/configuration.yml")"
+check "2fa: the rule for * keeps one factor" 2 "$(grep -c 'policy: one_factor' "$_SSD/configuration.yml")"
+check "2fa: a rule added by hand stays"      1 "$(grep -c "domain: 'mine.smoke.test'" "$_SSD/configuration.yml")"
+check "2fa: read back"                       'one_factor|dash pve|1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: the same again changes nothing"  "0 false" "$(_stepset apps 'dash pve')"
+# another domain: the domain sync twins DCS's names, and the setting written again gives the same file
+printf 'PROXY_DOMAINS_EXTRA="other.test"\n' > "$_SSD/base/.env"
+_step "_authelia_domains_sync '$_SSD/configuration.yml' '' ''" >/dev/null
+check "2fa: the domain sync twins the names" 'dash.smoke.test dash.other.test pve.smoke.test pve.other.test' "$(sed -n '/# dcs-second-step: begin/,/# dcs-second-step: end/p' "$_SSD/configuration.yml" | grep -oE '"[a-z.]+\.(smoke|other)\.test"' | tr -d '"' | paste -sd' ')"
+check "2fa: …and the setting agrees with it" "0 false" "$(_stepset apps 'dash pve')"
+check "2fa: all"                             "0 true" "$(_stepset all '')"
+check "2fa: all: the rule for * asks for two" 1 "$(grep -c 'policy: two_factor' "$_SSD/configuration.yml")"
+check "2fa: all: DCS's block is gone"        0 "$(grep -c 'dcs-second-step' "$_SSD/configuration.yml")"
+check "2fa: all: read back"                  'two_factor||1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
+check "2fa: off"                             "0 true" "$(_stepset off '')"
+printf '' > "$_SSD/base/.env"; _step "_authelia_domains_sync '$_SSD/configuration.yml' '' 'other.test'" >/dev/null 2>&1
+check "2fa: off and one domain: the file as it was" same "$(cmp -s "$_SSD/configuration.yml" "$_SSD/configuration.orig" && echo same || echo differs)"
+# an older file without the marker: the rule for *.<domain> is found and marked; a file without such a rule is left alone
+sed '/# dcs-main-rule/d' "$_SSD/configuration.orig" > "$_SSD/configuration.yml"
+check "2fa: an unmarked rule is found"       "0 true" "$(_stepset all '')"
+check "2fa: …and marked"                     1 "$(grep -c '# dcs-main-rule' "$_SSD/configuration.yml")"
+printf 'access_control:\n  default_policy: deny\n  rules:\n    - domain: "app.smoke.test"\n      policy: one_factor\n' > "$_SSD/configuration.yml"; command cp -f "$_SSD/configuration.yml" "$_SSD/hand.orig"
+check "2fa: no rule to manage: refused"      "2 false" "$(_stepset all '')"
+check "2fa: …and the file untouched"         same "$(cmp -s "$_SSD/configuration.yml" "$_SSD/hand.orig" && echo same || echo differs)"
+sed 's/# dcs-second-step: end//' <(_step "P=smoke.test DOMS=smoke.test APPS=dash _authelia_rules_awk apps < '$_SSD/configuration.orig'") > "$_SSD/configuration.yml"
+check "2fa: a begin line without its end"    "3 false" "$(_stepset off '')"
+# what a new Authelia gets: the generator hands its file and its domain over
+_step "_authelia_rules_rewrite '$_SSD/configuration.orig' '$_SSD/generated.yml' all '' smoke.test" >/dev/null
+check "2fa: a new configuration follows it"  1 "$(grep -c 'policy: two_factor' "$_SSD/generated.yml" 2>/dev/null)"
+# the verification code: the file notifier's last message, as Authelia 4.39 writes it
+printf 'Date: %s m=+25.676920121\nRecipient: {Smoke Tester smoke@smoke.test}\nSubject: Confirm your identity\nA ONE-TIME CODE HAS BEEN GENERATED TO COMPLETE A REQUESTED ACTION\n\nHi Smoke Tester,\n\nThe following one-time code should only be used in the prompt displayed in your browser.\n\n----------------------------------------\n\n7U3W3FLB\n\n----------------------------------------\n\nTo revoke the code, click the link below:\n\nhttps://auth.smoke.test/revoke/one-time-code?id=VJpiOp-ZR1m832oT1cQsdg\n' "$(date -u '+%Y-%m-%d %H:%M:%S.868920051 +0000 UTC')" > "$_SSD/notifications.txt"
+check "2fa: the code read from the message"  "$(printf 'Confirm your identity\tSmoke Tester smoke@smoke.test\t7U3W3FLB')" "$(_step "_authelia_notification_parse '$_SSD/notifications.txt'" | cut -f2- | sed 's/[{}]//g')"
+# the endpoints, against an Authelia stack of this installation (its compose file names the container; no container runs)
+_SSK="$WORK/Stacks/auth-smoke"; mkdir -p "$_SSK/App-Data/Authelia/config" "$_SSK/App-Data/Traefik/custom_routes/auth-smoke"
+printf 'services:\n  authelia:\n    container_name: Authelia\n    image: authelia/authelia:latest\n' > "$_SSK/docker-compose.yml"
+# its App-Data named in its own .env: the one place this stack's files are looked for, whatever the installation's APP_DATA_DIR
+printf 'TRAEFIK_DOMAIN=smoke.test\nAPP_DATA_DIR=%s\n' "$_SSK/App-Data" > "$_SSK/.env"
+command cp -f "$_SSD/configuration.orig" "$_SSK/App-Data/Authelia/config/configuration.yml"
+printf 'notifier:\n  filesystem:\n    filename: /config/notifications.txt\n' >> "$_SSK/App-Data/Authelia/config/configuration.yml"
+command cp -f "$_SSK/App-Data/Authelia/config/configuration.yml" "$_SSD/live.orig"
+command cp -f "$_SSD/notifications.txt" "$_SSK/App-Data/Authelia/config/notifications.txt"
+printf 'http:\n  routers:\n    dash:\n      rule: "Host(`dash.smoke.test`)"\n      service: dash\n      middlewares:\n        - "authelia"\n' > "$_SSK/App-Data/Traefik/custom_routes/auth-smoke/dash.yml"
+printf 'http:\n  routers:\n    open:\n      rule: "Host(`open.smoke.test`)"\n      service: open\n' > "$_SSK/App-Data/Traefik/custom_routes/auth-smoke/open.yml"
+_ENV1=$(cat "$WORK/.env")
+_SSG=$(auth_request GET /authelia/second-step | body_of)
+check "2fa api: off by default"              "off off true" "$(jq -r '"\(.mode) \(.live.mode) \(.in_sync)"' <<< "$_SSG" 2>/dev/null)"
+check "2fa api: the sign-in address"         https://auth.smoke.test "$(jq -r '.sign_in_url' <<< "$_SSG" 2>/dev/null)"
+check "2fa api: the apps behind Authelia"    dash "$(jq -r '[.choices[].name] | join(" ")' <<< "$_SSG" 2>/dev/null)"
+check "2fa api: the file notifier is seen"   true "$(jq -r '.file_notifier' <<< "$_SSG" 2>/dev/null)"
+check "2fa api: a viewer reads the setting"  200 "$(viewer_request GET /authelia/second-step | status_of)"
+check "2fa api: a viewer may not set it"     403 "$(viewer_request POST /authelia/second-step '{"mode":"all"}' | status_of)"
+check "2fa api: an unknown mode"             400 "$(auth_request POST /authelia/second-step '{"mode":"sometimes"}' | status_of)"
+check "2fa api: apps needs a list"           400 "$(auth_request POST /authelia/second-step '{"mode":"apps","apps":[]}' | status_of)"
+check "2fa api: a name that is not one"      400 "$(auth_request POST /authelia/second-step '{"mode":"apps","apps":["dash","x y;rm"]}' | status_of)"
+_SSP=$(auth_request POST /authelia/second-step '{"mode":"apps","apps":["dash","https://pve.smoke.test/","DASH"]}' | body_of)
+check "2fa api: apps set and applied"        "apps dash,pve true false" "$(jq -r '"\(.mode) \(.apps | join(",")) \(.applied) \(.restarted)"' <<< "$_SSP" 2>/dev/null)"
+check "2fa api: a copy was kept"             yes "$(f=$(jq -r '.backup // ""' <<< "$_SSP"); [[ -n "$f" ]] && cmp -s "$f" "$_SSD/live.orig" && echo yes || echo no)"
+check "2fa api: kept in .env"                'apps|dash pve' "$(_lib eval "BASE_DIR='$WORK'; echo \"\$(_authelia_step_mode)|\$(_authelia_step_apps)\"")"
+check "2fa api: live and in step"            "apps dash,pve true" "$(auth_request GET /authelia/second-step | body_of | jq -r '"\(.live.mode) \(.live.apps | join(",")) \(.in_sync)"' 2>/dev/null)"
+check "2fa api: all"                         "all true" "$(auth_request POST /authelia/second-step '{"mode":"all"}' | body_of | jq -r '"\(.mode) \(.applied)"' 2>/dev/null)"
+check "2fa api: all is live"                 "all true" "$(auth_request GET /authelia/second-step | body_of | jq -r '"\(.live.mode) \(.in_sync)"' 2>/dev/null)"
+check "2fa api: off again"                   200 "$(auth_request POST /authelia/second-step '{"mode":"off"}' | status_of)"
+check "2fa api: off: the file as it was"     same "$(cmp -s "$_SSK/App-Data/Authelia/config/configuration.yml" "$_SSD/live.orig" && echo same || echo differs)"
+check "2fa api: the verification code"       "7U3W3FLB Confirm your identity true" "$(auth_request GET /authelia/verification-code | body_of | jq -r '"\(.code) \(.subject) \(.fresh)"' 2>/dev/null)"
+check "2fa api: a viewer gets no code"       403 "$(viewer_request GET /authelia/verification-code | status_of)"
+: > "$_SSK/App-Data/Authelia/config/notifications.txt"
+check "2fa api: no message yet"              "true false" "$(auth_request GET /authelia/verification-code | body_of | jq -r '"\(.file_notifier) \(.found)"' 2>/dev/null)"
+printf 'access_control:\n  default_policy: deny\n  rules:\n    - domain: "app.smoke.test"\n      policy: one_factor\n' > "$_SSK/App-Data/Authelia/config/configuration.yml"
+check "2fa api: no rule to manage: 409"      409 "$(auth_request POST /authelia/second-step '{"mode":"all"}' | status_of)"
+check "2fa api: …and the setting unchanged"  off "$(_lib eval "BASE_DIR='$WORK'; _authelia_step_mode")"
+rm -rf "$_SSK" "$_SSD"; printf '%s\n' "$_ENV1" > "$WORK/.env"
+
 echo "Setup checks (what setup.sh looks at before it changes anything)"
 _sc() { ( set +eu; source "$ROOT/.lib/setup-checks.sh"; "$@" ); }
 check "setup: http:// becomes https://"      https://192.168.2.12:8006 "$(_sc _pve_clean_url 'http://192.168.2.12:8006/')"
