@@ -7642,7 +7642,7 @@ handle_backup_list() {
         verified=false; [[ -s "$file.sha256" ]] && verified=true
         kind=legacy; stack=""; complete=null
         if [[ -n "$man" ]]; then
-            kind=$(jq -r '.kind // "full"' <<< "$man"); stack=$(jq -r '.stack // ""' <<< "$man"); complete=$(jq -r '.complete // true' <<< "$man")
+            kind=$(jq -r '.kind // "full"' <<< "$man"); stack=$(jq -r '.stack // ""' <<< "$man"); complete=$(jq -r 'if .complete == null then true else .complete end' <<< "$man")
         elif [[ "$filename" =~ $BACKUP_NAME_RE && -n "${BASH_REMATCH[3]:-}" ]]; then
             stack="${BASH_REMATCH[3]}"
         fi
@@ -17349,7 +17349,7 @@ handle_template_deploy() {
     # unless the request says {auth: false} — while Authelia is deployed here
     local _auth_explicit=false _auth_default=true
     printf '%s' "$body" | jq -e 'has("authelia_services")' >/dev/null 2>&1 && _auth_explicit=true
-    [[ "$(printf '%s' "$body" | jq -r '.auth // true' 2>/dev/null)" == "false" ]] && _auth_default=false
+    [[ "$(printf '%s' "$body" | jq -r 'if .auth == null then true else .auth end' 2>/dev/null)" == "false" ]] && _auth_default=false
     _authelia_bypass_template "$name" && _auth_default=false
     _svc_behind_authelia() {
         local _s="$1" _x
@@ -24401,7 +24401,7 @@ handle_fleet_proxy() {
     # looked for (the VM keeps its own record; the hub's names the VM)
     if [[ "$method" == "POST" && "$code" =~ ^2 && "$inner" =~ ^/templates/([A-Za-z0-9][A-Za-z0-9._-]*)/(deploy|undeploy)$ && "$res" == \{* ]]; then
         local _dh_tpl="${BASH_REMATCH[1]}" _dh_act="${BASH_REMATCH[2]}" _dh_svcs _dh_stack
-        if [[ "$(jq -r '.success // true' <<< "$res" 2>/dev/null)" != "false" ]]; then
+        if [[ "$(jq -r 'if .success == null then true else .success end' <<< "$res" 2>/dev/null)" != "false" ]]; then
             _dh_svcs=$(jq -c '(.services_added // .services_removed // []) | if type == "array" then . else [] end' <<< "$res" 2>/dev/null); [[ "$_dh_svcs" == \[* ]] || _dh_svcs='[]'
             _dh_stack=$(jq -r '.target_stack // ""' <<< "$res" 2>/dev/null); [[ -n "$_dh_stack" ]] || _dh_stack=$(jq -r '.target_stack // ""' <<< "$body" 2>/dev/null)
             _record_deploy_event "$_dh_act" "$_dh_tpl" "$_dh_stack" "$_dh_svcs" "$(jq -r '.backup_file // ""' <<< "$res" 2>/dev/null)" "$id" "$(jq -r '.name // ""' <<< "$m")" 2>/dev/null || true
@@ -24432,7 +24432,7 @@ _fleet_deploy_for_member() {
     fi
     FDP_BODY="$body"; FDP_CODE=""; FDP_MSG=""
     jq -e 'has("authelia_services")' <<< "$body" >/dev/null 2>&1 && explicit=true
-    [[ "$(jq -r '.auth // true' <<< "$body" 2>/dev/null)" == "false" ]] && all_off=true
+    [[ "$(jq -r 'if .auth == null then true else .auth end' <<< "$body" 2>/dev/null)" == "false" ]] && all_off=true
     list=$(jq -r '(.authelia_services // [])[]?' <<< "$body" 2>/dev/null)
     if [[ -n "$list" ]]; then
         mw=$(_traefik_authelia_middleware 2>/dev/null)
@@ -26089,7 +26089,7 @@ handle_fleet_member_folder_use() {
     if [[ "$code" != 200 || "$(jq -r '.success // false' <<< "$json" 2>/dev/null)" != true ]]; then
         _api_error 400 "The compose file of $stack was not changed: $(jq -r '.validation_errors // .message // .error // "it did not pass the check"' <<< "$json" 2>/dev/null | head -3 | tr '\n' ' ' | cut -c1-300)"; return
     fi
-    if [[ "$(jq -r '.pushed // true' <<< "$json" 2>/dev/null)" == false ]]; then
+    if [[ "$(jq -r 'if .pushed == null then true else .pushed end' <<< "$json" 2>/dev/null)" == false ]]; then
         _api_error 502 "The compose file is saved on the hub and the VM did not take it: $(jq -r '.push_error // "no answer"' <<< "$json" 2>/dev/null)"; return
     fi
     # the service is made again with the new volume (a start brings up what changed)
@@ -27289,7 +27289,7 @@ handle_fleet_provision() {
     [[ "$gw" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { _api_error 400 "gateway must be an IPv4 address"; return; }
     [[ -z "$dns" || "$dns" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { _api_error 400 "dns must be an IPv4 address"; return; }
     [[ -n "$dns" ]] || dns="$gw"
-    local bake bake_only from_tpl; bake=$(jq -r '.bake // false' <<< "$body"); bake_only=$(jq -r '.bake_only // false' <<< "$body"); from_tpl=$(jq -r '.from_template // true' <<< "$body")
+    local bake bake_only from_tpl; bake=$(jq -r '.bake // false' <<< "$body"); bake_only=$(jq -r '.bake_only // false' <<< "$body"); from_tpl=$(jq -r 'if .from_template == null then true else .from_template end' <<< "$body")
     n=$(jq -r '.vms | length' <<< "$body" 2>/dev/null); [[ "$n" =~ ^[0-9]+$ ]] || n=0
     if [[ "$bake_only" == "true" ]]; then (( n == 0 )) || { _api_error 400 "a bake takes no vms"; return; }
     else (( n >= 1 && n <= 20 )) || { _api_error 400 "vms must list 1 to 20 stacks"; return; }; fi
@@ -28070,7 +28070,7 @@ _fleet_job_run() {
     if [[ -z "$vmid" ]]; then
         _job_step "$id" create running "creating the VM"
         vmid=$(_pve_next_vmid); [[ "$vmid" =~ ^[0-9]+$ ]] || { _job_fail "$id" create "Proxmox gave no free VMID (${PVE_ERR:-})"; return 1; }
-        local tvmid=""; [[ "$jkind" == build && "$kind" == cloud && "$(jq -r '.from_template // true' <<< "$j")" != "false" ]] && tvmid=$(_fleet_template_for "$node" "$iid")
+        local tvmid=""; [[ "$jkind" == build && "$kind" == cloud && "$(jq -r 'if .from_template == null then true else .from_template end' <<< "$j")" != "false" ]] && tvmid=$(_fleet_template_for "$node" "$iid")
         if [[ -n "$tvmid" ]]; then
             # a baked template exists for this image: a full clone, then the VM's own size, network and name
             _job_log "$id" "cloning the DCS template VM $tvmid ($iid) as VM $vmid ($stack) — no installs ahead"
@@ -31202,7 +31202,7 @@ handle_plugin_cards_list() {
         # Skip disabled plugins
         if [[ -f "$manifest" ]] && command -v jq >/dev/null 2>&1; then
             local enabled
-            enabled=$(jq -r '.enabled // true' "$manifest" 2>/dev/null)
+            enabled=$(jq -r 'if .enabled == null then true else .enabled end' "$manifest" 2>/dev/null)
             [[ "$enabled" == "false" ]] && continue
         fi
 

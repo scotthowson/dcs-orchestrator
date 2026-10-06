@@ -504,6 +504,10 @@ check "card source: html round-trips"   '<b>hi</b>' "$(auth_request GET /plugins
 check "card source: viewer denied"      403 "$(viewer_request GET /plugins/zz-cards/cards/demo/source | status_of)"
 check "card list: shows the new card"   Demo "$(auth_request GET /plugins/cards | body_of | jq -r '.cards[] | select(.plugin == "zz-cards" and .name == "demo") | .title' 2>/dev/null)"
 check "card render"                     200 "$(auth_request GET /plugins/zz-cards/cards/demo | status_of)"
+# a plugin switched off ("enabled": false) shows no cards: jq's `// true` used to read that false as missing
+_PJ="$WORK/.plugins/zz-cards/plugin.json"; jq '.enabled = false' "$_PJ" > "$_PJ.tmp" && mv "$_PJ.tmp" "$_PJ"
+check "card list: a disabled plugin's cards are hidden" 0 "$(auth_request GET /plugins/cards | body_of | jq '[.cards[] | select(.plugin == "zz-cards")] | length' 2>/dev/null)"
+jq '.enabled = true' "$_PJ" > "$_PJ.tmp" && mv "$_PJ.tmp" "$_PJ"
 check "card delete: viewer denied"      403 "$(viewer_request DELETE /plugins/zz-cards/cards/demo | status_of)"
 check "card delete"                     200 "$(auth_request DELETE /plugins/zz-cards/cards/demo | status_of)"
 check "card delete: source gone"        404 "$(auth_request GET /plugins/zz-cards/cards/demo/source | status_of)"

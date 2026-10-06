@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An explicit `false` was read as `true` in eight places.** jq's `//` treats `false` like a missing value, so
+  `.x // true` turned every `false` into `true`: a backup whose manifest says it is incomplete was listed as complete
+  (the "incomplete" badge never showed), a plugin set to `"enabled": false` still showed its dashboard cards, `auth: false`
+  on a route was ignored, a VM's `pushed: false` / `success: false` answer counted as a success, and
+  `from_template: false` on a VM build used the template anyway. They now test for a missing value explicitly.
+
 ### Changed
 
 - **One name: DCS Orchestrator.** The dashboard is no longer called "DCS Manager"; it is the dashboard of DCS
