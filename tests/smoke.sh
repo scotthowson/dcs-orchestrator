@@ -474,7 +474,7 @@ _ROWS='{"ID":"a1","Names":"web","State":"running","Status":"Up 3 hours (unhealth
 {"ID":"a2","Names":"db","State":"running","Status":"Up About an hour (healthy)","RunningFor":"2 weeks ago","Image":"i","CreatedAt":"","Ports":"","Labels":""}
 {"ID":"a3","Names":"cache","State":"running","Status":"Up 12 minutes (health: starting)","RunningFor":"12 minutes ago","Image":"i","CreatedAt":"","Ports":"","Labels":""}
 {"ID":"a4","Names":"old","State":"exited","Status":"Exited (0) 2 days ago","RunningFor":"3 days ago","Image":"i","CreatedAt":"","Ports":"","Labels":""}'
-_CL=$(printf '%s\n' "$_ROWS" | _lib eval 'jq -s --argjson now 0 --argjson sab "{}" --slurpfile stats <(echo "{}") "$_CONTAINERS_JQ"' | jq -r '.[] | "\(.name) \(.health) \(.uptime_seconds)"' | tr '\n' ';')
+_CL=$(printf '%s\n' "$_ROWS" | _lib eval 'jq -s --argjson now 0 --argjson sab "{}" --argjson sabup null --slurpfile stats <(echo "{}") "$_CONTAINERS_JQ"' | jq -r '.[] | "\(.name) \(.health) \(.uptime_seconds)"' | tr '\n' ';')
 check "containers: unhealthy is unhealthy, uptime from the start" "web unhealthy 10800;db healthy 3600;cache starting 720;old none 0;" "$_CL"
 mkdir -p "$WORK/.templates/broken-tpl"; printf '{not json' > "$WORK/.templates/broken-tpl/template.json"; rm -f "$WORK/.data/cache"/templates*.http
 check "templates: broken one skipped"    "$_TN" "$(auth_request GET /templates | body_of | jq -r '.total' 2>/dev/null)"
@@ -1154,6 +1154,59 @@ check "on demand: GET says off"             false "$(sab_request GET /containers
 check "on demand: route file still yaml"    ok "$(python3 -c "import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); r=d['http']['routers']['tools-router']; print('ok' if 'multi-sablier' in d['http']['middlewares'] and not r.get('middlewares') else 'bad')" "$_SBF" 2>/dev/null || echo ok)"
 check "on demand: no empty middlewares key" 0 "$(awk '/^      middlewares:[ ]*$/ { getline n; if (n !~ /^        - /) c++ } END { print c+0 }' "$_SBF")"
 mv -f "$_SBF.orig" "$_SBF"; rm -f "$_SBD/ittools-sablier.yml"
+# On demand (Sablier) everywhere: a fake Docker with one running container, one asleep on demand (Plex: Sablier stopped it,
+# exit 143) and one really stopped (zz-dead). Asleep is counted apart, never as down, never alerted, never scored, and
+# never matched by the "container stopped" automation; with Sablier itself not running it cannot wake, and that is a problem.
+_ODB="$WORK/fakebin-od"; mkdir -p "$_ODB"
+cat > "$_ODB/docker" <<'FAKE'
+#!/bin/bash
+d="$(dirname "$0")"
+plex=exited; [[ -f "$d/.plex-up" ]] && plex=running
+dead=exited; [[ -f "$d/.dead-up" ]] && dead=running
+case "$*" in
+  "ps -a -q") printf 'c1\nc2\nc3\n' ;;
+  "inspect c1 c2 c3")
+    printf '[{"Name":"/zz-web","State":{"Status":"running","Health":{"Status":"healthy"}},"RestartCount":0,"Config":{"Labels":{"com.docker.compose.project":"demo"}}},'
+    printf '{"Name":"/Plex","State":{"Status":"%s"},"RestartCount":0,"Config":{"Labels":{"com.docker.compose.project":"media"}}},' "$plex"
+    printf '{"Name":"/zz-dead","State":{"Status":"%s"},"RestartCount":0,"Config":{"Labels":{"com.docker.compose.project":"demo"}}}]\n' "$dead" ;;
+  "inspect -f {{.State.Running}} Sablier") [[ -f "$d/.nosab" ]] && echo false || echo true ;;
+  'ps -a --format {{.Names}}\t{{.State}}') printf 'zz-web\trunning\nPlex\t%s\nzz-dead\t%s\n' "$plex" "$dead" ;;
+  'ps -a --format {{.Names}}\t{{.State}}\t{{.Status}}') printf 'zz-web\trunning\tUp 2 hours (healthy)\nPlex\t%s\tExited (143) 5 minutes ago\nzz-dead\t%s\tExited (1) 2 minutes ago\n' "$plex" "$dead" ;;
+  'ps -a --filter status=exited --format {{.Names}}\t{{.Status}}') printf 'Plex\tExited (143) 5 minutes ago\nzz-dead\tExited (1) 2 minutes ago\n' ;;
+  "system info --format {{json .}}") echo '{"Containers":3,"ContainersRunning":1,"ContainersStopped":2}' ;;
+  *) exit 0 ;;
+esac
+FAKE
+chmod +x "$_ODB/docker"
+_od_get() { command rm -f "$WORK/.data/cache/"*.http; PATH="$_ODB:$PATH" auth_request GET "$1" | body_of; }
+check "on demand: Plex is one of the names"      yes "$(_lib _sablier_names | grep -qx Plex && echo yes || echo no)"
+OH=$(_od_get /health)
+check "on demand: health counts it asleep"       "1 1 1" "$(jq -r '"\(.summary.healthy) \(.summary.sleeping) \(.summary.stopped)"' <<< "$OH" 2>/dev/null)"
+check "on demand: ...as its own state"           "sleeping true true" "$(jq -r '.containers[] | select(.name == "Plex") | "\(.health) \(.on_demand) \(.sablier_up)"' <<< "$OH" 2>/dev/null)"
+check "on demand: ...that Sablier can wake"      "true 0" "$(jq -r '"\(.summary.sablier_running) \(.summary.on_demand_stuck)"' <<< "$OH" 2>/dev/null)"
+check "on demand: status counts it asleep"       "1 2 1" "$(_od_get /status | jq -r '.docker.containers | "\(.running) \(.stopped) \(.sleeping)"' 2>/dev/null)"
+check "on demand: the score leaves it out"       "1 1 2" "$(_od_get /health/score | jq -r '.factors.stacks | "\(.healthy) \(.sleeping) \(.total)"' 2>/dev/null)"
+check "on demand: the automation skips it"       "zz-dead" "$(PATH="$_ODB:$PATH" _lib eval '_automation_condition_met container_stopped "*"; echo "${_AC_MATCHED% }"')"
+check "on demand: ...even when it is the target" none "$(PATH="$_ODB:$PATH" _lib eval '_automation_condition_met container_stopped Plex && echo matched || echo none')"
+check "on demand: asleep count"                  1 "$(PATH="$_ODB:$PATH" _lib _sablier_asleep_count)"
+# falling asleep is not news: a poll with everything up, then one with Plex asleep and zz-dead down
+_odc() { grep -c "$1" "$WORK/.data/audit.jsonl" 2>/dev/null; }
+_od0=$(_odc '"Plex stopped on its own"'); _od1=$(_odc 'zz-dead stopped on its own')
+rm -f "$WORK/.data/health-bad.json"; touch "$_ODB/.plex-up" "$_ODB/.dead-up"; _od_get /health >/dev/null
+rm -f "$_ODB/.plex-up" "$_ODB/.dead-up"; _od_get /health >/dev/null
+check "on demand: no 'stopped on its own' for it" 0 "$(( $(_odc '"Plex stopped on its own"') - _od0 ))"
+check "on demand: ...a real stop still says so"  1 "$(( $(_odc 'zz-dead stopped on its own') - _od1 ))"
+# woken and asleep again is quiet; and one counted as stopped before it started on demand has not "come back" when it sleeps
+touch "$_ODB/.plex-up"; _od_get /health >/dev/null; rm -f "$_ODB/.plex-up"; _od_get /health >/dev/null
+printf '{"stopped":["Plex","zz-dead"],"unhealthy":[]}\n' > "$WORK/.data/health-bad.json"; _od_get /health >/dev/null
+check "on demand: waking and sleeping are quiet" 0 "$(grep -c 'Plex is running and healthy again' "$WORK/.data/audit.jsonl" 2>/dev/null)"
+# Sablier not running: nothing can wake it — that is a problem, and the score counts it as stopped
+touch "$_ODB/.nosab"
+OH=$(_od_get /health)
+check "on demand: no Sablier, it is stuck"       "false 1" "$(jq -r '"\(.summary.sablier_running) \(.summary.on_demand_stuck)"' <<< "$OH" 2>/dev/null)"
+check "on demand: ...each row says so"           false "$(jq -r '.containers[] | select(.name == "Plex") | .sablier_up' <<< "$OH" 2>/dev/null)"
+check "on demand: ...and the score counts it"    "0 3" "$(_od_get /health/score | jq -r '.factors.stacks | "\(.sleeping) \(.total)"' 2>/dev/null)"
+rm -f "$_ODB/.nosab"
 # a theme.park theme on a container's route (the catalogue seeded; the fake docker says the container exists)
 printf '%s\n' '{"apps":{"sonarr":["sonarr-4k-logo","sonarr-darker"],"radarr":[]},"themes":["dark","nord"],"community":["catppuccin-mocha"]}' > "$WORK/.data/themepark.json"
 printf 'http:\n  routers:\n    sonarr-router:\n      rule: "Host(`sonarr.example.test`)"\n      service: "sonarr"\n      middlewares:\n        - "traefik-chain"\n        - "compress-gzip"\n  services:\n    sonarr:\n      loadBalancer:\n        servers:\n          - url: "http://Sonarr:8989"\n' > "$_SBD/sonarr.yml"
