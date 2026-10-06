@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [4.0.35] - 2026-10-06
+
 ### Added
 
 - **Download and upload backup archives.** `POST /backups/download-link` answers a one-time link (two minutes, that one
