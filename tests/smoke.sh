@@ -310,11 +310,15 @@ sed -i 's#dcs-orchestrator-ui:4.0.0-rc.1#dcs-orchestrator-ui:${TAG:-latest}#' "$
 check "dashboard image: a variable is not followed"   "ghcr.io/scotthowson/dcs-orchestrator-ui:latest" "$(COMPOSE_DIR=$UIC _lib _dcs_ui_image)"
 # the image's old name (docker-compose-skeleton-ui) in a user's compose file moves to dcs-orchestrator-ui: that reference
 # only, the tag, owner and mode kept; a file already on the new name, other images and a missing file are left alone
+# the migration also tags the image under its new name (docker tag, in the background): it must never reach this
+# machine's real Docker, so every call below runs with a docker that knows no image
+_NODOCKER="$WORK/nodocker"; mkdir -p "$_NODOCKER"; _REALDOCKER=$(command -v docker || true)
+printf '#!/bin/sh\n# no image lookups or tags here; anything else goes to the real docker (if any)\ncase "$1" in tag) exit 1 ;; image) [ "$2" = inspect ] && exit 1 ;; esac\n[ -n "%s" ] && exec "%s" "$@"\nexit 1\n' "$_REALDOCKER" "$_REALDOCKER" > "$_NODOCKER/docker"; chmod +x "$_NODOCKER/docker"
 UIM="$WORK/uim"; mkdir -p "$UIM/core" "$UIM/other"
 printf 'services:\n  redis:\n    image: redis:7-alpine # docker-compose-skeleton-ui stays in a comment\n  dcs-ui:\n    container_name: DCS-UI\n    image: "ghcr.io/scotthowson/docker-compose-skeleton-ui:9.9.9-smoke"   # pinned\n    # image: ghcr.io/scotthowson/docker-compose-skeleton-ui:latest\n    restart: unless-stopped\n' > "$UIM/core/docker-compose.yml"
 printf 'services:\n  x:\n    container_name: Other\n    image: ghcr.io/scotthowson/docker-compose-skeleton-ui:1\n' > "$UIM/other/docker-compose.yml"
 chmod 640 "$UIM/core/docker-compose.yml"; _uim_before=$(cat "$UIM/core/docker-compose.yml")
-check "image rename: announced once"               1 "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image_migrate | grep -c 'Dashboard image renamed')"
+check "image rename: announced once"               1 "$(COMPOSE_DIR=$UIM PATH="$_NODOCKER:$PATH" _lib _dcs_ui_image_migrate | grep -c 'Dashboard image renamed')"
 check "image rename: the tag is kept"              '    image: "ghcr.io/scotthowson/dcs-orchestrator-ui:9.9.9-smoke"   # pinned' "$(grep -m1 'dcs-orchestrator-ui' "$UIM/core/docker-compose.yml")"
 check "image rename: no other line changes"        1 "$(diff <(printf '%s\n' "$_uim_before") "$UIM/core/docker-compose.yml" | grep -c '^>')"
 check "image rename: the mode is kept"             640 "$(stat -c %a "$UIM/core/docker-compose.yml")"
@@ -322,8 +326,16 @@ check "image rename: no temporary file left"       0 "$(find "$UIM/core" -name '
 check "image rename: the dashboard follows"        "ghcr.io/scotthowson/dcs-orchestrator-ui:9.9.9-smoke" "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image)"
 check "image rename: other stacks untouched"       "ghcr.io/scotthowson/docker-compose-skeleton-ui:1" "$(sed -n 's/^ *image: //p' "$UIM/other/docker-compose.yml")"
 _uim_after=$(stat -c %Y.%i "$UIM/core/docker-compose.yml")
-check "image rename: the new name is left alone"   "0 $_uim_after" "$(COMPOSE_DIR=$UIM _lib _dcs_ui_image_migrate | wc -l) $(stat -c %Y.%i "$UIM/core/docker-compose.yml")"
-check "image rename: no dashboard, nothing to do"  "rc=0" "$(COMPOSE_DIR=$UIM/none _lib _dcs_ui_image_migrate; echo "rc=$?")"
+check "image rename: the new name is left alone"   "0 $_uim_after" "$(COMPOSE_DIR=$UIM PATH="$_NODOCKER:$PATH" _lib _dcs_ui_image_migrate | wc -l) $(stat -c %Y.%i "$UIM/core/docker-compose.yml")"
+check "image rename: no dashboard, nothing to do"  "rc=0" "$(COMPOSE_DIR=$UIM/none PATH="$_NODOCKER:$PATH" _lib _dcs_ui_image_migrate; echo "rc=$?")"
+# the old name as a variable's default moves too; a look-alike repo name does not
+mkdir -p "$UIM/vroot/var"; printf 'services:\n  dcs-ui:\n    container_name: DCS-UI\n    image: ${UI_IMAGE:-ghcr.io/scotthowson/docker-compose-skeleton-ui:latest}\n  dev:\n    image: ghcr.io/scotthowson/docker-compose-skeleton-ui-dev:1\n' > "$UIM/vroot/var/docker-compose.yml"
+COMPOSE_DIR=$UIM/vroot PATH="$_NODOCKER:$PATH" _lib _dcs_ui_image_migrate >/dev/null
+check "image rename: a variable's default moves"   '    image: ${UI_IMAGE:-ghcr.io/scotthowson/dcs-orchestrator-ui:latest}' "$(grep -m1 'UI_IMAGE' "$UIM/vroot/var/docker-compose.yml")"
+check "image rename: a look-alike is left alone"   1 "$(grep -c 'docker-compose-skeleton-ui-dev:1' "$UIM/vroot/var/docker-compose.yml")"
+# the registry is always asked under the new name, whatever an unmigrated file still says
+check "dashboard registry name: old becomes new"   "ghcr.io/scotthowson/dcs-orchestrator-ui:4.0.30" "$(_lib _dcs_ui_registry_ref ghcr.io/scotthowson/docker-compose-skeleton-ui:4.0.30)"
+check "dashboard registry name: new is kept"       "ghcr.io/scotthowson/dcs-orchestrator-ui:latest" "$(_lib _dcs_ui_registry_ref ghcr.io/scotthowson/dcs-orchestrator-ui:latest)"
 command rm -rf "$UIM"
 VTOKEN=$(request POST /auth/login '{"username":"viewer","password":"viewer-pass-123"}' "${AUTH[@]}" | body_of | jq -r '.token // empty')
 check "viewer signed in again"          200 "$(viewer_request GET /stacks | status_of)"

@@ -10064,16 +10064,27 @@ _dcs_ui_image() {
 }
 
 # The dashboard image was published as ghcr.io/scotthowson/docker-compose-skeleton-ui until 4.0.35; it is now
-# dcs-orchestrator-ui (the same image: both names are published for a few releases). Stacks/ is the user's and an update
-# never rewrites it, so the API moves the dashboard's compose file over when it starts: only the image references, the
+# dcs-orchestrator-ui (the same image: both names are published for a few releases). A compose file nobody edited follows the
+# update itself; one the user edited is kept as it is, so the API moves the dashboard's compose file over when it starts: only the image references
+# (also a variable's default, ${UI_IMAGE:-…}), the
 # tag kept, the file's owner and mode kept, written atomically. The container is left running as it is: the new name
 # takes effect on the next dashboard update or recreate. The old image also gets the new name locally (docker tag, no
 # download, in the background), so the update check finds it and a recreate needs no network. Idempotent: a file that
 # no longer names the old image is not touched. Prints one line when it rewrote the file.
 _DCS_UI_OLD_REPO="ghcr.io/scotthowson/docker-compose-skeleton-ui"
 _DCS_UI_REPO="ghcr.io/scotthowson/dcs-orchestrator-ui"
+# The name to ask the registry for: the new one, whatever an unmigrated compose file still says (the old name is
+# retired some day; until then both carry the same image)
+_dcs_ui_registry_ref() {
+    local ref="$1"
+    [[ "$ref" == "$_DCS_UI_OLD_REPO"* ]] && ref="${_DCS_UI_REPO}${ref#"$_DCS_UI_OLD_REPO"}"
+    printf '%s' "$ref"
+}
+
+_DCS_UI_MIGRATE_ERR=""
 _dcs_ui_image_migrate() {
-    local cf="" f tmp re ref
+    local cf="" f tmp re rev ref
+    _DCS_UI_MIGRATE_ERR=""
     for f in "$COMPOSE_DIR"/*/docker-compose.yml; do
         grep -q 'container_name: DCS-UI' "$f" 2>/dev/null || continue
         cf="$f"; break
@@ -10081,22 +10092,31 @@ _dcs_ui_image_migrate() {
     [[ -n "$cf" ]] || return 0
     cf=$(readlink -f -- "$cf") && [[ -f "$cf" ]] || return 0
     re="^([[:space:]]+image:[[:space:]]*[\"']?)${_DCS_UI_OLD_REPO//./\\.}([:@\"'[:space:]]|\$)"
-    if grep -qE "$re" "$cf" 2>/dev/null; then
-        tmp=$(mktemp "$cf.dcs-tmp.XXXXXX" 2>/dev/null) || return 1
-        if sed -E "s#${re}#\\1${_DCS_UI_REPO}\\2#" "$cf" > "$tmp" 2>/dev/null \
-            && [[ "$(wc -l < "$tmp")" == "$(wc -l < "$cf")" ]] && ! grep -qE "$re" "$tmp" \
+    # …and the old name as the default of a variable (image: ${UI_IMAGE:-ghcr.io/…/docker-compose-skeleton-ui:latest})
+    rev="^([[:space:]]+image:[[:space:]]*[\"']?\\\$\\{[A-Za-z_][A-Za-z0-9_]*:?-)${_DCS_UI_OLD_REPO//./\\.}([:@}\"'[:space:]]|\$)"
+    if grep -qE "$re|$rev" "$cf" 2>/dev/null; then
+        tmp=$(mktemp "$cf.dcs-tmp.XXXXXX" 2>/dev/null) || { _DCS_UI_MIGRATE_ERR="cannot write next to it"; return 1; }
+        if sed -E -e "s#${re}#\\1${_DCS_UI_REPO}\\2#" -e "s#${rev}#\\1${_DCS_UI_REPO}\\2#" "$cf" > "$tmp" 2>/dev/null \
+            && [[ "$(wc -l < "$tmp")" == "$(wc -l < "$cf")" ]] && ! grep -qE "$re|$rev" "$tmp" \
             && chmod --reference="$cf" "$tmp" 2>/dev/null && { chown --reference="$cf" "$tmp" 2>/dev/null || true; } \
             && [[ "$(stat -c '%u:%g:%a' "$tmp")" == "$(stat -c '%u:%g:%a' "$cf")" ]] \
+            && { command -v chcon >/dev/null 2>&1 && chcon --reference="$cf" "$tmp" 2>/dev/null; true; } \
             && mv -f -- "$tmp" "$cf"; then
             echo "  Dashboard image renamed in ${cf#"$BASE_DIR"/}: ${_DCS_UI_OLD_REPO} -> ${_DCS_UI_REPO} (takes effect on the next dashboard update)"
         else
             rm -f -- "$tmp"
+            _DCS_UI_MIGRATE_ERR="its owner ($(stat -c '%U' "$cf" 2>/dev/null)) or mode could not be kept; dashboard updates use the new name anyway"
+            _DCS_UI_MIGRATE_FILE="${cf#"$BASE_DIR"/}"
             return 1
         fi
     fi
     ref=$(_dcs_ui_image)
     [[ "$ref" == "$_DCS_UI_REPO:"* ]] || return 0
     ( command -v docker >/dev/null 2>&1 || exit 0
+      # only for this install's own dashboard: a second checkout (or a test copy) on the same machine leaves another
+      # install's images alone. Compose labels the container with the folder of the compose file it was started from.
+      wd=$(timeout 10 docker inspect DCS-UI --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null) || exit 0
+      [[ -n "$wd" && "$(readlink -f -- "$wd" 2>/dev/null)" == "$(dirname -- "$cf")" ]] || exit 0
       timeout 10 docker image inspect "$ref" >/dev/null 2>&1 && exit 0
       timeout 10 docker image inspect "$_DCS_UI_OLD_REPO:${ref#"$_DCS_UI_REPO:"}" >/dev/null 2>&1 || exit 0
       timeout 10 docker tag "$_DCS_UI_OLD_REPO:${ref#"$_DCS_UI_REPO:"}" "$ref" ) </dev/null >/dev/null 2>&1 &
@@ -10106,7 +10126,9 @@ _dcs_ui_image_migrate() {
 # Check if DCS-UI Docker image has a newer version available on GHCR
 _check_ui_image_update() {
     local ui_image ui_repo ui_tag
-    ui_image=$(_dcs_ui_image); ui_repo="${ui_image#ghcr.io/}"; ui_repo="${ui_repo%:*}"; ui_tag="${ui_image##*:}"
+    ui_image=$(_dcs_ui_image)
+    # the registry is asked under the image's current name (an unmigrated file may still say the old one)
+    ui_repo=$(_dcs_ui_registry_ref "$ui_image"); ui_repo="${ui_repo#ghcr.io/}"; ui_repo="${ui_repo%:*}"; ui_tag="${ui_image##*:}"
     local result='{"available": false}'
 
     # Check if DCS-UI container exists
@@ -10161,10 +10183,16 @@ handle_ui_update_apply() {
         return
     fi
 
-    # Pull the latest image
-    local pull_output
-    if ! pull_output=$(timeout 120 docker pull "$ui_image" 2>&1); then
+    # Pull the latest image, under its current name; a compose file that still says the old name gets the same
+    # image under that name too, so the recreate below runs the new build either way
+    local pull_output pull_ref
+    pull_ref=$(_dcs_ui_registry_ref "$ui_image")
+    if ! pull_output=$(timeout 120 docker pull "$pull_ref" 2>&1); then
         _api_error 500 "Failed to pull image: $pull_output"
+        return
+    fi
+    if [[ "$pull_ref" != "$ui_image" ]] && ! docker tag "$pull_ref" "$ui_image" >/dev/null 2>&1; then
+        _api_error 500 "Pulled $pull_ref but could not tag it as $ui_image"
         return
     fi
 
@@ -33102,7 +33130,7 @@ start_server() {
     # A backup the API's last run did not finish (a restart under it) may have left a stack's containers paused
     _backup_pid_alive "$BACKUP_PID_FILE" || _backup_unpause_all >/dev/null 2>&1 || true
     # The dashboard image's new name (docker-compose-skeleton-ui -> dcs-orchestrator-ui) in the dashboard's compose file
-    _dcs_ui_image_migrate || echo "  Dashboard image: the compose file still names ${_DCS_UI_OLD_REPO} (could not rewrite it)"
+    _dcs_ui_image_migrate || echo "  Dashboard image: ${_DCS_UI_MIGRATE_FILE:-the compose file of DCS-UI} still names ${_DCS_UI_OLD_REPO}: ${_DCS_UI_MIGRATE_ERR:-could not rewrite it}"
 
     # Refuse to start on a port something else already owns (another DCS
     # installation, an unrelated service): a bind failure inside socat would

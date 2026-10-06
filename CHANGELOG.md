@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **An explicit `false` was read as `true` in eight places.** jq's `//` treats `false` like a missing value, so
   `.x // true` turned every `false` into `true`: a backup whose manifest says it is incomplete was listed as complete
   (the "incomplete" badge never showed), a plugin set to `"enabled": false` still showed its dashboard cards, `auth: false`
-  on a route was ignored, a VM's `pushed: false` / `success: false` answer counted as a success, and
+  on a template deploy was ignored, a VM's `pushed: false` / `success: false` answer counted as a success, and
   `from_template: false` on a VM build used the template anyway. They now test for a missing value explicitly.
 
 ### Changed
@@ -19,7 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Orchestrator. The install folder (`~/.Docker-Compose-Skeleton-AIO`) stays where it is.
 - **The dashboard image is `ghcr.io/scotthowson/dcs-orchestrator-ui`.** The old name,
   `ghcr.io/scotthowson/docker-compose-skeleton-ui`, carries the same image and stays published for a few releases.
-  Stacks/ is yours and an update never rewrites it, so the API moves the dashboard's compose file over when it starts:
+  A compose file you never edited simply follows the update. One you edited keeps your edits, so the API moves its
+  image reference over when it starts (also an image given as a variable's default, `${UI_IMAGE:-…}`):
   only the image reference changes (the tag, the file's owner and mode are kept, the write is atomic), it says so once
   in the API log, and a file already on the new name is left alone. The running dashboard is not restarted: the new
   name takes effect on its next update or recreate. The image already on the machine gets the new name too (a local
