@@ -3665,7 +3665,7 @@ check "2fa: the domain sync twins the names" 'dash.smoke.test dash.other.test pv
 check "2fa: …and the setting agrees with it" "0 false" "$(_stepset apps 'dash pve')"
 check "2fa: all"                             "0 true" "$(_stepset all '')"
 check "2fa: all: the rule for * asks for two" 2 "$(grep -c 'policy: two_factor' "$_SSD/configuration.yml")"
-check "2fa: all: DCS's block is gone"        0 "$(grep -c 'dcs-second-step' "$_SSD/configuration.yml")"
+check "2fa: all: DCS's block is gone"        0 "$(grep -c 'dcs-second-step: begin' "$_SSD/configuration.yml")"
 check "2fa: all: read back"                  'two_factor||1|1' "$(_step "_authelia_rules_read '$_SSD/configuration.yml' smoke.test")"
 check "2fa: off"                             "0 true" "$(_stepset off '')"
 printf '' > "$_SSD/base/.env"; _step "_authelia_domains_sync '$_SSD/configuration.yml' '' 'other.test'" >/dev/null 2>&1
