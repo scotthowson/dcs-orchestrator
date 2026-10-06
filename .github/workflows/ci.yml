@@ -58,6 +58,9 @@ jobs:
       - name: A VM stack's files are the hub's (a hub and a member, two real listeners)
         run: tests/fleet-files.sh
 
+      - name: Restore from scratch (backup and recovery bundle, wiped, restored, compared file by file)
+        run: tests/restore-drill.sh
+
       - name: VM images — the first-boot script against the seeds Proxmox writes
         run: vm-images/tests/dcs-init-test.sh
 
@@ -98,6 +101,10 @@ jobs:
 
       - name: API worker pool and a VM stack's files on Debian 13's jq
         run: tests/api-workers.sh && tests/fleet-files.sh
+
+      # as root here: the drill checks the owners of every file too (a database's, root's), not only content and modes
+      - name: Restore from scratch on Debian 13, owners checked (backup and recovery bundle, wiped, restored, compared file by file)
+        run: tests/restore-drill.sh
 
       - name: Smoke failures in the summary
         if: failure()

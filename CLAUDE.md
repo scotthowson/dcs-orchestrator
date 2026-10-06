@@ -29,7 +29,7 @@ version is `API_VERSION` in `.scripts/api-server.sh`. `CHANGELOG.md` is kept per
 | `.templates/<name>/` | 103 templates: `docker-compose.yml`, `template.json`, optional `config/` |
 | `.plugins/<name>/` | plugins: `plugin.json`, `hooks/`, `cards/` (see `.plugins/README.md`) |
 | `.api-auth/`, `.data/`, `.secrets/`, `logs/` | runtime state written by the API (git-ignored except the JSON templates in `.api-auth/`) |
-| `tests/` | `lint.sh`, `smoke.sh` |
+| `tests/` | `lint.sh`, `smoke.sh`, `restore-drill.sh`, `api-workers.sh`, `fleet-files.sh` |
 | `docs/API.md` | generated endpoint reference — never edit by hand |
 
 ## Execution flow
@@ -97,6 +97,7 @@ Source order for anything that uses the logger: `.env` → `settings.cfg` → `d
 ```bash
 tests/lint.sh                 # bash -n, shellcheck -S warning, compose config for stacks + templates, JSON, api-docs --check
 tests/smoke.sh                # 60+ checks: drives --handle-request over stdin in a temp installation
+tests/restore-drill.sh        # backup + recovery bundle, wipe, restore from scratch, compare file by file (no Docker needed)
 .scripts/api-docs.sh --check  # reference and GET / catalogue up to date
 ./setup.sh --dry-run
 ```

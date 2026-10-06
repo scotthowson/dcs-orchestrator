@@ -74,6 +74,7 @@ the API restarts: `sudo systemctl restart dcs-api`, or `POST /system/restart`.
 | `API_BEHIND_TLS_PROXY` | `false` | The API sits behind Traefik or another TLS proxy (adds HSTS) |
 | `API_RATE_LIMIT`, `API_RATE_WINDOW` | `600`, `60` | Requests per client per window, in seconds (`0` turns it off) |
 | `API_MAX_BODY_SIZE` | `1048576` | Largest request body, in bytes |
+| `API_MAX_UPLOAD_SIZE` | `134217728` | Largest upload, in bytes: a backup archive (*Upload a backup*), a recovery bundle, the setup wizard's restore. 128 MB is also the most the worker pool's front passes on; a larger archive is copied into `BACKUP_DEST_DIR` by hand |
 | `API_RESPONSE_CACHE` | `true` | Share one answer of the polled read endpoints between all clients |
 | `API_WORKERS` | automatic | Pre-read copies of the API script that answer the requests; the front hands each connection to a free one. Empty = twice the cores, 4 to 8 (4 on a machine with less than 3 GB of memory); a request that stays open (an event stream) or finds no free worker for a second gets a process of its own. Reading the 27,000-line script is what a request costs most, so this is what keeps a small hub idle with a dashboard open. `0` = one process per connection |
 | `API_WORKER_REQUESTS` | `500` | A worker renews itself (same process id, fresh memory) after this many answers |
@@ -212,7 +213,7 @@ The rules themselves (which events, which targets) live on the Notifications pag
 | `BACKUP_PAUSE` | `true` | Pause a stack's running containers while its folder and volumes are read (a consistent copy of a database) |
 | `BACKUP_PAUSE_EXCEPT` | *(empty)* | Stacks never paused (space-separated): the LAN's DNS, a media server with a huge library |
 | `BACKUP_RESTORE_STOP_TIMEOUT` | `20` | Seconds a container has to stop before a restore replaces its data |
-| `BACKUP_PRE_RESTORE_KEEP` | `2` | Sets of "the data before a restore" kept in `.data/pre-restore` |
+| `BACKUP_PRE_RESTORE_KEEP` | `2` | Copies of "the data before a restore" kept: sets in `.data/pre-restore`, and `<path>.before-restore-<time>` folders beside each App-Data on a drive of its own. Older ones are removed after a restore (backup or recovery bundle), the one it just made never; the result's `pruned` and the audit log (`restore_pruned`) name them |
 | `RECOVERY_DEST_DIR` | *(empty)* | Where recovery bundles go: `BACKUP_DEST_DIR/recovery`, then `.data/recovery` |
 | `RECOVERY_REMOTE` | *(empty)* | An off-box copy: an rsync target (`user@nas:/backups/dcs`) or a mounted path |
 | `RECOVERY_RETENTION_COUNT` | `10` | Bundles kept |

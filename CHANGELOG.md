@@ -5,6 +5,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Download and upload backup archives.** `POST /backups/download-link` answers a one-time link (two minutes, that one
+  file) the browser downloads itself, streamed from the disk: an archive of many gigabytes never sits in the page's
+  memory. `GET /backups/{file}/download` streams one with a session too (its SHA-256 in `X-Checksum-SHA256`), and
+  `GET /backups/{file}/checksum` gives its size and `.sha256`. On a hub a VM's archive streams from the VM
+  (`GET /fleet/members/{id}/backups/{file}/download`). `POST /backups/upload` takes an archive as the request body (at
+  most `API_MAX_UPLOAD_SIZE`), writes it aside and lists it only once it reads back whole as a DCS backup (manifest,
+  every part, nothing unsafe to unpack); junk, a cut-short file, a tar.gz that is not a DCS backup and a checksum that
+  does not match are refused with the reason, and nothing of them stays. A browser-renamed file gets a backup's name
+  from its manifest; the same archive twice is stored once. `POST /fleet/members/{id}/backups/upload` puts one into a VM.
+- **A restore-from-scratch drill** in CI (`tests/restore-drill.sh`, as root on Debian 13): an install with stacks, App-Data
+  on a drive of its own and Traefik's files is backed up and bundled, both are downloaded, the install is wiped, and it
+  comes back from the uploaded backup and, again from nothing, from the bundle through the setup wizard; every file is
+  compared by content, mode, link target and owner.
+
+### Changed
+
+- **A recovery bundle restore stops, sets aside and starts again**, as a backup restore does (`POST /recovery/restore`
+  and the setup wizard's `POST /setup/restore`): the stacks whose App-Data the bundle brings back are stopped, their
+  App-Data as it is now is set aside whole (`.data/pre-restore/<time>/appdata/<stack>`, or beside a drive's App-Data
+  as `<path>.before-restore-<time>`), the bundle's copy goes in its place, and the containers that ran start again. The
+  answer names the stacks stopped and started, where the old App-Data went (`set_aside`, `kept_before`) and what could
+  not be done. It runs to the end even when the browser's connection drops (its proxy can be one of the stacks it
+  stops); `GET /recovery` keeps the result as `last_restore`.
+- **The copies kept from before a restore are pruned**: the newest `BACKUP_PRE_RESTORE_KEEP` (2) sets in
+  `.data/pre-restore` and the newest two `<path>.before-restore-<time>` beside a drive's App-Data; never the one a
+  restore just made; what went is named in the result (`pruned`) and the audit log (`restore_pruned`).
+
 ### Fixed
 
 - **A UPS that cannot be read is never "On mains".** `apcaccess` printing nothing, or apcupsd answering without a
@@ -26,6 +55,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `linux-image-amd64` installed before the repair added `ext4` to the initramfs list kept an initramfs without it; the next
   boot menu the hooks wrote would make that kernel the default, and it would stop in the initramfs.
 
+- **A recovery bundle restore wrote its App-Data over the App-Data there**, under running containers, mixing old and new
+  files and keeping nothing of what was there.
+- **A recovery bundle's `.sha256` was group-readable** (664); it is private like the bundle (600).
+- **Set-aside copies named after the same second collided**: two restores in one second made the second one fail to set
+  its drive App-Data aside; the second copy is now `…-2`, and the `-N` sets are pruned too (they were kept forever).
 - **An explicit `false` was read as `true` in eight places.** jq's `//` treats `false` like a missing value, so
   `.x // true` turned every `false` into `true`: a backup whose manifest says it is incomplete was listed as complete
   (the "incomplete" badge never showed), a plugin set to `"enabled": false` still showed its dashboard cards, `auth: false`

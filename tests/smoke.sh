@@ -1379,7 +1379,14 @@ check "recovery: short passphrase"      400 "$(auth_request POST /recovery/bundl
 printf '# changed after the bundle\n' >> "$WORK/Stacks/demo/docker-compose.yml"
 check "recovery: wrong passphrase"      400 "$(auth_request POST /recovery/restore "{\"file\":\"$RBF\",\"passphrase\":\"nope-nope-nope\",\"confirm\":true,\"restart\":false}" | status_of)"
 check "recovery: change still there"    yes "$(grep -q 'changed after the bundle' "$WORK/Stacks/demo/docker-compose.yml" && echo yes || echo no)"
-RR=$(auth_request POST /recovery/restore "{\"file\":\"$RBF\",\"passphrase\":\"smoke-pass-123\",\"confirm\":true,\"restart\":false}")
+# (a restore stops and starts the stacks whose App-Data it brings back: a Docker with no containers, images or helpers
+# stands in, so this machine's containers are never touched and the files are written by the test's own user)
+mkdir -p "$WORK/fakebin-noreader"; printf '#!/bin/bash
+case "$1" in image|pull|run|volume|inspect|stop|start) exit 1 ;; *) exit 0 ;; esac
+' > "$WORK/fakebin-noreader/docker"; chmod +x "$WORK/fakebin-noreader/docker"
+RR=$(PATH="$WORK/fakebin-noreader:$PATH" auth_request POST /recovery/restore "{\"file\":\"$RBF\",\"passphrase\":\"smoke-pass-123\",\"confirm\":true,\"restart\":false}")
+check "recovery: the App-Data there was set aside, not mixed" yes "$(printf '%s' "$RR" | body_of | jq -e '(.set_aside | map(.stack + "/" + .part) | index("zz-proxy/Traefik")) != null and (.kept_before | type == "string")' >/dev/null 2>&1 && echo yes || echo no)"
+check "recovery: …and the bundle's copy is in place"  yes "$([[ -f "$WORK/Stacks/zz-proxy/App-Data/Traefik/custom_routes/demo/tools.yml" ]] && echo yes || echo no)"
 check "recovery: restore succeeds"      200 "$(printf '%s' "$RR" | status_of)"
 check "recovery: stack file restored"   no "$(grep -q 'changed after the bundle' "$WORK/Stacks/demo/docker-compose.yml" && echo yes || echo no)"
 check "recovery: users restored count"  yes "$([[ "$(printf '%s' "$RR" | body_of | jq -r '.users')" -ge 1 ]] && echo yes || echo no)"
