@@ -22,9 +22,10 @@ Needs Docker, and for `--test` QEMU with KVM, OVMF and genisoimage. The tools co
 | `<distro>/Dockerfile` | The root file system. Target `node`; target `hub` = node + the DCS checkout (build context `dcs`, a clean clone of `--ref`) |
 | `common/overlay/` | Files every image gets: `dcs-init` (first boot from the Proxmox seed), `dcs-grubcfg`, units, sysctl, journald, sshd, Docker, growpart config, boot loader settings |
 | `hub/overlay/` | The hub only: `dcs-hub-init` and its unit |
+| `apt/overlay/` | Debian and Ubuntu (family `apt`): the kernel hooks `/etc/kernel/postinst.d` and `postrm.d/zz-dcs-grubcfg` that write `grub.cfg` (these images have no `update-grub`) |
 | `<distro>/overlay/` | Distribution specifics (Fedora: dracut, the kernel-install plugin. Arch: the mkinitcpio settings, the pacman hook that writes `grub.cfg`, the keyring timer) |
 | `tools/` | The tools image and `assemble.sh` (tar → ext4 with `mke2fs -d` → GPT with a BIOS boot partition, an ESP and the root → qcow2), `grub-bios-embed.py` (GRUB's BIOS boot code written to a plain file, the work `grub-bios-setup` does on a block device) |
-| `tests/` | `boot-test.sh` (the Proxmox-like boot and its checks; `--seed-bus scsi` puts the cloud-init drive on SCSI), `member-check.sh` (a node image's BIOS run also makes it a member of a hub started from this checkout; `--no-member` skips it), `dcs-init-test.sh` (the first-boot script against the seeds Proxmox writes), `dcs-grubcfg-test.sh` (the boot menu writer against every distribution's kernel names), `measure.sh` (the same numbers for any running VM) |
+| `tests/` | `boot-test.sh` (the Proxmox-like boot and its checks; `--seed-bus scsi` puts the cloud-init drive on SCSI), `member-check.sh` (a node image's BIOS run also makes it a member of a hub started from this checkout; `--no-member` skips it), `dcs-init-test.sh` (the first-boot script against the seeds Proxmox writes), `dcs-grubcfg-test.sh` (the boot menu writer against every distribution's kernel names, and the Debian/Ubuntu kernel hooks run the way a kernel package runs them), `measure.sh` (the same numbers for any running VM) |
 | `proxmox/dcs-proxmox.sh` | The one-command importer for the Proxmox host |
 
 ## How a disk boots
@@ -32,7 +33,7 @@ Needs Docker, and for `--test` QEMU with KVM, OVMF and genisoimage. The tools co
 GPT: partition 1 is a 1 MiB **BIOS boot partition** (GRUB's core image, for SeaBIOS), 2 an **EFI system partition** (one
 standalone GRUB, for OVMF), 3 the root file system, labelled `dcs-root`. Both loaders find the root by label and read
 `/boot/grub/grub.cfg` from it, so a kernel update inside the VM never touches the loaders. The file is written by
-`dcs-grubcfg` everywhere: on Debian and Ubuntu from the kernel hooks `/etc/kernel/postinst.d/zz-dcs-grubcfg` and `postrm.d/zz-dcs-grubcfg` (`grub-common` has no `update-grub`), on Fedora (called from `/etc/kernel/install.d/95-dcs-boot.install`) and on Arch (called from the pacman hook `99-dcs-grubcfg.hook`, after mkinitcpio's own hook has copied the kernel to `/boot`). The newest kernel is the default entry on every distribution.
+`dcs-grubcfg` everywhere: on Debian and Ubuntu from the kernel hooks `/etc/kernel/postinst.d/zz-dcs-grubcfg` and `postrm.d/zz-dcs-grubcfg` (`apt/overlay/`; `grub-common` has no `update-grub`; `zz-` runs after initramfs-tools' own hook, so the new kernel's initramfs exists), on Fedora (called from `/etc/kernel/install.d/95-dcs-boot.install`) and on Arch (called from the pacman hook `99-dcs-grubcfg.hook`, after mkinitcpio's own hook has copied the kernel to `/boot`). The newest kernel is the default entry on every distribution.
 The kernel command line comes from `/etc/default/grub.d/*.cfg` in the image (`05-dcs.cfg` common, `10-lsm.cfg` per distribution).
 
 ## Adding a distribution
@@ -68,5 +69,8 @@ The kernel command line comes from `/etc/default/grub.d/*.cfg` in the image (`05
   the guest stalls for a second on its first reads, which Proxmox's imported copy never does.
 - Arch: `sshd -T` prints option names in CamelCase (the others in lower case); `hostname` is not installed (`dcs-init` writes
   `/proc/sys/kernel/hostname`); the pacman keyring is made by every VM about a minute after its boot (`dcs-pacman-keyring.timer`), not by the image.
+- **Debian's cloud kernel has no USB and ext4 built in; its full kernel (`linux-image-amd64`) has USB and ext4 as a module.** The initramfs
+  module list (`MODULES=list`) must name `ext4` (its `crc32c` comes along as a soft dependency), or the full kernel stops in the initramfs.
+  Without a USB controller on the VM even the full kernel has no `/sys/bus/usb` (`usbcore` is a module nobody loads).
 - Tried and dropped, measured: the cloud-init CD-ROM's drivers (`ata_piix sr_mod isofs`) in the initramfs make Debian slower (initramfs-tools waits
   for the devices to settle) and change nothing on Ubuntu, Fedora and Arch.

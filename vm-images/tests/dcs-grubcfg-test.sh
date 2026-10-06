@@ -58,6 +58,41 @@ echo "dcs-grubcfg: no kernel"
 mkdir -p "$T/none/boot" "$T/none/etc/default"
 check "fails without a kernel"           1 "$(gen "$T/none")"
 
+# Debian and Ubuntu: no update-grub, so the kernel packages' hooks (/etc/kernel/postinst.d and postrm.d, run by run-parts with the
+# kernel version and image path) call dcs-grubcfg. Run the image's own hook files the way a kernel package does, after a stand-in for
+# initramfs-tools' hook (which makes the initramfs: zz- must come after it, or the new kernel has no initramfs yet and no entry).
+echo "kernel hooks (Debian, Ubuntu): installing and removing a kernel rewrites grub.cfg"
+HOOKS="$HERE/../apt/overlay/etc/kernel"
+for d in postinst.d postrm.d; do
+    h="$HOOKS/$d/zz-dcs-grubcfg"
+    check "$d/zz-dcs-grubcfg is executable" yes "$([[ -x $h ]] && echo yes || echo no)"
+    check "$d/zz-dcs-grubcfg is valid sh" 0 "$(sh -n "$h" 2>/dev/null; echo $?)"
+    check "$d/zz-dcs-grubcfg runs the generator the images install" yes "$(grep -qx 'exec /usr/local/sbin/dcs-grubcfg >&2' "$h" && [[ -f $HERE/../common/overlay/usr/local/sbin/dcs-grubcfg ]] && echo yes || echo no)"
+done
+for df in debian-13 ubuntu-26.04; do
+    check "$df's image gets the hooks" yes "$(grep -qx 'COPY apt/overlay/ /' "$HERE/../$df/Dockerfile" && echo yes || echo no)"
+done
+# a fake root: the generator and the hooks with the generator's path pointed at it (DCS_ROOT), initramfs-tools' stand-in
+mk "$T/hk" 6.12.111+deb13-cloud-amd64; gen "$T/hk" >/dev/null
+for d in postinst.d postrm.d; do
+    mkdir -p "$T/hk/etc/kernel/$d"
+    sed "s|/usr/local/sbin/dcs-grubcfg|env DCS_ROOT=$T/hk bash $GEN|" "$HOOKS/$d/zz-dcs-grubcfg" > "$T/hk/etc/kernel/$d/zz-dcs-grubcfg"; chmod 755 "$T/hk/etc/kernel/$d/zz-dcs-grubcfg"
+done
+printf '#!/bin/sh\n: > "%s/boot/initrd.img-$1"\n' "$T/hk" > "$T/hk/etc/kernel/postinst.d/initramfs-tools"
+printf '#!/bin/sh\nrm -f "%s/boot/initrd.img-$1"\n' "$T/hk" > "$T/hk/etc/kernel/postrm.d/initramfs-tools"
+chmod 755 "$T/hk/etc/kernel/postinst.d/initramfs-tools" "$T/hk/etc/kernel/postrm.d/initramfs-tools"
+check "the hook runs after initramfs-tools' own" "initramfs-tools zz-dcs-grubcfg" "$(run-parts --test "$T/hk/etc/kernel/postinst.d" 2>/dev/null | sed 's|.*/||' | paste -sd' ' || ls "$T/hk/etc/kernel/postinst.d" | LC_ALL=C sort | paste -sd' ')"
+kpost() { local v=$1 d=$2; [[ $d == postinst.d ]] && : > "$T/hk/boot/vmlinuz-$v"; [[ $d == postrm.d ]] && rm -f "$T/hk/boot/vmlinuz-$v"
+    if command -v run-parts >/dev/null; then run-parts --exit-on-error --arg="$v" --arg="/boot/vmlinuz-$v" "$T/hk/etc/kernel/$d" >/dev/null 2>&1
+    else local h; for h in $(ls "$T/hk/etc/kernel/$d" | LC_ALL=C sort); do "$T/hk/etc/kernel/$d/$h" "$v" "/boot/vmlinuz-$v" >/dev/null 2>&1 || return 1; done; fi; echo $?; }
+check "postinst of Debian's full kernel exits 0" 0 "$(kpost 6.12.111+deb13-amd64 postinst.d)"
+check "the full kernel is the default now" 6.12.111+deb13-amd64 "$(first "$T/hk")"
+check "the cloud kernel is the second entry" "'DCS' 'DCS (kernel 6.12.111+deb13-cloud-amd64)'" "$(titles "$T/hk")"
+check "postrm of the cloud kernel exits 0" 0 "$(kpost 6.12.111+deb13-cloud-amd64 postrm.d)"
+check "only the full kernel is left in the menu" "'DCS'|6.12.111+deb13-amd64" "$(titles "$T/hk")|$(first "$T/hk")"
+check "a kernel update (postinst of a newer one) makes it the default" 6.12.115+deb13-amd64 "$(kpost 6.12.115+deb13-amd64 postinst.d >/dev/null; first "$T/hk")"
+check "the initramfs list carries ext4 (a module in Debian's full kernel)" yes "$(grep -qx ext4 "$HERE/../common/overlay/etc/initramfs-tools/modules" && echo yes || echo no)"
+
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

@@ -7,6 +7,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A UPS that cannot be read is never "On mains".** `apcaccess` printing nothing, or apcupsd answering without a
+  `STATUS` line, was taken for a reading with nothing in it, and the Power card showed "On mains" with blank readings
+  (as an API before 4.0.30 did with `COMMLOST`): the first is now no answer, the second a problem, and so is a NUT server
+  naming no `ups.status`.
+  `GET /power` answers `cause` (`no_usb`, `not_on_usb`, `serial_device`, `restart_apcupsd`, `no_status`, `no_answer`) and
+  `usb` (whether this kernel can drive USB at all) with `vm` (whether the server is a VM, when `usb` is false), and
+  `on_battery`/`low_battery` are false without a reading.
+- **A UPS on a VM without USB says so.** Debian's cloud kernel (the DCS Debian image's) has no USB, so a UPS passed through
+  to such a VM is never seen: the COMMLOST reason now reads "this VM has no USB support: its kernel (…, Debian's cloud
+  kernel) has no USB drivers …" with the two ways out (Debian's full kernel, or NUT from the Proxmox host). A kernel with USB
+  on a VM without any USB controller is told apart from that ("pass it through"), not blamed on the kernel.
+- **VM images (Debian, Ubuntu): the kernel hooks are files of the image** (`vm-images/apt/overlay/etc/kernel/postinst.d` and
+  `postrm.d/zz-dcs-grubcfg`), the same ones the API writes into a VM from an older image, and the test runs them the way a
+  kernel package does. The documentation no longer claims `update-grub` (no image has it), and the switch to Debian's full
+  kernel is two steps (the running cloud kernel cannot be purged before the reboot).
+- **The image repair at API start also makes the initramfs of a full kernel installed before it again.** A VM that had
+  `linux-image-amd64` installed before the repair added `ext4` to the initramfs list kept an initramfs without it; the next
+  boot menu the hooks wrote would make that kernel the default, and it would stop in the initramfs.
+
 - **An explicit `false` was read as `true` in eight places.** jq's `//` treats `false` like a missing value, so
   `.x // true` turned every `false` into `true`: a backup whose manifest says it is incomplete was listed as complete
   (the "incomplete" badge never showed), a plugin set to `"enabled": false` still showed its dashboard cards, `auth: false`

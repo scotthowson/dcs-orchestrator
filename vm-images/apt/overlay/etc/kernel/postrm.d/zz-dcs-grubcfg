@@ -1,0 +1,3 @@
+#!/bin/sh
+# DCS: /boot/grub/grub.cfg follows the kernels in /boot (this image has no update-grub)
+exec /usr/local/sbin/dcs-grubcfg >&2

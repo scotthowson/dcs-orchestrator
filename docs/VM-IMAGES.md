@@ -43,7 +43,8 @@ GPU, a Zigbee/Z-Wave stick, a Coral or a physical network card by passthrough, t
   and checks its own files at every boot.
 - **Growing the disk:** `qm resize` the disk and reboot; the partition and the file system follow by themselves.
 - **Boot loader:** one disk, two ways in: legacy **BIOS** (SeaBIOS, Proxmox's default) and **UEFI** (OVMF; Secure Boot
-  is not supported). Kernel updates keep working (`update-grub` on Debian and Ubuntu, a kernel-install plugin on Fedora, a
+  is not supported). Kernel updates keep working: the images have no `update-grub`, and `dcs-grubcfg` rewrites the boot menu from the
+  kernel packages' hooks (`/etc/kernel/postinst.d` and `postrm.d` on Debian and Ubuntu, a kernel-install plugin on Fedora, a
   pacman hook on Arch); the newest kernel is always the default entry.
 - **Consoles:** the VGA console (Proxmox's *Console*, noVNC) shows the login prompt, and on a hub the address of the
   dashboard; the serial console (`qm terminal`, or a VM with a serial display) works too.
@@ -112,15 +113,25 @@ the drivers of real devices. If you pass a device through to a VM, check this ta
 | Wi-Fi, Bluetooth, sound, TV tuners | – | ✓ | ✓ | ✓ |
 | VirtIO, `vfio`, WireGuard, Btrfs, XFS, NFS, SMB, overlayfs, netfilter | ✓ | ✓ | ✓ | ✓ |
 
-A Debian VM that needs one of these can switch to Debian's full kernel; the image stays otherwise as it is:
+A Debian VM that needs one of these (a UPS on USB, for one) can switch to Debian's full kernel; the image stays otherwise as it is.
+Two steps, because the cloud kernel cannot be removed while it is the one running:
 
 ```bash
-sudo apt install linux-image-amd64 && sudo apt purge linux-image-cloud-amd64 'linux-image-*-cloud-amd64'
+sudo apt install linux-image-amd64 && sudo reboot          # 1. the full kernel, then boot it
+uname -r; ls /sys/bus/usb                                  # 2. 6.12.…-amd64 (no "cloud"), and USB is there
+sudo apt purge linux-image-cloud-amd64 'linux-image-*-cloud-amd64'   # 3. optional: the cloud kernel out (frees ~25 MB)
 ```
 
-then reboot. The kernel hooks rewrite the boot menu (the full kernel is the default) and the initramfs carries `ext4`, which is
-a module in that kernel. A VM built from an older image gets both from DCS 4.0.30 when its API starts (it needs passwordless
-`sudo`, which every DCS image has); on one without them the full kernel cannot find its disk, so update DCS first.
+The kernel hooks rewrite the boot menu (the full kernel is the default, the cloud one stays behind it until it is purged), and the
+initramfs carries `ext4`, which is a module in the full kernel. The full kernel is about 80 MB more on disk; it starts as quickly.
+A VM built from an image before 4.0.30 gets both from DCS when its API starts (it needs passwordless `sudo`, which every DCS image
+has; it also makes the initramfs of a full kernel installed before that again); on one without them the full kernel cannot
+find its disk, so update DCS first. `/sys/bus/usb` only appears once the VM has a USB controller (Proxmox gives every VM one for its
+tablet, and a passed-through device brings one).
+
+On the dashboard, a UPS that apcupsd cannot reach (`COMMLOST`) is shown as a problem with its cause, and on a kernel without USB
+the card says so: *this VM has no USB support*. The other way to watch a UPS from a VM is to leave it on the Proxmox host and read it
+over NUT (the `nut-upsd` template, or NUT on the host; *Config → Power*, source `nut`).
 
 The *New VM* sheet of the dashboard shows the same fact under the operating system, from the `hardware` line of each image in `vm-images/images.json`.
 

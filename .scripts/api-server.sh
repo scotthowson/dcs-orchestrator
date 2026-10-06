@@ -10262,9 +10262,15 @@ _power_nut_vars() {
 
 # apcupsd: "KEY : value" lines from apcaccess, lower-cased keys. apcupsd answers slowly while it is busy with a USB UPS
 # (seconds, up to ~15 on a VM's emulated USB), so the wait is long: the watch loop runs in the background, nobody waits on it.
+# apcaccess that fails or prints nothing (apcupsd stopped, starting, or slower than the wait) is no answer: never an empty
+# reading, which would read as "on mains".
 _power_apc_vars() {
     command -v apcaccess >/dev/null 2>&1 || return 1
-    timeout "$(_api_int_or "${UPS_APC_TIMEOUT:-15}" 15)" apcaccess status 2>/dev/null | awk -F' *: *' 'NF >= 2 { k=tolower($1); gsub(/[[:space:]]+$/, "", k); v=$2; sub(/[[:space:]]+$/, "", v); print k "=" v }'
+    local out
+    out=$(timeout "$(_api_int_or "${UPS_APC_TIMEOUT:-15}" 15)" apcaccess status 2>/dev/null) || return 1
+    out=$(printf '%s\n' "$out" | awk -F' *: *' 'NF >= 2 { k=tolower($1); gsub(/[[:space:]]+$/, "", k); v=$2; sub(/[[:space:]]+$/, "", v); print k "=" v }')
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
 }
 
 # CyberPower (PowerPanel Linux): "Key..........  value" lines from `pwrstat -status`, keys lower-cased with underscores
@@ -10301,38 +10307,59 @@ _power_pwrstat_vars() {
                     k = tolower(k); gsub(/[^a-z0-9]+/, "_", k); if (k != "") print k "=" v }'
 }
 
-# Why apcupsd lost the UPS (COMMLOST), as the end of a sentence: the kernel has no USB at all (Debian's cloud kernel), the
-# config names a serial device for a USB UPS, or no UPS is on this machine's USB (a VM it was not passed through to).
-# DCS_SYSFS_USB, UPS_APCUPSD_CONF and DCS_VIRT point the tests elsewhere.
+# Can this kernel drive USB? "yes" (/sys/bus/usb is there: a USB controller and its drivers), "module" (the kernel has USB as a
+# module but nothing loaded it: no USB controller, as on a VM without USB devices) or "no" (no USB in the kernel at all:
+# Debian's cloud kernel, the one the DCS Debian image boots). DCS_SYSFS_USB and DCS_KMOD_DIR point the tests elsewhere.
+_power_usb_state() {
+    local kmod="${DCS_KMOD_DIR:-/lib/modules/$(uname -r 2>/dev/null)}"
+    if [[ -d "${DCS_SYSFS_USB:-/sys/bus/usb}" ]]; then echo yes
+    elif compgen -G "$kmod/kernel/drivers/usb/core/usbcore.ko*" >/dev/null || grep -qs '/usbcore\.ko$' "$kmod/modules.builtin"; then echo module
+    else echo no; fi
+}
+
+# Why apcupsd lost the UPS (COMMLOST): one line "<cause>|<the end of a sentence>". Causes: no_usb (the kernel has no USB at
+# all), serial_device (the config names a serial device for a USB UPS), not_on_usb (no APC UPS on this machine's USB: a VM it
+# was not passed through to, or a cable), restart_apcupsd (the UPS is there, apcupsd lost it).
+# DCS_SYSFS_USB, DCS_KMOD_DIR, UPS_APCUPSD_CONF, DCS_VIRT and DCS_KERNEL point the tests elsewhere.
 _power_apc_lost_why() {
-    local usb="${DCS_SYSFS_USB:-/sys/bus/usb}" conf="${UPS_APCUPSD_CONF:-/etc/apcupsd/apcupsd.conf}" type="" dev="" v found=false virt=""
-    if [[ ! -d "$usb" ]]; then
-        printf '%s' ": this server's kernel has no USB drivers (Debian's cloud kernel has none): install linux-image-amd64, see docs/VM-IMAGES.md"; return
+    local usb="${DCS_SYSFS_USB:-/sys/bus/usb}" conf="${UPS_APCUPSD_CONF:-/etc/apcupsd/apcupsd.conf}" type="" dev="" v found=false virt="" kern state
+    # (systemd-detect-virt prints "none" and exits 1 on bare metal: that must not end the caller under errexit)
+    virt="${DCS_VIRT:-}"; [[ -n "$virt" ]] || virt=$(systemd-detect-virt 2>/dev/null) || true
+    [[ "$virt" == none ]] && virt=""
+    state=$(_power_usb_state)
+    if [[ "$state" == no ]]; then
+        kern="${DCS_KERNEL:-$(uname -r 2>/dev/null)}"
+        [[ "$kern" == *-cloud-* ]] && kern+=", Debian's cloud kernel"
+        if [[ -n "$virt" ]]; then
+            printf 'no_usb|: this VM has no USB support: its kernel (%s) has no USB drivers, so a UPS passed through to it cannot be seen. Install a kernel with USB (Debian: sudo apt install linux-image-amd64, then reboot; docs/VM-IMAGES.md, Hardware you pass through) or read the UPS from the Proxmox host over NUT (UPS_SOURCE=nut, UPS_NUT_HOST)\n' "$kern"
+        else
+            printf 'no_usb|: this server'\''s kernel (%s) has no USB drivers, so the UPS cannot be seen: boot a kernel with USB (Debian: sudo apt install linux-image-amd64, then reboot; docs/VM-IMAGES.md)\n' "$kern"
+        fi
+        return
     fi
     if [[ -r "$conf" ]]; then
         type=$(awk 'toupper($1) == "UPSTYPE" {print tolower($2); exit}' "$conf" 2>/dev/null)
         dev=$(awk 'toupper($1) == "DEVICE" {print $2; exit}' "$conf" 2>/dev/null)
         if [[ "$type" == usb && -n "$dev" ]]; then
-            printf ': %s names DEVICE %s for a USB UPS: leave DEVICE empty and restart apcupsd' "$conf" "$dev"; return
+            printf 'serial_device|: %s names DEVICE %s for a USB UPS: leave DEVICE empty and restart apcupsd\n' "$conf" "$dev"; return
         fi
     fi
     for v in "$usb"/devices/*/idVendor; do [[ -r "$v" && "$(cat "$v" 2>/dev/null)" == 051d ]] && { found=true; break; }; done
     if [[ "$found" == false ]]; then
-        # (systemd-detect-virt prints "none" and exits 1 on bare metal: that must not end the caller under errexit)
-        virt="${DCS_VIRT:-}"; [[ -n "$virt" ]] || virt=$(systemd-detect-virt 2>/dev/null) || true
-        if [[ -n "$virt" && "$virt" != none ]]; then
-            printf '%s' ": no APC UPS on this virtual machine's USB: pass it through (Proxmox: Hardware, Add, USB Device) or read it from the host over NUT (UPS_SOURCE=nut, UPS_NUT_HOST)"
+        if [[ -n "$virt" ]]; then
+            printf 'not_on_usb|: no APC UPS on this virtual machine'\''s USB%s: pass it through (Proxmox: Hardware, Add, USB Device) or read it from the host over NUT (UPS_SOURCE=nut, UPS_NUT_HOST)\n' \
+                "$([[ "$state" == module ]] && printf ' (it has no USB controller at all)')"
         else
-            printf '%s' ": no APC UPS on this machine's USB: check the cable"
+            printf '%s\n' "not_on_usb|: no APC UPS on this machine's USB: check the cable"
         fi
         return
     fi
-    printf '%s' ": the UPS is on USB, so restart apcupsd (sudo systemctl restart apcupsd) and check its log"
+    printf '%s\n' "restart_apcupsd|: the UPS is on USB, so restart apcupsd (sudo systemctl restart apcupsd) and check its log"
 }
 
 # One reading as JSON (also the shape of .data/power.json without the loop fields)
 _power_sample() {
-    local source="${UPS_SOURCE:-auto}" ups_vars="" used="none" err=""
+    local source="${UPS_SOURCE:-auto}" ups_vars="" used="none" err="" cause=""
     if [[ "$source" == "nut" || "$source" == "auto" ]]; then
         ups_vars=$(_power_nut_vars) && used="nut"
     fi
@@ -10354,6 +10381,7 @@ _power_sample() {
         model=$(printf '%s\n' "$ups_vars" | awk -F= '$1=="ups.model" || $1=="device.model" {print $2; exit}')
         [[ " $status " == *" OB "* || "$status" == OB* ]] && on_batt=true
         [[ " $status " == *" LB "* ]] && low=true
+        [[ -n "$status" ]] || { ok=false; cause="no_status"; err="The NUT server names no status for \"${UPS_NAME:-ups}\" (ups.status): check its driver (upsc ${UPS_NAME:-ups})"; }
     elif [[ "$used" == "apcupsd" ]]; then
         status=$(printf '%s\n' "$ups_vars" | awk -F= '$1=="status" {print $2; exit}')
         charge=$(printf '%s\n' "$ups_vars" | awk -F= '$1=="bcharge" {print $2; exit}' | awk '{print $1}')
@@ -10363,8 +10391,12 @@ _power_sample() {
         model=$(printf '%s\n' "$ups_vars" | awk -F= '$1=="model" {print $2; exit}')
         [[ "$status" == *ONBATT* ]] && on_batt=true
         [[ "$status" == *LOWBATT* ]] && low=true
-        # apcupsd answers but has lost the UPS: no reading at all, which is a problem and not "on mains"
-        if [[ "$status" == *COMMLOST* ]]; then ok=false; err="apcupsd cannot talk to the UPS (COMMLOST)$(_power_apc_lost_why)"; fi
+        # apcupsd answers but has lost the UPS, or names no state at all: no reading, which is a problem and not "on mains"
+        if [[ "$status" == *COMMLOST* ]]; then
+            local why; why=$(_power_apc_lost_why); cause="${why%%|*}"; ok=false; err="apcupsd cannot talk to the UPS (COMMLOST)${why#*|}"
+        elif [[ -z "$status" ]]; then
+            ok=false; cause="no_status"; err="apcupsd answered without a UPS status: restart apcupsd (sudo systemctl restart apcupsd) and check its log"
+        fi
     elif [[ "$used" == "pwrstat" ]]; then
         local _g; _g() { printf '%s\n' "$ups_vars" | awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'; }
         status=$(_g state)
@@ -10382,7 +10414,7 @@ _power_sample() {
         [[ "$status" == *[Ll]ow* ]] && low=true
         [[ -n "$last_ev" && "$last_ev" == None ]] && last_ev=""
     else
-        ok=false
+        ok=false; cause="no_answer"
         case "$source" in
             pwrstat) err="${pw_err:-pwrstat did not answer}" ;;
             nut) err="No answer from the NUT server at ${UPS_NUT_HOST:-127.0.0.1}:${UPS_NUT_PORT:-3493} (ups \"${UPS_NAME:-ups}\")" ;;
@@ -10404,10 +10436,18 @@ _power_sample() {
         [[ "$charge" =~ ^[0-9]+$ && "$charge" -le "$(_api_int_or "${UPS_SHUTDOWN_CHARGE:-20}" 20)" ]] && low=true
         [[ "$runtime" =~ ^[0-9]+$ && "$runtime" -le "$(_api_int_or "${UPS_SHUTDOWN_RUNTIME:-300}" 300)" ]] && low=true
     fi
-    jq -nc --arg src "$used" --arg ups "${UPS_NAME:-ups}" --argjson ok "$ok" --arg err "$err" --arg st "$status" --argjson ob "$on_batt" --argjson lb "$low" \
+    # on battery or low is only known from a reading: without one both are false, and the card shows the problem instead
+    [[ "$ok" == true ]] || { on_batt=false; low=false; }
+    # whether this kernel can drive USB at all (false: a UPS on USB can never be read here, whatever the source says), and then
+    # whether this is a VM (the dashboard says "this VM has no USB support")
+    local usb=true vm=null v=""; if [[ "$(_power_usb_state)" == no ]]; then
+        usb=false; v="${DCS_VIRT:-}"; [[ -n "$v" ]] || v=$(systemd-detect-virt 2>/dev/null) || true
+        if [[ -n "$v" && "$v" != none ]]; then vm=true; elif [[ "$v" == none ]]; then vm=false; fi
+    fi
+    jq -nc --arg src "$used" --arg ups "${UPS_NAME:-ups}" --argjson ok "$ok" --arg err "$err" --arg cause "$cause" --argjson usb "$usb" --argjson vm "$vm" --arg st "$status" --argjson ob "$on_batt" --argjson lb "$low" \
         --argjson charge "$charge" --argjson rt "$runtime" --argjson load "$load" --argjson v "$voltage" --arg model "$model" --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
         --argjson ov "$out_v" --argjson w "$watts" --argjson rated "$rated" --arg lev "$last_ev" --arg tr "$test_res" \
-        '{enabled: true, source: $src, ups: $ups, ok: $ok, error: $err, status: $st, on_battery: $ob, low_battery: $lb, charge: $charge, runtime_seconds: $rt, load: $load,
+        '{enabled: true, source: $src, ups: $ups, ok: $ok, error: $err, cause: (if $cause == "" then null else $cause end), usb: $usb, vm: $vm, status: $st, on_battery: $ob, low_battery: $lb, charge: $charge, runtime_seconds: $rt, load: $load,
           input_voltage: $v, model: $model, sampled_at: $at, output_voltage: $ov, load_watts: $w, rated_watts: $rated,
           last_power_event: (if $lev == "" then null else $lev end), test_result: (if $tr == "" then null else $tr end)}'
 }
@@ -16659,8 +16699,10 @@ _route_mw_has() { awk -v mw="$2" '{ l=$0; sub(/\r$/, "", l); sub(/^[ \t]*/, "", 
 # A VM built from a DCS image (Debian, Ubuntu) before 4.0.30: grub-common has no update-grub and nothing else rewrote
 # /boot/grub/grub.cfg, so a kernel update never booted (and an autoremove of the old kernel left the VM unbootable); and
 # the initramfs module list lacked ext4, which Debian's full kernel (linux-image-amd64: USB, GPUs) has as a module, so that
-# kernel could not mount its disk. Adds the two kernel hooks and the ext4 line, once, as root or through passwordless sudo
-# (every DCS image has it); anything else is left alone. Only on a DCS image (dcs-grubcfg is there). DCS_IMAGE_ROOT: tests.
+# kernel could not mount its disk. Adds the two kernel hooks (the same files as vm-images/apt/overlay/etc/kernel) and the ext4
+# line, once, as root or through passwordless sudo (every DCS image has it), and makes the initramfs of a full kernel installed
+# before that again; anything else is left alone. Only on a DCS image (dcs-grubcfg is there). DCS_IMAGE_ROOT and
+# DCS_UPDATE_INITRAMFS: tests.
 _image_boot_repair() {
     local R="${DCS_IMAGE_ROOT:-}" d f did=()
     local gen=/usr/local/sbin/dcs-grubcfg mods="$R/etc/initramfs-tools/modules"
@@ -16675,7 +16717,17 @@ _image_boot_repair() {
             | "${S[@]}" tee "$f" >/dev/null 2>&1 && "${S[@]}" chmod 755 "$f" 2>/dev/null && did+=("kernel $d hook")
     done
     if [[ -f "$mods" ]] && ! grep -qx 'ext4' "$mods" 2>/dev/null; then
-        printf 'ext4\n' | "${S[@]}" tee -a "$mods" >/dev/null 2>&1 && did+=("ext4 in the initramfs")
+        if printf 'ext4\n' | "${S[@]}" tee -a "$mods" >/dev/null 2>&1; then
+            did+=("ext4 in the initramfs")
+            # a kernel with ext4 as a module (Debian's full kernel) installed before this has an initramfs without it: the next
+            # time the hooks write the boot menu that kernel would be the default and hang, so its initramfs is made again now
+            local k kv
+            for k in "$R"/boot/vmlinuz-*; do
+                [[ -f "$k" ]] || continue; kv=${k##*/vmlinuz-}
+                compgen -G "$R/usr/lib/modules/$kv/kernel/fs/ext4/ext4.ko*" >/dev/null || continue
+                "${S[@]}" "${DCS_UPDATE_INITRAMFS:-update-initramfs}" -u -k "$kv" >/dev/null 2>&1 && did+=("initramfs of $kv made again")
+            done
+        fi
     fi
     if (( ${#did[@]} )); then
         echo "  DCS image boot repair: ${did[*]}"

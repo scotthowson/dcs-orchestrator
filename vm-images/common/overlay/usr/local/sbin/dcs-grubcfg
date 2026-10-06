@@ -1,9 +1,10 @@
 #!/bin/bash
 # =============================================================================
 # dcs-grubcfg — writes /boot/grub/grub.cfg for the kernels in /boot: the newest first (the default), the older ones behind it.
-# Debian and Ubuntu regenerate the file with update-grub when a kernel changes; Fedora has no such hook for the GRUB an image
-# is built with, so a kernel-install plugin (95-dcs-grub.install) calls this. assemble.sh uses it for the first file of every
-# image. The settings are the ones in /etc/default/grub.d/*.cfg. DCS_ROOT (a directory) exists for the tests and the build.
+# No image has update-grub (Debian and Ubuntu carry grub-common only), so this is what follows the kernels everywhere: on Debian
+# and Ubuntu the kernel packages' hooks /etc/kernel/postinst.d and postrm.d/zz-dcs-grubcfg (vm-images/apt/overlay), on Fedora the
+# kernel-install plugin 95-dcs-boot.install, on Arch the pacman hook 99-dcs-grubcfg.hook. assemble.sh uses it for the first file
+# of every image. The settings are the ones in /etc/default/grub.d/*.cfg. DCS_ROOT (a directory) exists for the tests and the build.
 # =============================================================================
 set -u
 R="${DCS_ROOT:-}"

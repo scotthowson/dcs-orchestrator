@@ -10,7 +10,7 @@
       "family": "apt",
       "summary": "the default, the smallest and quickest to start",
       "kernel": "Debian's cloud kernel",
-      "hardware": "Virtual hardware only: to pass a GPU, a USB device or a network card through, choose Ubuntu, Fedora or Arch"
+      "hardware": "Virtual hardware only (no USB): to pass a GPU, a USB device such as a UPS or a network card through, choose Ubuntu, Fedora or Arch, or switch the VM to Debian's full kernel (linux-image-amd64)"
     },
     {
       "id": "ubuntu-26.04",

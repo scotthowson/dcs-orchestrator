@@ -47,10 +47,10 @@ COPY common/overlay/ /
 RUN echo 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} apparmor=1 security=apparmor"' > /etc/default/grub.d/10-lsm.cfg
 
 # Debian and Ubuntu: grub-common has no update-grub, so a kernel installed or removed in the running VM rewrites
-# /boot/grub/grub.cfg through dcs-grubcfg (after initramfs-tools' own hook: zz- sorts last)
-RUN set -eux; for d in postinst.d postrm.d; do mkdir -p /etc/kernel/$d; \
-        printf '#!/bin/sh\n# DCS: /boot/grub/grub.cfg follows the kernels in /boot (this image has no update-grub)\nexec /usr/local/sbin/dcs-grubcfg >&2\n' > /etc/kernel/$d/zz-dcs-grubcfg; \
-        chmod 755 /etc/kernel/$d/zz-dcs-grubcfg; done
+# /boot/grub/grub.cfg through dcs-grubcfg: the hooks /etc/kernel/postinst.d and postrm.d/zz-dcs-grubcfg (after initramfs-tools'
+# own hook, zz- sorts last, so the new kernel's initramfs is there). Fail the build if they did not land executable.
+COPY apt/overlay/ /
+RUN set -eux; for d in postinst.d postrm.d; do test -x /etc/kernel/$d/zz-dcs-grubcfg; done
 RUN set -eux; \
     chmod 755 /usr/local/sbin/dcs-init; chmod 440 /etc/sudoers.d/* 2>/dev/null || true; \
     for u in dcs-init.service systemd-networkd.service systemd-timesyncd.service systemd-repart.service ssh.service \
