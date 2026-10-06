@@ -60,6 +60,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A recovery bundle's `.sha256` was group-readable** (664); it is private like the bundle (600).
 - **Set-aside copies named after the same second collided**: two restores in one second made the second one fail to set
   its drive App-Data aside; the second copy is now `…-2`, and the `-N` sets are pruned too (they were kept forever).
+- **The first `./start.sh` took minutes on a fresh install.** Five of the example stacks had a 30 s healthcheck with no
+  start period, and `docker compose up --wait` waits for the first check: about 30 s per stack. They now check every
+  10 s with a 5 s start period (healthy in about 5 s). A fresh install's stack phase went from 3 min 44 s to 1 min 38 s.
+  A stack whose compose file declares no service (`services:` with only comments, `services: {}`) is no longer sent to
+  compose (which failed it): start.sh says "has no services yet — nothing to start" in one line, lists it as EMPTY,
+  and goes on without the pause between stacks.
+- **"Update the dashboard" without a network.** The pull failed and so did the update, even with the image already
+  on the machine. When the pull fails because the registry cannot be reached and the image the compose file names is
+  on the machine, the dashboard is recreated from it ("No network: recreated from the image already on this
+  machine"); without the image the answer says so. A registry that answered (unknown tag, denied) is still an error.
+- The dashboard's compose file is found when `container_name: "DCS-UI"` is quoted or spaced differently (the update
+  check, the image rename and the dashboard update missed it).
+
 - **An explicit `false` was read as `true` in eight places.** jq's `//` treats `false` like a missing value, so
   `.x // true` turned every `false` into `true`: a backup whose manifest says it is incomplete was listed as complete
   (the "incomplete" badge never showed), a plugin set to `"enabled": false` still showed its dashboard cards, `auth: false`

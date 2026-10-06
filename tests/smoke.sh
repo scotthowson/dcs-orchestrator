@@ -336,6 +336,71 @@ check "image rename: a look-alike is left alone"   1 "$(grep -c 'docker-compose-
 # the registry is always asked under the new name, whatever an unmigrated file still says
 check "dashboard registry name: old becomes new"   "ghcr.io/scotthowson/dcs-orchestrator-ui:4.0.30" "$(_lib _dcs_ui_registry_ref ghcr.io/scotthowson/docker-compose-skeleton-ui:4.0.30)"
 check "dashboard registry name: new is kept"       "ghcr.io/scotthowson/dcs-orchestrator-ui:latest" "$(_lib _dcs_ui_registry_ref ghcr.io/scotthowson/dcs-orchestrator-ui:latest)"
+# the dashboard's compose file is found whatever the quoting and spacing of `container_name: DCS-UI`; a look-alike
+# name or a commented-out line is not it
+UIQ="$WORK/uiq"; mkdir -p "$UIQ/core" "$UIQ/sq" "$UIQ/no/a" "$UIQ/no/b"
+printf 'services:\n  dcs-ui:\n    container_name:   "DCS-UI"   # the dashboard\n    image: ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.7-smoke\n' > "$UIQ/core/docker-compose.yml"
+printf "services:\n  dcs-ui:\n    container_name: 'DCS-UI'\n    image: ghcr.io/scotthowson/docker-compose-skeleton-ui:7.7.8-smoke\n" > "$UIQ/sq/docker-compose.yml"
+printf 'services:\n  x:\n    container_name: DCS-UI-dev\n    image: nginx:1\n' > "$UIQ/no/a/docker-compose.yml"
+printf 'services:\n  x:\n    # container_name: DCS-UI\n    image: nginx:1\n' > "$UIQ/no/b/docker-compose.yml"
+check "dashboard compose: a double-quoted name is found"   "$UIQ/core/docker-compose.yml" "$(COMPOSE_DIR=$UIQ _lib _dcs_ui_compose_file)"
+check "dashboard image: read through the quoted name"      "ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.7-smoke" "$(COMPOSE_DIR=$UIQ _lib _dcs_ui_image)"
+check "dashboard compose: a look-alike or a comment is not" "rc=1" "$(COMPOSE_DIR=$UIQ/no _lib _dcs_ui_compose_file; echo "rc=$?")"
+mv "$UIQ/core" "$UIQ/no/core"   # the single-quoted file is the only dashboard left
+check "image rename: a single-quoted name is migrated"     1 "$(COMPOSE_DIR=$UIQ PATH="$_NODOCKER:$PATH" _lib _dcs_ui_image_migrate | grep -c 'Dashboard image renamed')"
+check "dashboard image: the single-quoted file's, renamed"  "ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke" "$(COMPOSE_DIR=$UIQ _lib _dcs_ui_image)"
+# "Update the dashboard" without a network: the pull fails for a network reason, so the dashboard is recreated from the
+# image already on this machine (by the name its compose file uses); not there, a clear error; a registry that answered
+# (a refusal) is still an error. A fake docker: never this machine's real Docker for the pull, the tag or the recreate.
+UOF="$WORK/fakebin-uioff"; mkdir -p "$UOF"
+cat > "$UOF/docker" <<'FAKE'
+#!/bin/bash
+d=$(dirname "$0")
+case "$1" in
+    inspect) [[ "$2" == DCS-UI ]] && exit 0; exit 1 ;;
+    pull) echo "pull $2" >> "$d/calls"
+          case "$(cat "$d/mode" 2>/dev/null)" in
+              offline) echo "Error response from daemon: Get \"https://ghcr.io/v2/\": dial tcp: lookup ghcr.io on 127.0.0.53:53: no such host" >&2; exit 1 ;;
+              denied)  echo "Error response from daemon: denied: requested access to the resource is denied" >&2; exit 1 ;;
+              *) echo "Status: Image is up to date for $2"; echo "$2" >> "$d/images"; exit 0 ;;
+          esac ;;
+    image) [[ "$2" == inspect ]] && grep -qxF -- "$3" "$d/images" 2>/dev/null && exit 0; exit 1 ;;
+    tag) echo "tag $2 $3" >> "$d/calls"; echo "$3" >> "$d/images"; exit 0 ;;
+    compose) echo "$*" >> "$d/recreated"; exit 0 ;;
+esac
+exit 1
+FAKE
+chmod +x "$UOF/docker"
+_uiapply() { rm -f "$UOF/calls" "$UOF/recreated"; COMPOSE_DIR=$UIQ AUTH_ROLE=admin DOCKER_COMPOSE_CMD="docker compose" PATH="$UOF:$PATH" _lib handle_ui_update_apply; }
+_uirecreated() { for _ in $(seq 1 50); do [[ -s "$UOF/recreated" ]] && break; sleep 0.1; done; grep -c -- '--force-recreate --no-deps dcs-ui' "$UOF/recreated" 2>/dev/null || echo 0; }
+_uiq_cf="$UIQ/sq/docker-compose.yml"
+echo offline > "$UOF/mode"; echo "ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke" > "$UOF/images"
+_r=$(_uiapply)
+check "dashboard update offline: answered 200"            200 "$(status_of <<< "$_r")"
+check "dashboard update offline: says so"                 "true|No network: recreated from the image already on this machine" "$(body_of <<< "$_r" | jq -r '"\(.offline)|\(.message | split(". ")[0])"')"
+check "dashboard update offline: recreated from the local image" 1 "$(_uirecreated)"
+check "dashboard update offline: the compose file it found" 1 "$(grep -c -- "-f $_uiq_cf " "$UOF/recreated" 2>/dev/null)"
+: > "$UOF/images"
+_r=$(_uiapply)
+check "dashboard update offline, no image: a clear error" "500|yes|0" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | jq -r .message | grep -q 'No network, and the dashboard image .* is not on this machine' && echo yes)|$(sleep 0.5; grep -c . "$UOF/recreated" 2>/dev/null || echo 0)"
+echo denied > "$UOF/mode"; echo "ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke" > "$UOF/images"
+_r=$(_uiapply)
+check "dashboard update: a registry refusal is still an error" "500|yes" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | jq -r .message | grep -q '^Failed to pull image: .*denied' && echo yes)"
+echo online > "$UOF/mode"; : > "$UOF/images"
+_r=$(_uiapply)
+check "dashboard update online: pulled and recreated"     "200|null|pull ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke|1" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | jq -r .offline)|$(head -1 "$UOF/calls")|$(_uirecreated)"
+# a file still on the old name: online the new name is pulled and tagged under the old one (40e5c47); offline the new
+# name already on this machine is tagged under the old one and used
+sed -i 's#dcs-orchestrator-ui:7.7.8-smoke#docker-compose-skeleton-ui:7.7.8-smoke#' "$_uiq_cf"
+_r=$(_uiapply)
+check "dashboard update online, old name: tagged after the pull" "200|tag ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke ghcr.io/scotthowson/docker-compose-skeleton-ui:7.7.8-smoke" "$(status_of <<< "$_r")|$(grep '^tag ' "$UOF/calls")"
+echo offline > "$UOF/mode"; echo "ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke" > "$UOF/images"
+_r=$(_uiapply)
+check "dashboard update offline, old name: the new name's image is used" "200|true|tag ghcr.io/scotthowson/dcs-orchestrator-ui:7.7.8-smoke ghcr.io/scotthowson/docker-compose-skeleton-ui:7.7.8-smoke|1" "$(status_of <<< "$_r")|$(body_of <<< "$_r" | jq -r .offline)|$(grep '^tag ' "$UOF/calls")|$(_uirecreated)"
+rm -f "$UOF/calls"; _r=$(COMPOSE_DIR=$UIQ/none AUTH_ROLE=admin DOCKER_COMPOSE_CMD="docker compose" PATH="$UOF:$PATH" _lib handle_ui_update_apply)
+check "dashboard update: no compose file, 404 before any pull" "404|no" "$(status_of <<< "$_r")|$(grep -q '^pull' "$UOF/calls" 2>/dev/null && echo yes || echo no)"
+check "dashboard update: offline means the registry was not reached" "1 1 0 0" "$(_lib eval 'for o in "1|manifest unknown" "1|denied: requested access" "124|" "1|dial tcp 140.82.1.1:443: i/o timeout"; do _dcs_pull_failed_offline "${o%%|*}" "${o#*|}" && printf "0 " || printf "1 "; done' | sed 's/ $//')"
+command rm -rf "$UIQ" "$UOF"
 command rm -rf "$UIM"
 VTOKEN=$(request POST /auth/login '{"username":"viewer","password":"viewer-pass-123"}' "${AUTH[@]}" | body_of | jq -r '.token // empty')
 check "viewer signed in again"          200 "$(viewer_request GET /stacks | status_of)"
@@ -2725,17 +2790,51 @@ check "batch: no drive, the restart is refused with the reason" "false|yes" "$(b
 rm -rf "$WORK/Stacks/zz-bat" "$_DRV/bat"
 # at boot a drive stack's value does not reach the stacks started after it
 mkdir -p "$WORK/boot/Stacks/b1" "$WORK/boot/Stacks/b2"
-printf 'services: {}\n' | tee "$WORK/boot/Stacks/b1/docker-compose.yml" > "$WORK/boot/Stacks/b2/docker-compose.yml"
+printf 'services:\n  x:\n    image: alpine:3\n' | tee "$WORK/boot/Stacks/b1/docker-compose.yml" > "$WORK/boot/Stacks/b2/docker-compose.yml"
 printf 'APP_DATA_DIR="%s"\n' "$_DRV/b1" > "$WORK/boot/Stacks/b1/.env"; : > "$WORK/boot/Stacks/b2/.env"; printf 'TZ=UTC\n' > "$WORK/boot/.env"
 # shellcheck disable=SC2034  # LOG_FILE and the others are read by the function pulled out of run.sh
 _boot() { ( BASE_DIR="$WORK/boot"; COMPOSE_DIR="$WORK/boot/Stacks"; LOG_FILE=/dev/null; SKIP_HEALTHCHECK_WAIT=true; unset APP_DATA_DIR
     log_info() { :; }; log_debug() { :; }; log_warning() { :; }; log_error() { :; }; log_success() { :; }; log_timer_start() { :; }; log_timer_stop() { :; }
     compose_with_secrets() { echo "$(basename "$(dirname "$1")")=${APP_DATA_DIR-unset}" >> "$WORK/boot/seen"; }
-    eval "$(sed -n '/^start_service_stack()/,/^}/p' "$ROOT/.scripts/run.sh")"; start_service_stack b1 >/dev/null 2>&1; start_service_stack b2 >/dev/null 2>&1 ); }
+    eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p;/^start_service_stack()/,/^}/p' "$ROOT/.scripts/run.sh")"; start_service_stack b1 >/dev/null 2>&1; start_service_stack b2 >/dev/null 2>&1 ); }
 _boot
 check "boot: the drive stack gets its path" "b1=$_DRV/b1" "$(grep '^b1=' "$WORK/boot/seen")"
 check "boot: the next stack does not inherit it" "b2=unset" "$(grep '^b2=' "$WORK/boot/seen")"
 rm -rf "${WORK:?}/boot"
+# a stack that declares no service has nothing to start: one line, back at once, no compose call, no wait and no pause
+# after it; anything the text check cannot rule out (a service, an include) goes through compose as before
+_emp() { printf "$1" > "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ); }
+check "empty stack: only comments under services:"  0 "$(_emp 'services:\n  # Add your services here\n  #  my-service:\n\n')"
+check "empty stack: services: {}"                   0 "$(_emp 'services: {}   # none yet\n')"
+check "empty stack: no services key"                0 "$(_emp 'name: x\nnetworks:\n  n: {}\n')"
+check "empty stack: a service is not empty"         1 "$(_emp 'services:\n  # first\n  a:\n    image: alpine\n')"
+check "empty stack: an inline service is not empty" 1 "$(_emp 'services: {a: {image: alpine}}\n')"
+check "empty stack: an include is not empty"        1 "$(_emp 'include:\n  - other.yml\nservices:\n')"
+check "empty stack: setup.sh's new stack is empty"  0 "$(sed -n "/^services:\$/,/^COMPOSE_EOF\$/p" "$ROOT/setup.sh" | sed '$d' > "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ))"
+_shipped_nonempty=0; for _f in "$ROOT"/Stacks/*/docker-compose.yml; do [[ "$(cp "$_f" "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ))" == 1 ]] && _shipped_nonempty=$((_shipped_nonempty + 1)); done
+check "empty stack: the shipped stacks all start"   "$(ls "$ROOT"/Stacks/*/docker-compose.yml | wc -l)" "$_shipped_nonempty"
+rm -f "$WORK/emp.yml"
+mkdir -p "$WORK/estart/Stacks/e1" "$WORK/estart/Stacks/e2"; : > "$WORK/estart/.env"
+printf 'services:\n  # Add your services here\n' > "$WORK/estart/Stacks/e1/docker-compose.yml"; printf 'services: {}\n' > "$WORK/estart/Stacks/e2/docker-compose.yml"
+# shellcheck disable=SC2034  # read by the functions of run.sh
+_estart() { ( BASE_DIR="$WORK/estart"; COMPOSE_DIR="$WORK/estart/Stacks"; LOG_FILE=/dev/null; SERVICE_START_DELAY=7; DOCKER_STACKS="e1 e2"; unset NTFY_URL
+    for _fn in log_debug log_warning log_error log_success log_timer_start log_timer_stop log_separator log_table log_progress log_info_header log_focus log_highlight; do eval "$_fn() { :; }"; done
+    log_info() { printf '%s\n' "$*"; }; _format_duration() { printf '%ss' "$1"; }
+    compose_with_secrets() { echo called >> "$WORK/estart/compose"; }
+    source "$ROOT/.scripts/run.sh"; start_docker_compose_services e1 e2; echo "rc=$?" ); }
+_es_t0=$(date +%s); _es_out=$(_estart 2>&1); _es_t=$(( $(date +%s) - _es_t0 ))
+check "empty stack: said in one line each"          2 "$(grep -c "has no services yet — nothing to start" <<< "$_es_out")"
+check "empty stack: not a failure, nothing started" "rc=0|Succeeded: 0 | Failed: 0 | Skipped: 2" "$(grep -o 'rc=[0-9]*' <<< "$_es_out")|$(grep -o 'Succeeded: .*' <<< "$_es_out")"
+check "empty stack: no compose call"                no "$([[ -e "$WORK/estart/compose" ]] && echo yes || echo no)"
+check "empty stack: no SERVICE_START_DELAY pause"   yes "$( (( _es_t < 3 )) && echo yes || echo no)"
+# a stack with a service still goes through compose and still waits for its health
+mkdir -p "$WORK/estart/Stacks/e3"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/estart/Stacks/e3/docker-compose.yml"
+# shellcheck disable=SC2034  # read by the functions pulled out of run.sh
+check "a real stack: compose up --wait as before"  "0|e3 up -d --remove-orphans --timeout 60 --wait" "$( ( BASE_DIR="$WORK/estart"; COMPOSE_DIR="$WORK/estart/Stacks"; LOG_FILE=/dev/null; SKIP_HEALTHCHECK_WAIT=false
+    for _fn in log_info log_debug log_warning log_error log_success log_timer_start log_timer_stop; do eval "$_fn() { :; }"; done
+    compose_with_secrets() { local cf="$1"; shift 2; echo "$(basename "$(dirname "$cf")") $*" > "$WORK/estart/args"; }
+    eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p;/^start_service_stack()/,/^}/p' "$ROOT/.scripts/run.sh")"; start_service_stack e3 >/dev/null 2>&1; echo "$?|$(cat "$WORK/estart/args")" ) )"
+rm -rf "${WORK:?}/estart"
 # a move into a VM: the VM's copy of the .env says ./App-Data before the stack starts there
 _VMH="$WORK/vmhome"; _VS="$_VMH/.Docker-Compose-Skeleton-AIO/Stacks/zz-mv2"; mkdir -p "$_VS" "$_DRV/mv2/App"; echo hi > "$_DRV/mv2/App/f"
 mkdir -p "$WORK/Stacks/zz-mv2"; printf 'services: {}\n' > "$WORK/Stacks/zz-mv2/docker-compose.yml"

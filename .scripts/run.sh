@@ -81,6 +81,30 @@ fi
 # CORE SERVICE MANAGEMENT
 # =============================================================================
 
+# A compose file that plainly declares no service: `services:` with nothing (or only comments) under it, `services: {}`,
+# or no services key, and no `include:`. Such a stack has nothing to start (compose would refuse it with "no service
+# selected" or "services must be a mapping"). Anything the text check cannot rule out counts as not empty, so a real stack
+# always goes through `compose up`. No Docker call: a plain read of the file.
+# Args: $1 — compose file. Returns: 0 when it declares no service
+_stack_compose_is_empty() {
+    [[ -f "$1" ]] || return 1
+    awk '
+        /^[ \t]*(#.*)?$/ { next }                    # blank lines and comments
+        /^[^ \t]/ {                                   # a top-level key
+            insvc = 0
+            if ($0 ~ /^include[ \t]*:/) { found = 1; exit }
+            if ($0 ~ /^services[ \t]*:/) {
+                v = $0; sub(/^services[ \t]*:[ \t]*/, "", v); sub(/[ \t]*#.*$/, "", v)
+                if (v == "" || v == "{}" || v == "~" || v == "null") { insvc = 1; next }
+                found = 1; exit                          # an inline mapping with content
+            }
+            next
+        }
+        insvc { found = 1; exit }                        # an indented line under services:
+        END { exit found ? 1 : 0 }
+    ' "$1"
+}
+
 # Start a single service stack.
 #
 # Loads environment files, builds the docker compose command with appropriate
@@ -90,7 +114,7 @@ fi
 # Args:
 #   $1 — stack directory name (e.g. "core-infrastructure")
 #
-# Returns: 0 on success, 1 on failure
+# Returns: 0 on success, 1 on failure, 2 when the stack declares no service (nothing to start, nothing waited for)
 start_service_stack() {
     local service="$1"
     local service_path="$COMPOSE_DIR/$service"
@@ -107,6 +131,11 @@ start_service_stack() {
     if [[ ! -f "$compose_file" ]]; then
         log_warning "Compose file missing: $compose_file"
         return 1
+    fi
+
+    if _stack_compose_is_empty "$compose_file"; then
+        log_info "Stack '$service' has no services yet — nothing to start"
+        return 2
     fi
 
     log_info "Starting services in $service stack..."
@@ -262,7 +291,15 @@ start_docker_compose_services() {
             local timer_start
             timer_start="$(date '+%s')"
 
-            if start_service_stack "$service"; then
+            local stack_rc=0
+            start_service_stack "$service" || stack_rc=$?
+            if (( stack_rc == 2 )); then
+                # declares no service: nothing was started, so there is nothing to wait for or pause after
+                skipped_services+=("$service")
+                result_names+=("$service")
+                result_statuses+=("EMPTY")
+                result_durations+=("--")
+            elif (( stack_rc == 0 )); then
                 (( started_count++ ))
 
                 local timer_end
@@ -331,7 +368,7 @@ start_docker_compose_services() {
 
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All $started_count configured service stacks started successfully"
-        [[ ${#skipped_services[@]} -gt 0 ]] && log_warning "Skipped (not set up): ${skipped_services[*]}"
+        [[ ${#skipped_services[@]} -gt 0 ]] && log_warning "Skipped (not set up, or nothing in them yet): ${skipped_services[*]}"
         return 0
     else
         log_warning "Failed stacks: ${failed_services[*]}"
