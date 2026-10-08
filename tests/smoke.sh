@@ -5442,6 +5442,85 @@ cst_part_allowlist() {
     cst_allowlist_native
     cst_allowlist_parser
     cst_home_ipv6
+    cst_home_allowlist
+}
+
+# ---- this server's own addresses on CrowdSec's allowlist as well: AppSec (the WAF) runs no parsers, only an allowlist spares an address there -------------
+cst_own() { cst_cs allowlists inspect dcs -o json | jq -r --arg m "Managed by DCS:" '[.items[] | select((.description // "") | startswith($m)) | .value] | sort | join(" ")'; }     # DCS's own entries
+cst_others() { cst_cs allowlists inspect dcs -o json | jq -r --arg m "Managed by DCS:" '[.items[] | select((.description // "") | startswith($m) | not) | .value] | sort | join(" ")'; }
+cst_sync_calls() { cst_argv_since "$1" | grep -cE ' allowlists (list|add|remove|create) ' | tr -d ' '; }      # how often the sync asked CrowdSec about allowlists since a mark
+cst_home_allowlist() {
+    local mark n st
+    st="$CST/.data/crowdsec-whitelist.json"
+    cst_world data
+    cst_env CROWDSEC_HOME_IPV6_PREFIX 64
+    printf '2001:db8:77:5:1c2d:3e4f:5a6b:7c8d\n' > "$CST/ip6-src"
+    printf '198.51.100.9\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    cst_is "own address/allowlist: a sync" 200
+    check "own address/allowlist: the public address and the home IPv6 network are on CrowdSec's allowlist" "198.51.100.9 2001:db8:77:5::/64" "$(cst_own)"
+    check "own address/allowlist: …the admin's entries are untouched" "198.51.100.0/24 2001:db8::/32 203.0.113.9" "$(cst_others)"
+    check "own address/allowlist: …the sync says so" "true true 198.51.100.9,2001:db8:77:5::/64 null" "$(jq -r '.allowlist | "\(.supported) \(.changed) \(.added | join(",")) \(.error)"' "$st")"
+    check "own address/allowlist: …the comment says who keeps it and why" 1 "$(cst_cs allowlists inspect dcs -o json | jq '[.items[] | select(.value == "198.51.100.9" and (.description | test("AppSec")))] | length')"
+    cst_call admin GET /crowdsec/allowlist
+    cst_j "own address/allowlist: the page shows each address once, managed and not removable" '[.entries[] | select(.value == "198.51.100.9")] | map("\(.source) \(.removable)") | join(",")' "managed false" \
+        '[.entries[] | select(.value == "2001:db8:77:5::/64")] | length' 1 '.home.allowlist.supported' true '.home.allowlist.entries | join(" ")' "198.51.100.9 2001:db8:77:5::/64"
+    # -- nothing new: one look, no change
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: a sync with nothing new reads the list once and changes nothing" 1 "$(cst_sync_calls "$mark")"
+    check "own address/allowlist: …and says so" "false" "$(jq -r '.allowlist.changed' "$st")"
+    # -- the address changes: the new one is added, the old one removed (a stranger may have it now)
+    printf '198.51.100.10\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: a new address replaces the old one" "198.51.100.10 2001:db8:77:5::/64" "$(cst_own)"
+    check "own address/allowlist: …the sync names both" "198.51.100.10 198.51.100.9" "$(jq -r '.allowlist | "\(.added | join(",")) \(.removed | join(","))"' "$st")"
+    # -- no address this time (the lookup failed): what is there stays
+    rm -f "$CST/.data/ddns-current-ip"
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: a failed lookup removes nothing" "198.51.100.10 2001:db8:77:5::/64" "$(cst_own)"
+    check "own address/allowlist: …and adds nothing" 1 "$(cst_sync_calls "$mark")"
+    # -- the provider's new IPv6 prefix; then IPv6 trust switched off
+    printf '198.51.100.10\n' > "$CST/.data/ddns-current-ip"
+    printf '2001:db8:99:5:1c2d:3e4f:5a6b:7c8d\n' > "$CST/ip6-src"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: a new IPv6 prefix replaces the old network" "198.51.100.10 2001:db8:99:5::/64" "$(cst_own)"
+    cst_call admin DELETE /crowdsec/allowlist/2001:db8:99:5::/64
+    cst_is "own address/allowlist: DCS's own entry cannot be removed by hand" 409
+    cst_env CROWDSEC_HOME_IPV6_PREFIX off
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: IPv6 switched off takes the network off" "198.51.100.10" "$(cst_own)"
+    # -- an admin's own entry for the address that becomes the server's is the admin's: never removed by the sync
+    cst_call admin POST /crowdsec/allowlist '{"value":"198.51.100.11","comment":"mine"}'
+    printf '198.51.100.11\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: an admin's entry for the new address counts (none added, the old one gone)" "" "$(cst_own)"
+    printf '198.51.100.12\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    check "own address/allowlist: …and when the address moves on, the admin's entry stays" "198.51.100.12|198.51.100.0/24 198.51.100.11 2001:db8::/32 203.0.113.9" "$(cst_own)|$(cst_others)"
+    # -- a comment cannot pass for DCS's mark
+    cst_call admin POST /crowdsec/allowlist '{"value":"192.0.2.77","comment":"Managed by DCS: fake"}'
+    cst_is "own address/allowlist: an entry with the mark in its comment" 200
+    cst_j "own address/allowlist: …loses the mark" '.comment' fake
+    check "own address/allowlist: …so the sync never takes it for its own" "198.51.100.12" "$(cst_own)"
+    # -- the allowlist does not answer: the sync says so, the parser whitelist is kept all the same
+    cst_mock --mock-set lapi_down=2
+    printf '198.51.100.13\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    cst_is "own address/allowlist: CrowdSec's API is down: the sync still answers" 200
+    check "own address/allowlist: …it says what failed" "true" "$(jq -r '.allowlist.error | test("could not read the allowlists")' "$st")"
+    check "own address/allowlist: …and the parser whitelist has the new address" 1 "$(grep -c '^    - 198.51.100.13$' "$CST/fake/rootfs/etc/crowdsec/parsers/s02-enrich/dcs-whitelist.yaml")"
+    cst_mock --mock-set lapi_down=0
+    # -- a CrowdSec without allowlists (older than 1.6.8): said once in the state, nothing else breaks
+    cst_world old
+    printf '198.51.100.9\n' > "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
+    cst_is "own address/allowlist: an old CrowdSec: the sync still answers" 200
+    check "own address/allowlist: …the state says the WAF cannot be told" "false true" "$(jq -r '.allowlist | "\(.supported) \(.note | test("1.6.8"))"' "$st")"
+    check "own address/allowlist: …the parser whitelist is written as before" 1 "$(grep -c '^    - 198.51.100.9$' "$CST/fake/rootfs/etc/crowdsec/parsers/s02-enrich/dcs-whitelist.yaml")"
+    cst_env CROWDSEC_HOME_IPV6_PREFIX
+    rm -f "$CST/ip6-src"
 }
 
 # ---- media apps: CROWDSEC_MEDIA_APPS is a parser file beside the whitelist's (what CrowdSec makes of it is tests/crowdsec-media-apps.sh) ----------------
@@ -5858,12 +5937,148 @@ cst_services_community() {
         cst_call admin GET /crowdsec/community
         cst_j "community/$v" '.capi.reachable' false '.capi.error | length > 10' true '.community_decisions' 40
     done
-    cst_j "community/error: a DNS failure is not called a refusal" '.capi.forbidden' null '.capi.error | test("cscli capi register")' false
+    cst_j "community/error: a DNS failure is not called a refusal" '.capi.forbidden' null '.capi.error | test("Register again")' false '.needs_register' false
     cst_mock --mock-set capi=forbidden
     cst_uncache; cst_call admin GET /crowdsec/community
     cst_j "community/forbidden: the 403 is explained, the community list is what is missing" '.capi.reachable' false '.capi.forbidden' true '.capi.error | test("Forbidden")' true \
-        '.capi.error | test("cscli capi register")' true '.capi.error | test("keep working")' true '.community_decisions' 40
+        '.capi.error | test("Register again")' true '.capi.error | test("keep working")' true '.community_decisions' 40
+    cst_j "community/forbidden: …it names the button, not a shell command" '.capi.error | test("Run:|docker exec|cscli capi register")' false
+    cst_j "community/forbidden: …and the dashboard can tell it needs you" '.needs_register' true '.last_register' null
     cst_mock --mock-set capi=ok
+    cst_community_register
+    cst_console_enroll
+}
+
+# ---- registering with the community again (CAPI answers 403 to this engine's login): one click instead of a shell ----------------------------------
+cst_community_register() {
+    local creds="$CST/fake/rootfs/etc/crowdsec/online_api_credentials.yaml" login0 login1 bak mark n rates="$CST/.data/rates/crowdsec-capi-register"
+    cst_world data traefik --traefik
+    cst_mock --mock-set capi=forbidden
+    rm -f "$rates"
+    login0=$(grep '^login:' "$creds")
+    cst_try "community/register: a viewer may not" 403 viewer POST /crowdsec/community/register
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register" 200
+    cst_j "community/register" '.registered' true '.restarted' true '.healthy' true '.community.capi.reachable' true '.community.capi.forbidden' null '.community.needs_register' false \
+        '.message | test("accepts the new login")' true '.console_note | test("enrol it again")' true '.backup | test("^/etc/crowdsec/online_api_credentials[.]yaml[.][0-9]{8}T[0-9]{6}Z[.]bak$")' true
+    bak="$CST/fake/rootfs$(jq -r '.backup' <<< "$CST_BODY")"
+    login1=$(grep '^login:' "$creds")
+    check "community/register: CrowdSec has a new login" yes "$([[ -n "$login1" && "$login1" != "$login0" ]] && echo yes || echo no)"
+    check "community/register: …the old one is kept beside it" "$login0" "$(grep '^login:' "$bak" 2>/dev/null)"
+    check "community/register: …and the copy is as private as the original" 600 "$(stat -c %a "$bak" 2>/dev/null)"
+    check "community/register: CrowdSec was restarted once (it reads the new login when it starts)" 1 "$(cst_argv_since "$mark" | grep -c '^restart CrowdSec')"
+    check "community/register: …the cscli call is exactly capi register" 1 "$(cst_argv_since "$mark" | grep -cx 'exec CrowdSec cscli capi register ')"
+    check "community/register: the audit log has it" 1 "$(grep -c '"action":"auth.crowdsec_capi_register".*registered again' "$CST/.data/audit.jsonl")"
+    cst_call admin GET /crowdsec/community
+    cst_j "community/register: the status afterwards" '.capi.reachable' true '.needs_register' false '.last_register.ok' true '.last_register.at | test("^20")' true
+
+    # -- refused again with 403: the address, not the login. Nothing changes and no copy is left
+    cst_mock --mock-set capi=forbidden capi_register=forbidden
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: refused (the address)" 502
+    cst_j "community/register: refused" '.reason' refused '.registered' false '.message | test("address")' true '.message | test("Nothing was changed")' true
+    check "community/register: …the login is unchanged" "$login1" "$(grep '^login:' "$creds")"
+    check "community/register: …and only the first copy is there" 1 "$(find "$CST/fake/rootfs/etc/crowdsec" -maxdepth 1 -name 'online_api_credentials.yaml.*.bak' | wc -l | tr -d ' ')"
+    cst_call admin GET /crowdsec/community
+    cst_j "community/register: the status remembers the refusal" '.needs_register' true '.last_register.ok' false '.last_register.reason' refused
+
+    # -- the central service cannot be reached; the community connection is switched off
+    rm -f "$rates"
+    cst_mock --mock-set capi_register=error
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: no answer from the central service" 502
+    cst_j "community/register: no answer" '.reason' unreachable '.message | test("no such host")' true
+    cst_mock --mock-set capi=disabled capi_register=ok
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: switched off in CrowdSec" 409
+    cst_j "community/register: switched off" '.reason' capi_disabled '.message | test("DISABLE_ONLINE_API")' true
+
+    # -- three tries in ten minutes, then no more
+    cst_mock --mock-set capi=forbidden
+    : > "$rates"; for n in 1 2 3; do date +%s >> "$rates"; done
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: a fourth try in ten minutes waits" 429
+    rm -f "$rates"
+    cst_world absent
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: no CrowdSec" 404
+    rm -f "$rates"
+}
+
+# ---- enrolling in the CrowdSec console from DCS: the key is checked, never logged or echoed; CrowdSec's answers in plain words -------------------------
+cst_console_enroll() {
+    local key="cm1x2y3z4a5b6c7d8e9f0ghij" mark line n bad rates="$CST/.data/rates/crowdsec-console-enroll" host
+    cst_world data traefik --traefik
+    rm -f "$rates"
+    cst_try "console/enroll: a viewer may not" 403 viewer POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    mark=$(cst_argv_n)
+    n=0
+    for bad in '' '   ' 'two words' '-overwrite' 'abc' "$(head -c 300 /dev/zero | tr '\0' 'a')" 'key;id' 'key$(id)x' $'key\nx' 'cléabcdef'; do
+        cst_call admin POST /crowdsec/console/enroll "$(jq -nc --arg k "$bad" '{key: $k}')"
+        [[ "$CST_ST" == 400 ]] || { n=$(( n + 1 )); printf '       (accepted the key "%s": %s)\n' "$bad" "$CST_ST"; }
+    done
+    check "console/enroll: keys that are no enrolment key are refused" 0 "$n"
+    cst_try "console/enroll: not JSON" 400 admin POST /crowdsec/console/enroll 'key=abc'
+    cst_try "console/enroll: a key that is not text" 400 admin POST /crowdsec/console/enroll '{"key":12345678}'
+    cst_try "console/enroll: a name with signs" 400 admin POST /crowdsec/console/enroll "{\"key\":\"$key\",\"name\":\"a;b\"}"
+    check "console/enroll: …none of them reached CrowdSec" 0 "$(cst_argv_since "$mark" | grep -c 'console enroll')"
+
+    # -- enrolled: the call CrowdSec gets, the answer, the audit line without the key
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\" $key \",\"name\":\"lab server\"}"
+    cst_is "console/enroll" 200
+    cst_j "console/enroll" '.enrolled' true '.needs_acceptance' true '.name' 'lab server' '.overwrite' false '.message' 'Enrolled. Open app.crowdsec.net and accept this engine.' '.next | test("restart CrowdSec")' true
+    line=$(cst_argv_since "$mark" | grep ' console enroll ' | head -n 1)
+    check "console/enroll: CrowdSec got the key as one argument, the context option and the name" "exec|CrowdSec|cscli|console|enroll|-o|human|-e|context|--name|lab server|$key" "$(eval "a=($line)"; IFS='|'; printf '%s' "${a[*]}")"
+    check "console/enroll: …the key is not in the answer" 0 "$(grep -c "$key" <<< "$CST_BODY")"
+    check "console/enroll: …nor in the audit log, which has the name" "0 1" "$(grep -c "$key" "$CST/.data/audit.jsonl") $(grep -c '"action":"auth.crowdsec_console_enroll".*console enrol (lab server)' "$CST/.data/audit.jsonl")"
+    check "console/enroll: …nor in the API's own log" 0 "$(grep -c "$key" "$CST/api-stderr.log")"
+
+    # -- already enrolled: say so; overwrite enrols again
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\",\"name\":\"lab server\"}"
+    cst_is "console/enroll: already enrolled" 409
+    cst_j "console/enroll: already enrolled" '.reason' already_enrolled '.needs_overwrite' true '.message | test("overwrite")' true
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\",\"name\":\"lab server\",\"overwrite\":true}"
+    cst_is "console/enroll: overwrite" 200
+    cst_j "console/enroll: overwrite" '.overwrite' true
+    check "console/enroll: …CrowdSec was asked with --overwrite" 1 "$(cst_argv_since "$mark" | grep ' console enroll ' | grep -c -- ' --overwrite ')"
+
+    # -- a key CrowdSec refuses; a login the community refuses; the community switched off
+    cst_mock --mock-set enroll=invalid
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_is "console/enroll: CrowdSec refuses the key" 422
+    cst_j "console/enroll: refused key" '.reason' invalid_key '.needs_register' false \
+        '.message' 'CrowdSec refused this key. Copy a fresh enrolment key from app.crowdsec.net → Security Engines → Add Security Engine; keys from older notes stop working.'
+    check "console/enroll: …the key is not in that answer either" 0 "$(grep -c "$key" <<< "$CST_BODY")"
+    cst_mock --mock-set enroll=ok capi=forbidden
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_is "console/enroll: the community refuses the login" 409
+    cst_j "console/enroll: refused login" '.reason' needs_register '.needs_register' true '.message | test("register again first")' true
+    cst_mock --mock-set capi=disabled
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_is "console/enroll: no community connection" 409
+    cst_j "console/enroll: no community connection" '.reason' capi_disabled
+    cst_mock --mock-set capi=ok
+
+    # -- the name: SERVER_NAME when it is set to something of its own, else the host name (cleaned to what the console takes)
+    rm -f "$rates"
+    cst_world data traefik --traefik
+    cst_env SERVER_NAME '"Lab Hub/2"'
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_j "console/enroll: the name defaults to SERVER_NAME (cleaned)" '.name' 'Lab Hub-2'
+    cst_mock --mock-set enroll=ok
+    cst_env SERVER_NAME '"Docker Server"'
+    host=$(cat /proc/sys/kernel/hostname 2>/dev/null || uname -n); host="${host//[^A-Za-z0-9 ._-]/-}"
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_j "console/enroll: …the example's SERVER_NAME gives way to the host name" '.name' "${host:0:64}"
+    cst_env SERVER_NAME
+    # -- ten tries in ten minutes, then no more
+    : > "$rates"; for n in 1 2 3 4 5 6 7 8 9 10; do date +%s >> "$rates"; done
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_is "console/enroll: an eleventh try in ten minutes waits" 429
+    rm -f "$rates"
 }
 
 cst_part_services() {
@@ -7721,6 +7936,7 @@ CST_WRITES=(
     'POST /crowdsec/notifications {"webhook":"https://discord.com/api/webhooks/111111111111111111/NOTAREALTOKEN_0123456789-abcdefghij"}'
     'POST /crowdsec/notifications/test {}' 'POST /crowdsec/notifications/reset -' 'POST /crowdsec/trust {"ip":"198.18.9.9"}' 'DELETE /crowdsec/trust/198.18.9.9 -'
     'PUT /crowdsec/plugin {"settings":{"mode":"stream"}}' 'POST /crowdsec/traefik/restart -' 'POST /fleet/routes {"http":{"routers":{}}}'
+    'POST /crowdsec/community/register -' 'POST /crowdsec/console/enroll {"key":"cm1x2y3z4a5b6c7d8e9f0ghij"}'
 )
 
 cst_security_roles() {

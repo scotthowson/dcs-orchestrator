@@ -56,6 +56,11 @@ CONTROL VERBS (first argument starts with --mock-)
         empty_json=null|[]|auto   what `-o json` prints for an empty decisions/alerts list (auto: [] for >= 1.7)
         capi=ok|error|forbidden|unregistered|disabled   `cscli capi status` / `console status` (forbidden: the Central API answers 403 to the login,
                             as it does when it refuses the server's address)
+        capi_register=ok|forbidden|error   what `cscli capi register` meets (ok: new credentials are written, and a forbidden CAPI
+                            answers again after the next restart; forbidden: the address is refused; error: no DNS)
+        enroll=ok|invalid|already   what `cscli console enroll KEY` meets (ok: enrolled, and the engine is then "already" enrolled;
+                            invalid: the attachment key is refused; already: enrolled before, only --overwrite enrols again).
+                            A forbidden CAPI refuses the login first (403).
         traefik_bouncer=NAME   add (or replace) a Traefik-plugin bouncer NAME that pulled 20 s ago (a proxy that has its own middleware and key):
                             --mock-set traefik_bouncer=traefik-bouncer@172.19.0.6 ; traefik_bouncer=-NAME removes it again
         hub_cascade=1|0     the real cscli also flags an enabled collection "update available" when one of its members is behind (one level);
@@ -3729,6 +3734,8 @@ def boot_crowdsec(run, c, why='start'):
         c['health_forced'] = None
         c['pid'] = 1000 + Rng(st).randint(100000, 3000000)
         st['crash_note'] = ''
+        if st['knobs'].get('capi_pending'):      # credentials written by `capi register` are read at start
+            st['knobs']['capi'] = st['knobs'].pop('capi_pending')
         log_startup(st, t)
         st['cs']['machines'][0]['updated'] = t
         st['cs']['machines'][0]['last_heartbeat'] = t
@@ -4023,6 +4030,10 @@ def exec_util(run, cmd):
             err("%s: can't create '%s': No such file or directory" % (prog, d))
             raise Exit(1)
         _cp_tree(fs.host(s), hd)
+        if prog == 'mv' or any(a.startswith('-') and not a.startswith('--') and ('p' in a or 'a' in a) for a in args):
+            if os.path.isfile(hd):
+                import shutil
+                shutil.copymode(fs.host(s), hd)      # cp -p / -a (and mv) keep the mode: a private file stays private
         if prog == 'mv':
             fs.remove(s)
         run.touch()
@@ -4188,7 +4199,9 @@ _CMDS = {
     ('version',): (_flags(), (0, 0)),
     ('lapi', 'status'): (_flags(), (0, 0)),
     ('capi', 'status'): (_flags(), (0, 0)),
+    ('capi', 'register'): (_flags(('file', 'f', 's')), (0, 0)),
     ('console', 'status'): (_flags(), (0, 0)),
+    ('console', 'enroll'): (_flags(('name', 'n', 's'), ('overwrite', None, 'b'), ('tags', 't', 'S'), ('enable', 'e', 'S'), ('disable', 'd', 'S')), (1, 1)),
     ('config', 'show'): (_flags(('key', None, 's')), (0, 0)),
     ('config', 'show-yaml'): (_flags(), (0, 0)),
     ('decisions', 'list'): (_flags(('all', 'a', 'b'), ('since', None, 'd'), ('until', None, 'd'), ('type', 't', 's'), ('scope', None, 's'),
@@ -5473,6 +5486,55 @@ class StatusCmds(object):
         out('Pulling community blocklist is enabled')
         out('Pulling blocklists from the console is enabled')
 
+    def c_capi_register(self):
+        """cscli 1.6.8/1.8.1: no --force; it overwrites the credentials file only once the Central API accepted the new machine"""
+        mode = self.st['knobs'].get('capi', 'ok')
+        if mode in ('unregistered', 'disabled'):
+            self.fatal("no configuration for Central API (CAPI) in '%s'" % self.conf['path'])
+        reg = self.st['knobs'].get('capi_register', 'ok')
+        url = 'https://api.crowdsec.net/'
+        if reg == 'error':
+            self.fatal("api client register ('%s'): api register (%s): Post \"%sv3/watchers\": dial tcp: lookup api.crowdsec.net: no such host" % (url, url, url))
+        if reg == 'forbidden':
+            self.fatal("api client register ('%s'): api register (%s): API error: Forbidden" % (url, url))
+        rng = self.db.rng
+        dest = self.fl.get('file') or '/etc/crowdsec/online_api_credentials.yaml'
+        self.run.fs().write(dest, 'url: %s\nlogin: %s\npassword: %s\n' % (url, rng.hexstr(32), rng.hexstr(32)), 0o600)
+        if mode == 'forbidden':
+            self.st['knobs']['capi_pending'] = 'ok'     # the new login is read when crowdsec starts
+        self.run.touch()
+        self.log('info', 'Successfully registered to Central API (CAPI)')
+        self.log('info', "Central API credentials written to '%s'" % dest)
+        self.log('warning', "Run 'sudo systemctl reload crowdsec' for the new configuration to be effective.")
+
+    def c_console_enroll(self):
+        mode = self.st['knobs'].get('capi', 'ok')
+        if mode in ('unregistered', 'disabled'):
+            self.fatal("no configuration for Central API (CAPI) in '%s'" % self.conf['path'])
+        valid = ('custom', 'manual', 'tainted', 'context', 'all') if ver_ge(self.st, 1, 7) else ('custom', 'manual', 'tainted', 'context', 'console_management', 'all')
+        for o in (self.fl.get('enable') or []) + (self.fl.get('disable') or []):
+            if o not in valid:
+                self.fatal('unknown option %s' % o)
+        if mode == 'error':
+            for k in (4, 3, 2):
+                self.log('error', 'while performing request: dial tcp: lookup api.crowdsec.net: no such host; %d retries left' % k)
+            self.fatal('could not enroll instance: context canceled')
+        if mode == 'forbidden':
+            self.fatal('could not enroll instance: API error: Forbidden')
+        what = self.st['knobs'].get('enroll', 'ok')
+        if what == 'invalid':
+            self.fatal('could not enroll instance: API error: the attachment key provided is not valid (hint: get your enrollement key from console, crowdsec login or machine id are not valid values)')
+        if what == 'already' and not self.fl.get('overwrite'):
+            self.log('warning', "Instance already enrolled. You can use '--overwrite' to force enroll")
+            return
+        self.st['knobs']['enroll'] = 'already'
+        self.st['console_enrolled_as'] = self.fl.get('name') or 'mock-host'
+        self.run.touch()
+        for o in (self.fl.get('enable') or []):
+            self.log('info', 'Enabled %s : %s' % (o, 'Forward context with alerts to the console' if o == 'context' else o))
+        self.log('info', 'Watcher successfully enrolled. Visit https://app.crowdsec.net to accept it.')
+        self.log('info', 'Please restart crowdsec after accepting the enrollment.')
+
     def c_console_status(self):
         mode = self.st['knobs'].get('capi', 'ok')
         reg = mode in ('ok', 'error', 'forbidden')
@@ -6447,7 +6509,7 @@ def log_call(fdir, argv):
 
 
 KNOBS = ('docker_down', 'lapi_down', 'health', 'status', 'version', 'discord', 'traefik', 'health_delay', 'restart_fails', 'cscli_slow_ms',
-         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer')
+         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer', 'capi_register', 'enroll')
 
 
 def control(fdir, argv):
@@ -6520,6 +6582,15 @@ def set_knob(st, k, v):
     elif k == 'capi':
         if v not in ('ok', 'error', 'forbidden', 'unregistered', 'disabled'):
             fail('%s: capi must be ok|error|forbidden|unregistered|disabled' % PROG, 2)
+        kn[k] = v
+        kn.pop('capi_pending', None)
+    elif k == 'capi_register':
+        if v not in ('ok', 'forbidden', 'error'):
+            fail('%s: capi_register must be ok|forbidden|error' % PROG, 2)
+        kn[k] = v
+    elif k == 'enroll':
+        if v not in ('ok', 'invalid', 'already'):
+            fail('%s: enroll must be ok|invalid|already' % PROG, 2)
         kn[k] = v
     elif k == 'traefik_bouncer':
         cs = st.get('cs')

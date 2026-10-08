@@ -27,6 +27,11 @@ CROWDSEC_PERMANENT_SECONDS=315360000
 # the allowlist DCS keeps in CrowdSec (1.6.8+) and the bouncer it registers for Traefik
 CROWDSEC_ALLOWLIST_NAME="dcs"
 CROWDSEC_BOUNCER_NAME="dcs-traefik-bouncer"
+# the comment that marks the entries DCS keeps in that allowlist by itself (this server's own addresses): the sync only ever touches those
+CROWDSEC_ALLOWLIST_MARK="Managed by DCS:"
+# CrowdSec's login at its Central API (inside the container), and what DCS remembers of the last time it registered again
+CROWDSEC_CAPI_CREDS="/etc/crowdsec/online_api_credentials.yaml"
+CROWDSEC_REGISTER_STATE="$CROWDSEC_STATE_DIR/capi-register.json"
 
 # the container this request works on, set by _cs_target
 CS_NAME=""
@@ -1434,21 +1439,78 @@ _cs_trusted_entries() {
 }
 
 # an entry expires when its expiration is in the future; cscli writes the zero time for "never"
+# (an entry of the DCS list whose comment carries the mark is one DCS keeps itself: shown as managed, never removable here)
 _CS_JQ_ALLOW='
-def allow_entries($mine):
+def allow_entries($mine; $mark):
   [ (. // [])[] as $l | ($l.items // [])[]
+    | (($l.name == $mine) and ((.description // "") | startswith($mark))) as $dcs
     | { value: .value, kind: (if (.value | contains("/")) then "range" else "ip" end), comment: (.description // ""), created_at: (.created_at // ""),
         expires_at: (if (.expiration // "") == "" or ((.expiration // "") | startswith("0001")) then null else .expiration end),
-        list: $l.name, source: (if $l.name == $mine then "allowlist" else "other" end), managed: false, removable: ($l.name == $mine) } ];
+        list: $l.name, source: (if $dcs then "managed" elif $l.name == $mine then "allowlist" else "other" end), managed: $dcs, removable: ($l.name == $mine and ($dcs | not)) } ];
 '
 
-# GET /crowdsec/allowlist — Everything that is never banned: entries with comment and expiry, which are managed by DCS (the home address) and which can be removed; says which mechanism is in use
+# _cs_allowlist_home_sync CONTAINER PUBLIC_IP HOME6 V6OFF — keep this server's own public address and the home IPv6 network in the DCS allowlist
+# (CrowdSec 1.6.8+). The parser whitelist (dcs-whitelist.yaml) spares them from the scenarios, but AppSec (the WAF) runs no parsers: it only honours
+# CrowdSec's allowlists. The server's own requests through Cloudflare (hairpin) tripped a virtual-patching rule and the AppSec profile banned the
+# server's own address. An entry is DCS's when its comment starts with CROWDSEC_ALLOWLIST_MARK; an admin's entry is never touched (one for the same
+# value counts as present). When the address changes, the old entry goes: an exemption for an address a stranger now has is a hole. An address
+# that could not be looked up this time is kept (a failed lookup is not a new address); the IPv6 network goes when the setting is off (V6OFF=1).
+# One `allowlists list` per sync, and no other call when nothing changed. Prints the state as JSON: {supported, list, entries, added, removed, changed, error}
+_cs_allowlist_home_sync() {
+    local CS_NAME="$1" pub="$2" home6="$3" v6off="${4:-0}" raw out v e="" exists added_json removed_json
+    local -a wanted=() add=() del=() present=() managed=()
+    if ! _cs_run raw allowlists list -o json; then
+        if grep -qi 'unknown command' <<< "$CS_ERR"; then
+            jq -nc --arg n "$CROWDSEC_ALLOWLIST_NAME" '{supported: false, list: $n, entries: [], added: [], removed: [], changed: false, error: null,
+                note: "This CrowdSec is older than 1.6.8 and has no allowlists: its AppSec WAF cannot be told to spare this server'"'"'s own address. Update CrowdSec to close that gap."}'
+        else
+            jq -nc --arg n "$CROWDSEC_ALLOWLIST_NAME" --arg e "$(_cs_errline)" '{supported: true, list: $n, entries: [], added: [], removed: [], changed: false, error: ("could not read the allowlists: " + $e)}'
+        fi
+        return 0
+    fi
+    [[ "$raw" == null || -z "$raw" ]] && raw='[]'
+    jq -e 'type == "array"' >/dev/null 2>&1 <<< "$raw" || raw='[]'
+    exists=$(jq -r --arg n "$CROWDSEC_ALLOWLIST_NAME" 'map(select(.name == $n)) | length' <<< "$raw")
+    mapfile -t present < <(jq -r --arg n "$CROWDSEC_ALLOWLIST_NAME" '.[] | select(.name == $n) | (.items // [])[] | .value // empty' <<< "$raw")
+    mapfile -t managed < <(jq -r --arg n "$CROWDSEC_ALLOWLIST_NAME" --arg m "$CROWDSEC_ALLOWLIST_MARK" '.[] | select(.name == $n) | (.items // [])[] | select((.description // "") | startswith($m)) | .value // empty' <<< "$raw")
+    [[ -n "$pub" ]] && wanted+=("$pub")
+    [[ -n "$home6" ]] && wanted+=("$home6")
+    for v in "${wanted[@]}"; do
+        printf '%s\n' "${present[@]}" | grep -qxF -- "$v" || add+=("$v")
+    done
+    for v in "${managed[@]}"; do
+        [[ -n "$v" ]] || continue
+        printf '%s\n' "${wanted[@]}" | grep -qxF -- "$v" && continue
+        # (the public address is a single address, the home IPv6 network always a range: a stale one goes once the current one is known)
+        if [[ "$v" == */* ]]; then [[ -n "$home6" || "$v6off" == 1 ]] && del+=("$v")
+        else [[ -n "$pub" ]] && del+=("$v"); fi
+    done
+    if (( ${#add[@]} > 0 )) && [[ "$exists" != 1 ]]; then
+        _cs_run out allowlists create "$CROWDSEC_ALLOWLIST_NAME" -d "Managed from the CrowdSec page of DCS" || { e="could not create the allowlist: $(_cs_errline)"; add=(); }
+    fi
+    local -a done_add=() done_del=()
+    for v in "${add[@]}"; do
+        local c="$CROWDSEC_ALLOWLIST_MARK this server's public address. DCS follows it as it changes, so CrowdSec and its AppSec WAF never ban the server itself."
+        [[ "$v" == */* ]] && c="$CROWDSEC_ALLOWLIST_MARK the home network over IPv6 (CROWDSEC_HOME_IPV6_PREFIX). DCS follows it as the provider changes it."
+        if _cs_run out allowlists add "$CROWDSEC_ALLOWLIST_NAME" "$v" "--comment=$c"; then done_add+=("$v"); else e="${e:+$e; }could not add $v: $(_cs_errline)"; fi
+    done
+    if (( ${#del[@]} > 0 )); then
+        if _cs_run out allowlists remove "$CROWDSEC_ALLOWLIST_NAME" "${del[@]}"; then done_del=("${del[@]}"); else e="${e:+$e; }could not remove ${del[*]}: $(_cs_errline)"; fi
+    fi
+    (( ${#done_add[@]} + ${#done_del[@]} > 0 )) && _cs_cache_clear
+    added_json=$(printf '%s\n' "${done_add[@]}" | jq -R 'select(. != "")' | jq -sc .)
+    removed_json=$(printf '%s\n' "${done_del[@]}" | jq -R 'select(. != "")' | jq -sc .)
+    printf '%s\n' "${managed[@]}" "${done_add[@]}" | jq -R 'select(. != "")' | jq -sc --arg n "$CROWDSEC_ALLOWLIST_NAME" --argjson a "$added_json" --argjson r "$removed_json" --arg e "$e" \
+        '{supported: true, list: $n, entries: (unique - $r), added: $a, removed: $r, changed: (($a + $r) | length > 0), error: (if $e == "" then null else $e end)}'
+}
+
+# GET /crowdsec/allowlist — Everything that is never banned: entries with comment and expiry, which are managed by DCS (the home address, also kept on CrowdSec's allowlist for its AppSec WAF: home.allowlist) and which can be removed; says which mechanism is in use
 handle_crowdsec_allowlist() {
     _cs_target || return
     local mech raw='[]' native trusted state='{}' home="" envs client="${CLIENT_IP:-}"
     mech=$(_cs_allowlist_mechanism)
     if [[ "$mech" == native ]]; then raw=$(_cs_json allowlists 8 allowlists list) || { _api_error 502 "CrowdSec did not answer: $(_cs_errline)"; return; }; fi
-    native=$(jq -c --arg mine "$CROWDSEC_ALLOWLIST_NAME" "$_CS_JQ_ALLOW"' allow_entries($mine)' <<< "$raw" 2>/dev/null); [[ "$native" == \[* ]] || native='[]'
+    native=$(jq -c --arg mine "$CROWDSEC_ALLOWLIST_NAME" --arg mark "$CROWDSEC_ALLOWLIST_MARK" "$_CS_JQ_ALLOW"' allow_entries($mine; $mark)' <<< "$raw" 2>/dev/null); [[ "$native" == \[* ]] || native='[]'
     trusted=$(_cs_trusted_entries)
     [[ -f "$CROWDSEC_SYNC_STATE" ]] && state=$(jq -c . "$CROWDSEC_SYNC_STATE" 2>/dev/null); [[ "$state" == \{* ]] || state='{}'
     home=$(jq -r '.public_ip // ""' <<< "$state")
@@ -1457,14 +1519,15 @@ handle_crowdsec_allowlist() {
     out=$(jq -nc --arg mech "$mech" --argjson native "$native" --argjson trusted "$trusted" --arg home "$home" --argjson envs "$envs" --argjson state "$state" --arg client "$client" --arg mine "$CROWDSEC_ALLOWLIST_NAME" \
         --argjson lists "$(jq -c '[ (. // [])[] | {name, description: (.description // ""), items: ((.items // []) | length), created_at: (.created_at // ""), updated_at: (.updated_at // "")} ]' <<< "$raw" 2>/dev/null || echo '[]')" '
         ( [ if $home != "" then {value: $home, kind: "ip", comment: "Your home address. DCS follows it as it changes, so you can never ban yourself.", created_at: ($state.synced_at // ""), expires_at: null, list: null, source: "managed", managed: true, removable: false} else empty end ]
-          + [ ($state.home_ipv6 // "") | strings | select(test("^[0-9a-f:]+/[0-9]{1,3}$")) | {value: ., kind: "range", comment: "Your home network over IPv6 (CROWDSEC_HOME_IPV6_PREFIX). DCS follows the prefix as your provider changes it.", created_at: ($state.synced_at // ""), expires_at: null, list: null, source: "managed", managed: true, removable: false} ]
+          + [ ($state.home_ipv6 // "") | strings | select(test("^[0-9a-f:]+/[0-9]{1,3}$")) | {value: ., kind: "range", comment: "Your home network over IPv6 (CROWDSEC_HOME_IPV6_PREFIX). DCS follows the prefix as your provider changes it.", created_at: ($state.synced_at // ""), expires_at: null, list: null, source: "managed", managed: true, removable: false} ] ) as $home_rows
+        | ( $home_rows
           + [ $envs[] | {value: ., kind: (if contains("/") then "range" else "ip" end), comment: "Set in .env (CROWDSEC_TRUSTED_IPS)", created_at: "", expires_at: null, list: null, source: "env", managed: true, removable: false} ]
-          + $native
+          + [ $native[] | . as $e | select(($e.managed and (($home_rows | map(.value) | index($e.value)) != null)) | not) ]
           + [ $trusted[] | {value: .value, kind: (if (.value | contains("/")) then "range" else "ip" end), comment: .comment, created_at: (.added_at // ""), expires_at: null, list: null, source: "trusted", managed: false, removable: true} ] ) as $entries
         | { mechanism: $mech, list_name: (if $mech == "native" then $mine else null end), supports_expiry: ($mech == "native"),
             note: (if $mech == "native" then "CrowdSec allowlist \"" + $mine + "\": entries apply at once and expire on their own when you set an expiry."
                    else "This CrowdSec is older than 1.6.8 and has no allowlists. DCS keeps a parser whitelist instead and reloads CrowdSec when it changes; entries never expire." end),
-            entries: $entries, lists: $lists, count: ($entries | length), client_ip: $client, home: {public_ip: $home, synced_at: ($state.synced_at // null)} }')
+            entries: $entries, lists: $lists, count: ($entries | length), client_ip: $client, home: {public_ip: $home, synced_at: ($state.synced_at // null), allowlist: ($state.allowlist // null)} }')
     _api_success "$out"
 }
 
@@ -1502,6 +1565,8 @@ handle_crowdsec_allowlist_add() {
     [[ "$body" == \{* ]] && jq -e . >/dev/null 2>&1 <<< "$body" || { _api_error 400 "Send a JSON body: {\"value\": \"203.0.113.7\", \"comment\": \"office\", \"expires\": \"30d\"}"; return; }
     value=$(jq -r '(.value // .ip // "") | tostring' <<< "$body")
     comment=$(_cs_clean_reason "$(jq -r '(.comment // "") | tostring' <<< "$body")")
+    # (the mark is DCS's own: an entry that carried it would be the sync's to remove)
+    while [[ "$comment" == "$CROWDSEC_ALLOWLIST_MARK"* ]]; do comment="${comment#"$CROWDSEC_ALLOWLIST_MARK"}"; comment="${comment# }"; done
     expires=$(jq -r '(.expires // "") | tostring' <<< "$body")
     tgt=$(_cs_norm_target "$value") || { _api_error 400 "Not an IP address or network: ${value:0:80}"; return; }
     scope="${tgt%%$'\t'*}"; val="${tgt#*$'\t'}"
@@ -1556,6 +1621,9 @@ handle_crowdsec_allowlist_remove() {
     if [[ "$mech" == native ]]; then
         local lists
         lists=$(_cs_json allowlists 0 allowlists list 2>/dev/null) || lists='[]'
+        if jq -e --arg n "$CROWDSEC_ALLOWLIST_NAME" --arg v "$val" --arg m "$CROWDSEC_ALLOWLIST_MARK" 'map(select(.name == $n) | (.items // [])[] | select(.value == $v and ((.description // "") | startswith($m)))) | length > 0' >/dev/null 2>&1 <<< "$lists"; then
+            _api_error 409 "$val is this server's own address: DCS keeps it on the allowlist by itself (so CrowdSec's AppSec WAF never bans the server) and moves it when the address changes"; return
+        fi
         if jq -e --arg n "$CROWDSEC_ALLOWLIST_NAME" --arg v "$val" 'map(select(.name == $n) | (.items // []) | map(.value)) | flatten | index($v) != null' >/dev/null 2>&1 <<< "$lists"; then
             _cs_run out allowlists remove "$CROWDSEC_ALLOWLIST_NAME" "$val" || { _api_error 502 "CrowdSec refused: $(_cs_errline)"; return; }
             removed=true
@@ -1962,11 +2030,17 @@ handle_crowdsec_simulation_set() {
 # Community blocklist and console
 # =============================================================================
 
-# GET /crowdsec/community — Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console
-handle_crowdsec_community() {
-    _cs_target || return
+# the last time DCS registered this engine again: {at, ok, reason, message} (null when it never did)
+_cs_register_last() {
+    local j=""
+    [[ -s "$CROWDSEC_REGISTER_STATE" ]] && j=$(jq -c . "$CROWDSEC_REGISTER_STATE" 2>/dev/null)
+    [[ "$j" == \{* ]] && printf '%s' "$j" || printf 'null'
+}
+
+# _cs_community_json — the community answer (see GET /crowdsec/community), kept 2 minutes
+_cs_community_json() {
     local out capi console cached
-    if cached=$(_cs_cache_get community 120); then _api_success "$cached"; return; fi
+    if cached=$(_cs_cache_get community 120); then _cs_community_last "$cached"; return 0; fi
     CS_TIMEOUT=25 _cs_run out capi status; local rc=$?
     capi=$(printf '%s\n%s\n' "$CS_ERR" "$out" | jq -Rsc --argjson rc "$rc" '
         . as $t | { registered: (($t | test("Loaded credentials|You can successfully interact")) ),
@@ -1975,8 +2049,9 @@ handle_crowdsec_community() {
                     console_blocklists: ($t | test("Pulling blocklists from the console is enabled")),
                     error: (if $rc == 0 then null else ($t | split("\n") | map(select(test("^Error|level=(fatal|error)"))) | .[-1] // "CAPI did not answer") end) }')
     [[ "$capi" == \{* ]] || capi='{"registered":false,"reachable":false,"sharing":false,"pulling":false,"console_blocklists":false,"error":"could not read CAPI status"}'
-    # HTTP 403 from the Central API is CrowdSec refusing this server, either its login or its address; the message alone reads like a broken install
-    local hint="HTTP 403: CrowdSec's Central API is refusing this server. It either no longer accepts the login or refuses the server's address. Run: docker exec CrowdSec cscli capi register, then restart CrowdSec. If that is refused with 403 as well, it is the address: that usually clears by itself, and CrowdSec can lift it. Detections, bans and alerts here keep working; only the shared blocklist is missing."
+    # HTTP 403 from the Central API is CrowdSec refusing this server, either its login or its address; the message alone reads like a broken install.
+    # Most often it is the login (this server was cut off for a month that way): registering again makes a new one, from the CrowdSec page
+    local hint="HTTP 403: CrowdSec's Central API is refusing this server. Most often it no longer accepts this engine's login: Register again (Community, on the CrowdSec page) makes a new login and restarts CrowdSec. If registering is refused with 403 as well, it is the server's address: that usually clears by itself. Detections, bans and alerts here keep working; only the shared blocklist is missing."
     capi=$(jq -c --arg hint "$hint" 'if ((.error // "") | test("Forbidden|403")) then .error += " " + $hint | .forbidden = true else . end' <<< "$capi")
     _cs_run out console status -o json || true
     console=$(jq -c '{authenticated: (.console.authenticated // false), enrolled: (.console.enrolled // false), registered: (.console.registered // false), decision_management: (.console.decision_management // false), plan: (.console.plan // ""),
@@ -1984,7 +2059,157 @@ handle_crowdsec_community() {
     local res
     res=$(jq -nc --argjson capi "$capi" --argjson console "$console" --argjson community "$(_cs_community_count)" \
         '{capi: $capi, console: $console, community_decisions: $community,
-          note: (if $console.enrolled then "This engine is enrolled in the CrowdSec console." else "Not enrolled in the CrowdSec console. Enrolling is optional: it adds a web dashboard and extra blocklists (cscli console enroll <key>)." end)}')
+          needs_register: (($capi.forbidden // false) or (($capi.error // "") | test("no credentials|credentials file|online_api_credentials"; "i"))),
+          note: (if $console.enrolled then "This engine is enrolled in the CrowdSec console." else "Not enrolled in the CrowdSec console. Enrolling is optional: it adds a web dashboard and extra blocklists (cscli console enroll <key>)." end)}') || return 1
     printf '%s' "$res" | _cs_cache_put community
+    _cs_community_last "$res"
+}
+# (how the last registration went is DCS's own record: added to every answer, cached or not)
+_cs_community_last() { jq -c --argjson last "$(_cs_register_last)" '. + {last_register: $last}' <<< "$1"; }
+
+# GET /crowdsec/community — Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console; needs_register is true when the Central API refuses this engine's login (POST /crowdsec/community/register fixes that), last_register says how the last attempt went
+handle_crowdsec_community() {
+    _cs_target || return
+    local res
+    res=$(_cs_community_json)
     _api_success "$res"
+}
+
+# _cs_register_note OK REASON MESSAGE — remember how registering again went (the community answer shows it)
+_cs_register_note() {
+    mkdir -p "$(dirname "$CROWDSEC_REGISTER_STATE")" 2>/dev/null
+    jq -nc --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson ok "$1" --arg r "$2" --arg m "$3" '{at: $at, ok: $ok, reason: (if $r == "" then null else $r end), message: $m}' \
+        > "$CROWDSEC_REGISTER_STATE.tmp" 2>/dev/null && mv -f "$CROWDSEC_REGISTER_STATE.tmp" "$CROWDSEC_REGISTER_STATE"
+}
+
+# POST /crowdsec/community/register — Register this engine with CrowdSec's Central API again (a new login, for when CAPI answers 403): keeps a copy of the old login beside it, restarts CrowdSec and answers with the fresh community status. Console enrolment belongs to the engine's identity and may need doing again
+handle_crowdsec_community_register() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    _cs_target || return
+    # CrowdSec's central service limits registrations too: three tries in ten minutes are plenty
+    _api_rate_window "$API_RATE_DIR/crowdsec-capi-register" 3 600 || { _api_error 429 "Registering again was tried 3 times in the last 10 minutes. Wait a few minutes before trying again."; return; }
+    local out rc text e bak="" ts reason msg code
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    # the way back: the current login, copied beside it inside the container (it keeps its mode, 600). `cscli capi register` has no --force
+    # and needs none: it overwrites the credentials file only once the central service has accepted the new login
+    if timeout 15 docker exec "$CS_NAME" cp -p "$CROWDSEC_CAPI_CREDS" "$CROWDSEC_CAPI_CREDS.$ts.bak" >/dev/null 2>&1 </dev/null; then bak="$CROWDSEC_CAPI_CREDS.$ts.bak"; fi
+    CS_TIMEOUT=60 _cs_run out capi register; rc=$?
+    text=$(printf '%s\n%s\n' "$CS_ERR" "$out")
+    if (( rc != 0 )); then
+        # nothing changed: the copy is not needed
+        [[ -n "$bak" ]] && { timeout 10 docker exec "$CS_NAME" rm -f "$bak" >/dev/null 2>&1 </dev/null || true; }
+        e=$(_cs_errline)
+        if grep -qiE 'no configuration for Central API|online_client' <<< "$text"; then
+            code=409; reason=capi_disabled
+            msg="This CrowdSec has its community connection switched off (DISABLE_ONLINE_API in its stack, or no online_client in config.yaml). Turn it on there, then register again."
+        elif grep -qE '403|Forbidden' <<< "$text"; then
+            code=502; reason=refused
+            msg="CrowdSec's central service refused to register this server as well (HTTP 403). That is the server's address, not the login: it usually clears by itself, and CrowdSec can lift it. Nothing was changed."
+        elif (( rc == 124 )) || grep -qiE 'dial tcp|no such host|timeout|connection refused|network is unreachable' <<< "$text"; then
+            code=502; reason=unreachable
+            msg="CrowdSec could not reach its central service: $e. Nothing was changed."
+        else
+            code=502; reason=failed
+            msg="CrowdSec could not register: $e. Nothing was changed."
+        fi
+        _cs_register_note false "$reason" "$msg"
+        _cs_cache_clear
+        _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CAPI_REGISTER" "${AUTH_USERNAME:-}" "register again failed: $reason"
+        _api_response "$code" "$(jq -nc --argjson c "$code" --arg r "$reason" --arg m "$msg" '{error: true, code: $c, reason: $r, message: $m, registered: false}')"
+        return
+    fi
+    # new Central API credentials are read when CrowdSec starts (a reload is not enough): restart, then wait for it to be healthy
+    _crowdsec_cfg_lib
+    local restarted=true healthy=false
+    timeout 120 docker restart "$CS_NAME" >/dev/null 2>&1 </dev/null || restarted=false
+    [[ "$restarted" == true ]] && _cs_wait_healthy 90 && healthy=true
+    _cs_cache_clear
+    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CAPI_REGISTER" "${AUTH_USERNAME:-}" "registered again${bak:+ (old login kept as $bak)}"
+    local console_note="Console enrolment belongs to the engine's identity, and registering again gave this engine a new one: if it was enrolled in app.crowdsec.net, enrol it again."
+    if [[ "$restarted" != true || "$healthy" != true ]]; then
+        if [[ "$restarted" != true ]]; then msg="Registered again, but docker could not restart CrowdSec. Restart it from the CrowdSec page: it reads the new login when it starts."
+        else msg="Registered again and CrowdSec was restarted, but it did not come back healthy within 90 seconds. Look at its log on the CrowdSec page."; fi
+        _cs_register_note true "" "$msg"
+        _api_response 502 "$(jq -nc --arg m "$msg" --arg b "$bak" --arg cn "$console_note" --argjson rs "$restarted" '{error: true, code: 502, reason: "restart", message: $m, registered: true, restarted: $rs, healthy: false, backup: (if $b == "" then null else $b end), console_note: $cn}')"
+        return
+    fi
+    local fresh
+    fresh=$(_cs_community_json); [[ "$fresh" == \{* ]] || fresh='null'
+    msg=$(jq -r 'if . == null then "Registered with the CrowdSec community again and restarted CrowdSec."
+                 elif .capi.reachable then "Registered with the CrowdSec community again and restarted CrowdSec. The central service accepts the new login."
+                 else "Registered again and restarted CrowdSec, but the central service does not accept the new login yet: " + (.capi.error // "no answer") end' <<< "$fresh")
+    _cs_register_note true "" "$msg"
+    _api_success "$(jq -nc --arg m "$msg" --arg b "$bak" --arg cn "$console_note" --argjson fresh "$fresh" --argjson last "$(_cs_register_last)" \
+        '{success: true, registered: true, restarted: true, healthy: true, backup: (if $b == "" then null else $b end), message: $m, console_note: $cn,
+          community: (if $fresh == null then null else $fresh + {last_register: $last} end)}')"
+}
+
+# the enrolment key from app.crowdsec.net: one word of letters, digits and a few signs (never starting with "-": it would read as a flag)
+_cs_valid_enroll_key() { local LC_ALL=C; [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._~+/=:-]{5,199}$ ]]; }
+_cs_valid_enroll_name() { local LC_ALL=C; [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]{0,63}$ ]]; }
+# the name the console shows for this engine: what was asked, else SERVER_NAME (unless it is the example's), else the host name; cleaned to what the console takes
+_cs_enroll_name() {
+    local LC_ALL=C n="$1"
+    [[ -n "$n" ]] || { [[ -n "${SERVER_NAME:-}" && "${SERVER_NAME}" != "Docker Server" ]] && n="$SERVER_NAME"; }
+    [[ -n "$n" ]] || n=$(_hostname dcs)
+    n="${n//[^A-Za-z0-9 ._-]/-}"; n="${n#"${n%%[![:space:]._-]*}"}"; n="${n:0:64}"; n="${n%"${n##*[![:space:]]}"}"
+    printf '%s' "${n:-dcs}"
+}
+
+# POST /crowdsec/console/enroll — Enrol this engine in the CrowdSec console: {key (the enrolment key from app.crowdsec.net), name?, overwrite?}; the key is never logged or echoed
+handle_crowdsec_console_enroll() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local body="$1" key name asked overwrite out rc text e code reason msg
+    [[ "$body" == \{* ]] && jq -e 'type == "object"' >/dev/null 2>&1 <<< "$body" || { _api_error 400 "Send a JSON body: {\"key\": \"<enrolment key>\", \"name\": \"my-server\"}"; return; }
+    key=$(jq -r 'if (.key | type) == "string" then .key else "" end' <<< "$body")
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"      # (a key pasted with a space or a line break around it)
+    if [[ -z "$key" ]]; then _api_error 400 "Paste the enrolment key from app.crowdsec.net (Security Engines, Add Security Engine)"; return; fi
+    _cs_valid_enroll_key "$key" || { _api_error 400 "That does not look like an enrolment key: it is one word of letters and digits, without spaces. Copy it again from app.crowdsec.net (Security Engines, Add Security Engine)."; return; }
+    asked=$(jq -r 'if (.name | type) == "string" then .name else "" end' <<< "$body")
+    if [[ -n "$asked" ]] && ! _cs_valid_enroll_name "$asked"; then
+        _api_error 400 "A name is 1-64 letters, digits, spaces, dots, dashes or underscores"; return
+    fi
+    name=$(_cs_enroll_name "$asked")
+    overwrite=$(jq -r 'if .overwrite == true then "yes" else "no" end' <<< "$body")
+    _cs_target || return
+    # every try reaches CrowdSec's central service: ten in ten minutes are plenty
+    _api_rate_window "$API_RATE_DIR/crowdsec-console-enroll" 10 600 || { _api_error 429 "Enrolment was tried 10 times in the last 10 minutes. Wait a few minutes before trying again."; return; }
+    # (-o human: "already enrolled" is a warning, which cscli prints in human mode only, whatever config.yaml says)
+    local -a args=(console enroll -o human -e context --name "$name")
+    [[ "$overwrite" == yes ]] && args+=(--overwrite)
+    args+=("$key")
+    CS_TIMEOUT=60 _cs_run out "${args[@]}"; rc=$?
+    text=$(printf '%s\n%s\n' "$CS_ERR" "$out"); text="${text//"$key"/<key>}"
+    e=$(_cs_errline "$text")
+    _cs_cache_clear
+    if (( rc == 0 )) && grep -qi 'already enrolled' <<< "$text"; then
+        code=409; reason=already_enrolled
+        msg="This engine is already enrolled in the CrowdSec console. To enrol it again (another account, a new name), send it again with overwrite."
+    elif (( rc == 0 )); then
+        _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CONSOLE_ENROLL" "${AUTH_USERNAME:-}" "console enrol ($name)"
+        _api_success "$(jq -nc --arg n "$name" --argjson ow "$([[ "$overwrite" == yes ]] && echo true || echo false)" \
+            '{success: true, enrolled: true, needs_acceptance: true, name: $n, overwrite: $ow,
+              message: "Enrolled. Open app.crowdsec.net and accept this engine.",
+              next: "After you accept it there, restart CrowdSec from this page so it picks up the console settings."}')"
+        return
+    elif grep -qi 'attachment key provided is not valid' <<< "$text"; then
+        code=422; reason=invalid_key
+        msg="CrowdSec refused this key. Copy a fresh enrolment key from app.crowdsec.net → Security Engines → Add Security Engine; keys from older notes stop working."
+    elif grep -qE '403|Forbidden' <<< "$text"; then
+        code=409; reason=needs_register
+        msg="The community service refuses this engine's login: register again first (Community, Register again), then enrol."
+    elif grep -qiE 'no configuration for Central API|no credentials' <<< "$text"; then
+        code=409; reason=capi_disabled
+        msg="This CrowdSec is not connected to the community (no Central API login). Register it first, or turn the connection on in its stack (DISABLE_ONLINE_API)."
+    elif (( rc == 124 )) || grep -qiE 'dial tcp|no such host|timeout|context canceled|network is unreachable' <<< "$text"; then
+        code=502; reason=unreachable
+        msg="CrowdSec could not reach the console: ${e:-no answer}"
+    else
+        code=502; reason=failed
+        msg="CrowdSec could not enrol this engine: ${e:-no answer}"
+    fi
+    msg="${msg//"$key"/<key>}"
+    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CONSOLE_ENROLL" "${AUTH_USERNAME:-}" "console enrol ($name) failed: $reason"
+    _api_response "$code" "$(jq -nc --argjson c "$code" --arg r "$reason" --arg m "$msg" --arg n "$name" \
+        '{error: true, code: $c, reason: $r, message: $m, name: $n, needs_register: ($r == "needs_register"), needs_overwrite: ($r == "already_enrolled")}')"
 }

@@ -3,6 +3,38 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **CrowdSec's AppSec WAF can no longer ban the server itself.** The sync that keeps the home public address and the
+  home IPv6 network in the parser whitelist (`dcs-whitelist.yaml`) now keeps them in CrowdSec's own `dcs` allowlist as
+  well (CrowdSec 1.6.8+): AppSec runs no parsers and only honours allowlists, so the server's own requests coming back
+  through Cloudflare tripped a virtual-patching rule and the `dcs_appsec_ip` profile banned the server's own address.
+  DCS's entries carry a `Managed by DCS:` comment and are the only ones the sync touches; when the address changes the
+  old entry is removed (an exemption for an address a stranger now has is a hole), a failed lookup removes nothing,
+  and the IPv6 network goes when `CROWDSEC_HOME_IPV6_PREFIX` is off. One `allowlists list` per sync, nothing else when
+  nothing changed. The sync state (`crowdsec-whitelist.json`, and `home.allowlist` of `GET /crowdsec/allowlist`) says
+  what it did, or that this CrowdSec is too old to have allowlists. The page shows each managed address once and
+  refuses to remove DCS's own entries by hand.
+- **A 403 from the community service says what to do.** `GET /crowdsec/community` explains the refusal with the new
+  button instead of a shell command, and answers `needs_register: true` (plus `last_register`, how the last attempt
+  went) so the dashboard can flag it. A server was silently cut off from the community blocklist for a month this way.
+
+### Added
+
+- **Register with the CrowdSec community again in one click.** `POST /crowdsec/community/register` (admin) runs
+  `cscli capi register` (it has no `--force` and needs none: it overwrites the login only once the central service
+  accepted the new one), keeps a copy of the old `online_api_credentials.yaml` beside it, restarts CrowdSec (new
+  Central API credentials are read at start, a reload is not enough), waits for it to be healthy and answers with the
+  fresh community status. A 403 to the registration itself (the server's address), an unreachable service and a
+  switched-off connection are told apart; nothing changes when it fails. Three tries per ten minutes.
+- **Enrol in the CrowdSec console from DCS.** `POST /crowdsec/console/enroll {key, name?, overwrite?}` (admin) checks
+  the key's shape, runs `cscli console enroll -e context --name … [--overwrite] <key>` and says in plain words what
+  CrowdSec answered: enrolled (accept the engine on app.crowdsec.net), a refused key (copy a fresh one), already
+  enrolled (send again with overwrite), or a login the community refuses (register again first). The key is never
+  logged, audited or echoed; the name defaults to `SERVER_NAME`, else the host name. Ten tries per ten minutes.
+
 ## [4.0.38] - 2026-10-08
 
 ### Security
