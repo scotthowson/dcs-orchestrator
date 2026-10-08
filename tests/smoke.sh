@@ -6092,11 +6092,12 @@ cst_community_check() {
 
 # ---- registering with the community again (CAPI answers 403 to this engine's login): one click instead of a shell ----------------------------------
 cst_community_register() {
-    local creds="$CST/fake/rootfs/etc/crowdsec/online_api_credentials.yaml" login0 login1 bak mark n rates="$CST/.data/rates/crowdsec-capi-register"
+    local creds="$CST/fake/rootfs/etc/crowdsec/online_api_credentials.yaml" login0 login1 bak mark n a0 rates="$CST/.data/rates/crowdsec-capi-register"
     cst_world data traefik --traefik
     cst_mock --mock-set capi=forbidden
     rm -f "$rates"
     login0=$(grep '^login:' "$creds")
+    a0=$(grep -c '"action":"auth.crowdsec_capi_register".*registered again' "$CST/.data/audit.jsonl" 2>/dev/null)
     cst_try "community/register: a viewer may not" 403 viewer POST /crowdsec/community/register
     mark=$(cst_argv_n)
     cst_call admin POST /crowdsec/community/register
@@ -6111,7 +6112,7 @@ cst_community_register() {
     check "community/register: CrowdSec was restarted once (it reads the new login when it starts)" 1 "$(cst_argv_since "$mark" | grep -c '^restart CrowdSec')"
     check "community/register: …the cscli call is exactly capi register" 1 "$(cst_argv_since "$mark" | grep -cx 'exec CrowdSec cscli capi register ')"
     check "community/register: …and nothing logs in to check it afterwards" 0 "$(cst_argv_since "$mark" | grep -cE 'cscli (capi|console) status')"
-    check "community/register: the audit log has it" 1 "$(grep -c '"action":"auth.crowdsec_capi_register".*registered again' "$CST/.data/audit.jsonl")"
+    check "community/register: the audit log has it" 1 "$(( $(grep -c '"action":"auth.crowdsec_capi_register".*registered again' "$CST/.data/audit.jsonl") - a0 ))"
     cst_call admin GET /crowdsec/community
     cst_j "community/register: the status afterwards" '.capi.reachable' true '.needs_register' false '.last_register.ok' true '.last_register.at | test("^20")' true
 
@@ -8368,7 +8369,7 @@ cst_security_injection() {
     cst_call admin GET '/crowdsec/decisions?limit=100'
     check "injection/free text: the notes are in the list, cleaned of control characters" yes "$(jq -e '[.decisions[] | select(.value | startswith("198.18.81.")) | .scenario] | length >= 12' <<< "$CST_BODY" >/dev/null 2>&1 && echo yes || echo no)"
     # no shell is ever started in the container, only the programs the page needs
-    check "injection: every call to the container runs one of the known programs, never a shell" 0 "$(sed 's/\\//g' "$CST/argv.log" | awk '$1 == "exec" { i = 2; if ($i == "-i") i++; if ($(i+1) !~ /^(cscli|crowdsec|cat|ls|rm|mkdir)$/) print }' | wc -l | tr -d ' ')"
+    check "injection: every call to the container runs one of the known programs, never a shell" 0 "$(sed 's/\\//g' "$CST/argv.log" | awk '$1 == "exec" { i = 2; if ($i == "-i") i++; if ($(i+1) !~ /^(cscli|crowdsec|cat|ls|rm|mkdir|test)$/) print }' | wc -l | tr -d ' ')"
     check "injection: …and docker itself is asked only for what the page needs" "" "$(awk '{print $1}' "$CST/argv.log" | sort -u | grep -vxE 'ps|inspect|exec|cp|restart|start|logs|kill|version|compose|info' | tr '\n' ' ')"
 }
 

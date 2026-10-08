@@ -2150,13 +2150,13 @@ _cs_capi_state() {
 }
 # _cs_capi_update FILTER [jq options…] — change that record under a lock (the cached community answer is dropped)
 _cs_capi_update() {
-    local filter="$1"; shift
+    local jqf="$1"; shift
     mkdir -p "$(dirname "$CROWDSEC_CAPI_STATE")" 2>/dev/null
     (
         command -v flock >/dev/null 2>&1 && flock -w 5 9
         local cur tmp="$CROWDSEC_CAPI_STATE.$$.tmp"
         cur=$(_cs_capi_state)
-        if jq -c "$@" "$filter" <<< "$cur" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then mv -f "$tmp" "$CROWDSEC_CAPI_STATE"; else rm -f "$tmp"; fi
+        if jq -c "$@" "$jqf" <<< "$cur" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then mv -f "$tmp" "$CROWDSEC_CAPI_STATE"; else rm -f "$tmp"; fi
     ) 9>"$CROWDSEC_CAPI_STATE.lock"
     rm -f "$(_cs_cache_file community)" 2>/dev/null
     return 0
