@@ -117,3 +117,38 @@ jobs:
             tail -n 15 smoke-debian.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  upgrade-path:
+    # "Easy to update", proven on every change: the previous release (the newest vX.Y.Z tag before this commit) is cloned,
+    # started as a real listener and used through its API (accounts, a session, an API key, .env settings, rules, a backup
+    # destination and schedule, a secret, a theme, CrowdSec and fleet state, edited stack and template files); then ITS OWN
+    # updater brings it to this commit from a local origin (nothing reaches GitHub) and restarts in place. Every token, key,
+    # setting and state file must come through with its content and mode, and a second update must be a no-op.
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 20
+    steps:
+      - name: Install tools
+        # git before the checkout: without it actions/checkout downloads a tarball, which has no tags
+        run: |
+          apt-get update -qq && apt-get install -y -qq jq socat curl git python3 ca-certificates procps ncat iproute2 docker-cli docker-compose openssh-client rsync xz-utils zstd xxd file wget sudo unzip zip bc bsdextrautils
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the whole history with its release tags: the test starts from the previous release
+      - name: Let git read the checkout
+        run: git config --global --add safe.directory '*'
+
+      - name: Upgrade path (previous release -> this commit, by the release's own updater)
+        run: tests/upgrade-path.sh 2>&1 | tee upgrade-path.log
+
+      - name: Upgrade path failures in the summary
+        if: failure()
+        run: |
+          {
+            echo '### Upgrade-path checks that failed'
+            echo
+            echo '```'
+            grep -E '^(  )?FAIL' upgrade-path.log || echo '(no FAIL line — the run stopped before the end; last lines below)'
+            tail -n 15 upgrade-path.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
