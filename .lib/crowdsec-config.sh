@@ -407,16 +407,34 @@ _cs_backups_json() {
 # Discord notifications: the settings
 # =============================================================================
 
-# What an untouched install sends (the same message as the shipped notifications-discord.yaml)
+# What an untouched install sends (the same message as the shipped notifications-discord.yaml): one embed per address
+# and batch, compact, with the attempts per scenario. CrowdSec gathers what arrives within group_wait (30 s) into one
+# batch, at most group_threshold (50) alerts.
 _CS_NOTIFY_DEFAULTS='{
- "v": 1, "enabled": true,
+ "v": 2, "enabled": true,
  "webhook": {"mode": "global"},
  "identity": {"name": "CrowdSec", "avatar_url": "https://raw.githubusercontent.com/scotthowson/dcs-orchestrator-ui/v2.0.0/brand/discord/crowdsec-avatar.png"},
  "embed": {"color_mode": "auto", "color": "#e11d48"},
  "mention": {"mode": "none", "id": "", "text": ""},
  "events": {"bans": true, "simulated": true, "detect_only": false},
  "filters": {"min_events": 0, "only": [], "ignore": []},
- "delivery": {"group_wait": 5, "group_threshold": 10, "max_retry": 3, "timeout": 10},
+ "delivery": {"group_by": "address", "group_wait": 30, "group_threshold": 50, "max_retry": 3, "timeout": 10},
+ "message": {
+   "title": "🛡️ {ip}{source_tag}",
+   "description": "**{attempts}**{ban_tag}\n{scenarios}{targets_line}{requests_line}",
+   "footer": "CrowdSec · {domain}{machine_tag}",
+   "link": "{cti_url}",
+   "timestamp": false,
+   "fields": [
+     {"name": "Lookup", "value": "[CrowdSec CTI]({cti_url}) · [AbuseIPDB]({abuseipdb_url})", "inline": true}
+   ]
+ }
+}'
+
+# What DCS shipped before the messages were grouped (one embed per alert). Settings saved with exactly this message and
+# delivery are an untouched install: they move to the defaults above (_cs_notify_upgrade). A message someone wrote stays.
+_CS_NOTIFY_V1='{
+ "delivery": {"group_wait": 5, "group_threshold": 10},
  "message": {
    "title": "🛡️ {label}",
    "description": "**{ip}**{country_tag}{as_tag}\n{events} hits → **{decision}**{for_duration}{target_tag}",
@@ -440,25 +458,38 @@ _CS_PLACEHOLDERS='[
  {"name":"country","group":"Source","label":"Country code","example":"NL","description":"Two-letter country code (empty when unknown)."},
  {"name":"flag","group":"Source","label":"Flag","example":":flag_nl:","description":"The Discord flag emoji of the country (empty when unknown)."},
  {"name":"country_tag","group":"Source","label":"Flag and country","example":" :flag_nl: NL","description":"Flag and code with a space in front; empty when the country is unknown, so no stray separators."},
+ {"name":"flag_emoji","group":"Source","label":"Flag (emoji)","example":"🇳🇱","description":"The flag as an emoji: unlike :flag_nl: it is drawn in the title too (empty when the country is unknown)."},
+ {"name":"source_tag","group":"Source","label":"Flag, country and network","example":" · 🇳🇱 NL · IP Volume inc","description":"\" · flag code · network\": whatever is known of the two, nothing when neither is."},
  {"name":"as_number","group":"Source","label":"AS number","example":"202425","description":"Autonomous system number (empty when unknown)."},
  {"name":"as_name","group":"Source","label":"Network name","example":"IP Volume inc","description":"Who runs the network the address is in (empty when unknown)."},
  {"name":"as_tag","group":"Source","label":"Network name (with separator)","example":" · IP Volume inc","description":"The network name with a dot in front; empty when unknown."},
  {"name":"scenario","group":"Detection","label":"Scenario","example":"crowdsecurity/http-probing","description":"The full scenario name."},
  {"name":"scenario_short","group":"Detection","label":"Scenario (short)","example":"http-probing","description":"The scenario without the crowdsecurity/ prefix."},
- {"name":"label","group":"Detection","label":"Attack type","example":"Web probing","description":"The scenario in plain words (SSH brute force, Exploit attempt, Web probing …)."},
- {"name":"events","group":"Detection","label":"Events","example":"13","description":"How many log lines added up to the detection."},
+ {"name":"label","group":"Detection","label":"Attack type","example":"Web probing","description":"The scenario in plain words (SSH brute force, Exploit attempt, Web probing …); for an address with several, the one it tried most."},
+ {"name":"events","group":"Detection","label":"Events","example":"13","description":"How many log lines added up to the detection (all the alerts of the address in this message)."},
+ {"name":"attempts","group":"Detection","label":"Attempts","example":"47 attempts in 7s","description":"How many requests the address made in this message and over how long; \"one request\" when it was one."},
+ {"name":"scenarios","group":"Detection","label":"What it tried","example":"Exploit attempt CVE-2025-29927 ×41 · Exploit attempt CVE-2024-4577 ×4 · Attack blocked appsec-vpatch ×2","description":"Every attack the address tried, the most frequent first, with how often (six, then \"+2 more\")."},
+ {"name":"alerts","group":"Detection","label":"Alerts","example":"47","description":"How many alerts of the address this message holds."},
+ {"name":"span","group":"Detection","label":"Time span","example":"7s","description":"The time from its first to its last request (empty when unknown)."},
  {"name":"alert_id","group":"Detection","label":"Alert id","example":"42","description":"CrowdSec'"'"'s alert number (see the Alerts tab)."},
  {"name":"message","group":"Detection","label":"CrowdSec message","example":"Ip 89.248.165.10 performed crowdsecurity/http-probing (13 events over 4s)","description":"CrowdSec'"'"'s own one-line summary of the alert."},
  {"name":"sim_tag","group":"Detection","label":"Simulation marker","example":" (simulation)","description":"\" (simulation)\" when the scenario only alerts without banning; empty otherwise."},
  {"name":"decision","group":"Decision","label":"Decision","example":"ban","description":"What was decided: ban (or simulated ban when the scenario is in simulation mode)."},
  {"name":"duration","group":"Decision","label":"Duration","example":"4h","description":"How long the ban lasts (empty when there is no decision)."},
  {"name":"for_duration","group":"Decision","label":"\"for 4h\"","example":" for 4h","description":"\" for <duration>\", empty when there is none."},
+ {"name":"ban","group":"Decision","label":"Ban in words","example":"banned 4 hours","description":"The longest decision in plain words: banned 10 years, captcha for 4 hours, would be banned 4 hours (simulation). Empty when there was none."},
+ {"name":"ban_tag","group":"Decision","label":"\" → banned …\"","example":" → **banned 4 hours**","description":"The ban in bold with an arrow in front; empty when there was no decision."},
  {"name":"origin","group":"Decision","label":"Origin","example":"crowdsec","description":"Where the decision came from: crowdsec (a detection) or cscli (a manual ban)."},
  {"name":"origin_tag","group":"Decision","label":"Origin (with separator)","example":" · crowdsec","description":"The origin with a dot in front; empty when unknown."},
  {"name":"target","group":"Request","label":"Host attacked","example":"app.example.com","description":"The site the first request was aimed at (from Traefik'"'"'s log; empty otherwise)."},
  {"name":"target_tag","group":"Request","label":"\"aimed at …\"","example":" · aimed at **app.example.com**","description":"\" · aimed at <site>\", empty when unknown."},
+ {"name":"targets","group":"Request","label":"Hosts attacked","example":"cloud.example.com, app.example.com","description":"Every site the address aimed at (three, then \"and 2 more\")."},
+ {"name":"targets_line","group":"Request","label":"\"Aimed at …\" line","example":"\nAimed at **cloud.example.com**","description":"A line of its own naming the sites in bold; nothing (not even the line break) when unknown."},
  {"name":"path","group":"Request","label":"First request path","example":"/wp-login.php","description":"The path of the first request (empty for non-web detections)."},
  {"name":"path_code","group":"Request","label":"First request path (as code)","example":"`/wp-login.php`","description":"The path between backticks so Discord shows it as code; empty (so the field is left out) when there is none."},
+ {"name":"last_path","group":"Request","label":"Last request path","example":"/.env","description":"The path of the last request of the address in this message."},
+ {"name":"last_path_code","group":"Request","label":"Last request path (as code)","example":"`/.env`","description":"The last path between backticks; empty when there is none."},
+ {"name":"requests_line","group":"Request","label":"First and last request line","example":"\nFirst `/_next/static/chunks/main.js` · last `/.env`","description":"A line of its own with the first and the last path (one when they are the same); nothing for non-web detections."},
  {"name":"user_agent","group":"Request","label":"User agent","example":"Mozilla/5.0 (compatible; scanner/1.0)","description":"The user agent of the first request (empty when unknown)."},
  {"name":"machine","group":"Where and when","label":"Engine","example":"localhost","description":"The CrowdSec engine that raised the alert."},
  {"name":"machine_tag","group":"Where and when","label":"Engine (with separator)","example":" · localhost","description":"The engine with a dot in front; empty when unknown."},
@@ -472,10 +503,12 @@ _CS_PLACEHOLDERS='[
 # Sample alerts, in the shape CrowdSec hands a notification plugin (and cscli alerts inspect -d prints)
 _CS_NOTIFY_SAMPLES='{
  "probe": {"id": 42, "scenario": "crowdsecurity/http-probing", "message": "Ip 89.248.165.10 performed crowdsecurity/http-probing (13 events over 4s)", "events_count": 13, "machine_id": "localhost", "kind": "crowdsec", "simulated": false,
+   "start_at": "2026-10-07T21:14:03Z", "stop_at": "2026-10-07T21:14:07Z",
    "source": {"scope": "Ip", "value": "89.248.165.10", "ip": "89.248.165.10", "range": "89.248.165.0/24", "cn": "NL", "as_number": "202425", "as_name": "IP Volume inc"},
    "decisions": [{"type": "ban", "duration": "4h", "origin": "crowdsec", "simulated": false}],
    "events": [{"meta": [{"key": "target_fqdn", "value": "app.example.com"}, {"key": "http_path", "value": "/wp-login.php"}, {"key": "http_user_agent", "value": "Mozilla/5.0 (compatible; scanner/1.0)"}]}]},
  "ssh": {"id": 43, "scenario": "crowdsecurity/ssh-bf", "message": "Ip 61.177.172.128 performed crowdsecurity/ssh-bf (6 events over 19s)", "events_count": 6, "machine_id": "localhost", "kind": "crowdsec", "simulated": false,
+   "start_at": "2026-10-07T21:13:41Z", "stop_at": "2026-10-07T21:14:00Z",
    "source": {"scope": "Ip", "value": "61.177.172.128", "ip": "61.177.172.128", "range": "61.177.172.0/24", "cn": "CN", "as_number": "4134", "as_name": "CHINANET-BACKBONE"},
    "decisions": [{"type": "ban", "duration": "4h", "origin": "crowdsec", "simulated": false}], "events": []},
  "exploit": {"id": 44, "scenario": "crowdsecurity/CVE-2017-9841", "message": "Ip 194.26.135.7 performed crowdsecurity/CVE-2017-9841 (1 events over 0s)", "events_count": 1, "machine_id": "localhost", "kind": "crowdsec", "simulated": false,
@@ -486,10 +519,35 @@ _CS_NOTIFY_SAMPLES='{
    "source": {"scope": "Ip", "value": "198.51.100.7", "ip": "198.51.100.7", "range": "", "cn": "", "as_number": "", "as_name": ""},
    "decisions": [{"type": "ban", "duration": "24h", "origin": "cscli", "simulated": false}], "events": []},
  "simulated": {"id": 46, "scenario": "crowdsecurity/http-crawl-non_statics", "message": "Ip 185.220.101.5 performed crowdsecurity/http-crawl-non_statics (40 events over 9s)", "events_count": 40, "machine_id": "localhost", "kind": "crowdsec", "simulated": true,
+   "start_at": "2026-10-07T21:12:51Z", "stop_at": "2026-10-07T21:13:00Z",
    "source": {"scope": "Ip", "value": "185.220.101.5", "ip": "185.220.101.5", "range": "185.220.101.0/24", "cn": "DE", "as_number": "60729", "as_name": "Stiftung Erneuerbare Freiheit"},
    "decisions": [{"type": "ban", "duration": "4h", "origin": "crowdsec", "simulated": true}],
-   "events": [{"meta": [{"key": "target_fqdn", "value": "app.example.com"}, {"key": "http_path", "value": "/"}]}]}
+   "events": [{"meta": [{"key": "target_fqdn", "value": "app.example.com"}, {"key": "http_path", "value": "/"}]}]},
+ "burst": {"batch": {"start": "2026-10-07T21:14:03Z", "seconds": 7, "machine_id": "localhost", "target": "cloud.example.com", "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
+   "source": {"scope": "Ip", "value": "194.26.135.7", "ip": "194.26.135.7", "range": "194.26.135.0/24", "cn": "RU", "as_number": "216368", "as_name": "Petersburg Internet Network ltd."},
+   "decisions": [{"type": "ban", "duration": "4h", "origin": "crowdsec", "simulated": false}],
+   "runs": [{"scenario": "crowdsecurity/vpatch-CVE-2025-29927", "times": 41, "path": "/_next/static/chunks/main.js"},
+            {"scenario": "crowdsecurity/vpatch-CVE-2024-4577", "times": 4, "path": "/php-cgi/php-cgi.exe?%ADd+allow_url_include%3d1"},
+            {"scenario": "crowdsecurity/appsec-vpatch", "times": 2, "path": "/.env"}]}},
+ "crowd": {"of": ["probe", "ssh", "exploit"]}
 }'
+
+# A sample as the alerts it stands for: one alert, or a batch ("burst": one address firing many alerts in a few seconds;
+# "crowd": three addresses in the same batch)
+_CS_JQ_SAMPLE='
+def sample_alerts($all):
+  if type == "object" and has("batch") then .batch as $b
+    | ([ $b.runs[] | . as $r | range($r.times) | $r ]) as $seq
+    | ($seq | length) as $n | ($b.start | iso_secs) as $t0
+    | [ $seq | to_entries[] | .key as $k | .value as $r
+        | (($t0 + (if $n > 1 then ($k * $b.seconds / ($n - 1) | floor) else 0 end)) | todate) as $at
+        | {id: (1000 + $k), scenario: $r.scenario, message: "Ip \($b.source.value) performed \($r.scenario) (1 events over 0s)", events_count: 1, machine_id: $b.machine_id,
+           kind: "crowdsec", simulated: false, start_at: $at, stop_at: $at, source: $b.source, decisions: $b.decisions,
+           events: [{meta: [{key: "target_fqdn", value: $b.target}, {key: "http_path", value: $r.path}, {key: "http_user_agent", value: $b.user_agent}]}]} ]
+  elif type == "object" and has("of") then [ .of[] as $k | $all[$k] ]
+  else . end;'
+# _cs_notify_sample NAME — the alert (or the list of alerts) a sample stands for
+_cs_notify_sample() { jq -c --arg s "$1" "$_CS_JQ_DEFS$_CS_JQ_SAMPLE"' . as $all | .[$s] | sample_alerts($all)' <<< "$_CS_NOTIFY_SAMPLES"; }
 
 # The validation, in jq: prints the normalised settings, or {"error": "…"}
 _CS_JQ_NOTIFY_VALIDATE='
@@ -520,8 +578,9 @@ def pattern_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,119}
     | if ([$s.events.bans, $s.events.simulated, $s.events.detect_only] | map(type == "boolean") | all | not) then bad("The event switches must be true or false") else . end
     | num($s.filters.min_events; 0; 1000; "The minimum number of events") as $me
     | if ([$s.filters.only, $s.filters.ignore] | map(type == "array" and length <= 20 and all(.[]; pattern_ok)) | all | not) then bad("The scenario lists take up to 20 names such as crowdsecurity/ssh-bf or a prefix such as crowdsecurity/ssh*") else . end
+    | if (["address", "alert"] | index($s.delivery.group_by // "address")) == null then bad("The grouping must be address (one block per address) or alert (one block per alert)") else . end
     | num($s.delivery.group_wait; 1; 600; "The grouping wait (seconds)") as $gw
-    | num($s.delivery.group_threshold; 1; 10; "The group size (Discord shows at most 10 embeds in a message)") as $gt
+    | num($s.delivery.group_threshold; 1; 100; "The number of alerts in one message") as $gt
     | num($s.delivery.max_retry; 0; 10; "The number of retries") as $mr
     | num($s.delivery.timeout; 1; 60; "The request timeout (seconds)") as $to
     | oneline($s.message.title; "The title"; 200) as $title | check_ph($title; "The title") as $_t
@@ -539,11 +598,11 @@ def pattern_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._/@:+-]{0,119}
           | check_ph($fn; "Field " + (($i + 1) | tostring) + " name") | check_ph($fv; "Field " + (($i + 1) | tostring) + " value")
           | {name: $fn, value: $fv, inline: ($f.inline == true)} )) as $fields
     | if ($title | length) == 0 and ($desc | length) == 0 and ($fields | length) == 0 then bad("The message would be empty: give it a title, a description or a field") else . end
-    | {v: 1, enabled: $s.enabled, webhook: {mode: $s.webhook.mode}, identity: {name: $name, avatar_url: $s.identity.avatar_url},
+    | {v: 2, enabled: $s.enabled, webhook: {mode: $s.webhook.mode}, identity: {name: $name, avatar_url: $s.identity.avatar_url},
        embed: {color_mode: $s.embed.color_mode, color: ($s.embed.color | ascii_downcase)}, mention: {mode: $s.mention.mode, id: (if ($s.mention.mode == "role" or $s.mention.mode == "user") then ($s.mention.id | tostring) else "" end), text: $mt},
        events: {bans: $s.events.bans, simulated: $s.events.simulated, detect_only: $s.events.detect_only},
        filters: {min_events: $me, only: ($s.filters.only | unique), ignore: ($s.filters.ignore | unique)},
-       delivery: {group_wait: $gw, group_threshold: $gt, max_retry: $mr, timeout: $to},
+       delivery: {group_by: ($s.delivery.group_by // "address"), group_wait: $gw, group_threshold: $gt, max_retry: $mr, timeout: $to},
        message: {title: $title, description: $desc, footer: $footer, link: $link, timestamp: $s.message.timestamp, fields: $fields}}
   ) catch {error: (if type == "string" then . else "The notification settings are not valid" end)}
 '
@@ -560,7 +619,18 @@ _cs_notify_validate() {
 }
 
 # The settings in force: the defaults, then what was saved. (Without a saved file the live state decides, see _cs_notify_effective.)
-_cs_notify_saved() { _cs_notify_merge "$_CS_NOTIFY_DEFAULTS" "$(_cs_json_file "$CS_NOTIFY_FILE" '{}')"; }
+_cs_notify_saved() { _cs_notify_merge "$_CS_NOTIFY_DEFAULTS" "$(_cs_notify_upgrade "$(_cs_json_file "$CS_NOTIFY_FILE" '{}')")"; }
+
+# _cs_notify_upgrade SAVED — settings an older DCS saved: the message and the delivery it shipped with become today's
+# defaults (grouped by address, 30 s / 50 alerts); a message or a delivery someone changed stays as it is
+_cs_notify_upgrade() {
+    jq -c --argjson old "$_CS_NOTIFY_V1" --argjson d "$_CS_NOTIFY_DEFAULTS" '
+        if (.v // 1) >= 2 then . else
+          (if .message == $old.message then .message = $d.message else . end)
+          | (if (.delivery.group_wait // 5) == $old.delivery.group_wait and (.delivery.group_threshold // 10) == $old.delivery.group_threshold
+             then .delivery.group_wait = $d.delivery.group_wait | .delivery.group_threshold = $d.delivery.group_threshold else . end)
+          | .v = 2 end' <<< "$1" 2>/dev/null || printf '%s' "$1"
+}
 
 # =============================================================================
 # The webhook: never shown in full
@@ -598,65 +668,158 @@ _cs_webhook_resolve() {
 # become variables, and every value goes through toJson — so a quote or a brace
 # in an attacker's user agent cannot break the message, and nothing you type
 # can inject template code.
+#
+# One message per batch CrowdSec hands over (group_wait / group_threshold), one
+# embed per source address in it (delivery.group_by "address", the default) or
+# per alert ("alert"): a scanner that fires 50 alerts in a few seconds is ONE
+# embed that counts its attempts per scenario. Discord takes 10 embeds and 6000
+# characters a message: more than 10 addresses make 9 embeds and a tenth that
+# lists the rest, and every part is cut to fit (characters, never half a one).
 # =============================================================================
 
 # The fixed part of the template. @@NAME@@ marks what is filled in below (jq split/join: no regex, no & surprises).
 _CS_GOTPL_HEAD='{{- /* Managed by DCS: the CrowdSec page writes this file. Change the message on the Discord tab. */ -}}
 @@STATICVARS@@
+{{- /* 1. the batch, gathered: one group per address (or per alert) with its attempts per scenario, the hosts and paths
+       it asked for, the longest decision and the time from its first to its last request */ -}}
+{{- $epoch := toDate "2006-01-02" "2000-01-01" }}
+{{- $groups := dict }}{{ $order := list }}
+{{- range $i, $alert := . }}
+  {{- $ip := "" }}{{ with $alert.Source }}{{ with .Value }}{{ $ip = (. | trim) }}{{ end }}{{ end }}
+  {{- $key := printf "#%d" $i }}{{ if and $by_address (ne $ip "") }}{{ $key = print "ip " $ip }}{{ end }}
+  {{- if not (hasKey $groups $key) }}
+    {{- $_ := set $groups $key (dict "first" $alert "alerts" 0 "events" 0 "n" 0 "rank" 0 "scen" (dict) "order" (list) "raw" (dict) "label" (dict) "targets" (list) "path0" "" "path1" "" "ua" "" "t0" 0 "t1" 0 "dsecs" -1 "dtype" "" "ddur" "" "dorigin" "" "dsim" "") }}
+    {{- $order = append $order $key }}
+  {{- end }}
+  {{- $g := get $groups $key }}
+  {{- $sc := "" }}{{ with $alert.Scenario }}{{ $sc = (. | trim | replace "@" "@​") }}{{ end }}
+  {{- $lb := "Attack blocked" }}{{ $rank := 2 }}
+  @@CHAIN@@
+  {{- $sid := trimPrefix "crowdsecurity/" $sc }}{{ $cve := regexFind "(?i)cve-[0-9]{4}-[0-9]+" $sc }}{{ if $cve }}{{ $sid = upper $cve }}{{ end }}
+  {{- $item := $lb }}{{ if $sid }}{{ $item = print $lb " " $sid }}{{ end }}
+  {{- $ev := 0 }}{{ with $alert.EventsCount }}{{ $ev = (. | int) }}{{ end }}
+  {{- $_ := set $g "alerts" (add1 (get $g "alerts")) }}{{ $_ := set $g "events" (add (get $g "events") $ev) }}{{ $_ := set $g "n" (add (get $g "n") (max $ev 1)) }}
+  {{- if gt $rank (get $g "rank") }}{{ $_ := set $g "rank" $rank }}{{ end }}
+  {{- $scn := get $g "scen" }}
+  {{- if not (hasKey $scn $item) }}{{ $_ := set $g "order" (append (get $g "order") $item) }}{{ $_ := set $scn $item 0 }}{{ $_ := set (get $g "raw") $item $sc }}{{ $_ := set (get $g "label") $item $lb }}{{ end }}
+  {{- $_ := set $scn $item (add (get $scn $item) (max $ev 1)) }}
+  {{- with $alert.StartAt }}{{ $t := (toDate "2006-01-02T15:04:05Z07:00" .).Unix }}{{ if and (gt $t 0) (or (eq (get $g "t0") 0) (lt $t (get $g "t0"))) }}{{ $_ := set $g "t0" $t }}{{ end }}{{ end }}
+  {{- with $alert.StopAt }}{{ $t := (toDate "2006-01-02T15:04:05Z07:00" .).Unix }}{{ if gt $t (get $g "t1") }}{{ $_ := set $g "t1" $t }}{{ end }}{{ end }}
+  {{- range $e := $alert.Events }}{{ range $m := $e.Meta }}{{ with $m.Key }}{{ $k := (. | trim) }}
+    {{- if eq $k "target_fqdn" }}{{ with $m.Value }}{{ $v := (. | trim | trunc 200 | replace "@" "@​") }}{{ if and $v (not (has $v (get $g "targets"))) }}{{ $_ := set $g "targets" (append (get $g "targets") $v) }}{{ end }}{{ end }}
+    {{- else if eq $k "http_path" }}{{ with $m.Value }}{{ $v := (. | trim | trunc 200 | replace "@" "@​") }}{{ if $v }}{{ if not (get $g "path0") }}{{ $_ := set $g "path0" $v }}{{ end }}{{ $_ := set $g "path1" $v }}{{ end }}{{ end }}
+    {{- else if and (eq $k "http_user_agent") (not (get $g "ua")) }}{{ with $m.Value }}{{ $_ := set $g "ua" (. | trim | trunc 200 | replace "@" "@​") }}{{ end }}
+    {{- end }}
+  {{- end }}{{ end }}{{ end }}
+  {{- range $d := $alert.Decisions }}
+    {{- $dd := "" }}{{ with $d.Duration }}{{ $dd = (. | trim) }}{{ end }}
+    {{- $secs := sub (dateModify $dd $epoch).Unix $epoch.Unix }}
+    {{- if gt $secs (get $g "dsecs") }}
+      {{- $_ := set $g "dsecs" $secs }}{{ $_ := set $g "ddur" $dd }}
+      {{- $t := "ban" }}{{ with $d.Type }}{{ $t = (. | trim) }}{{ end }}{{ $_ := set $g "dtype" $t }}
+      {{- $o := "" }}{{ with $d.Origin }}{{ $o = (. | trim) }}{{ end }}{{ $_ := set $g "dorigin" $o }}
+      {{- $s := "" }}{{ with $d.Simulated }}{{ $s = (ternary "1" "" .) }}{{ end }}{{ $_ := set $g "dsim" $s }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- /* 2. each group its scenarios, the most attempts first */ -}}
+{{- range $key := $order }}{{ $g := get $groups $key }}
+  {{- $sorted := list }}{{ range $si, $it := get $g "order" }}{{ $sorted = append $sorted (printf "%09d|%04d|%s" (sub 999999999 (get (get $g "scen") $it)) $si $it) }}{{ end }}
+  {{- $_ := set $g "sorted" (sortAlpha $sorted) }}
+{{- end }}
+{{- /* 3. Discord takes 10 embeds: more addresses make 9 and a tenth that lists the rest. Its 6000 characters are shared out: every
+       embed gets the same budget, its title, footer and fields a share of it (cut by characters, never half of one), the description the rest */ -}}
+{{- $shown := $order }}{{ $rest := list }}
+{{- if gt (len $order) 10 }}{{ $shown = slice $order 0 9 }}{{ $rest = slice $order 9 }}{{ end }}
+{{- $n_embeds := len $shown }}{{ if $rest }}{{ $n_embeds = add1 $n_embeds }}{{ end }}
+{{- $budget := div 5400 $n_embeds }}
+{{- $capT := min 256 (max 20 (div $budget 5)) }}{{ $capF := min 2048 (max 20 (div $budget 5)) }}
+{{- $capFN := min 256 (max 10 (div $budget @@NF5@@)) }}{{ $capFV := min 1024 (max 20 (div (mul $budget 2) @@NF5@@)) }}
+{{- $ri := dict "A" "🇦" "B" "🇧" "C" "🇨" "D" "🇩" "E" "🇪" "F" "🇫" "G" "🇬" "H" "🇭" "I" "🇮" "J" "🇯" "K" "🇰" "L" "🇱" "M" "🇲" "N" "🇳" "O" "🇴" "P" "🇵" "Q" "🇶" "R" "🇷" "S" "🇸" "T" "🇹" "U" "🇺" "V" "🇻" "W" "🇼" "X" "🇽" "Y" "🇾" "Z" "🇿" }}
+{{- $units := dict "y" "year" "mo" "month" "d" "day" "h" "hour" "m" "minute" "s" "second" }}
 {
   "username": @@USERNAME@@,
   @@AVATAR@@
   @@CONTENT@@
   "allowed_mentions": @@MENTIONS@@,
   "embeds": [
-    {{- range $i, $alert := . }}
-    {{- $p_ip := "" }}{{ with $alert.Source }}{{ with .Value }}{{ $p_ip = (. | trim) }}{{ end }}{{ end }}
-    {{- $p_scope := "" }}{{ with $alert.Source }}{{ with .Scope }}{{ $p_scope = (. | trim) }}{{ end }}{{ end }}
-    {{- $p_range := "" }}{{ with $alert.Source }}{{ with .Range }}{{ $p_range = (. | trim) }}{{ end }}{{ end }}
-    {{- $p_country := "" }}{{ with $alert.Source }}{{ with .Cn }}{{ $p_country = (. | trim) }}{{ end }}{{ end }}
-    {{- $p_as_number := "" }}{{ with $alert.Source }}{{ with .AsNumber }}{{ $p_as_number = (. | trim) }}{{ end }}{{ end }}
-    {{- $p_as_name := "" }}{{ with $alert.Source }}{{ with .AsName }}{{ $p_as_name = (. | trim | replace "@" "@​") }}{{ end }}{{ end }}
-    {{- $p_scenario := "" }}{{ with $alert.Scenario }}{{ $p_scenario = (. | trim | replace "@" "@​") }}{{ end }}
-    {{- $p_machine := "" }}{{ with $alert.MachineID }}{{ $p_machine = (. | trim) }}{{ end }}
-    {{- $p_message := "" }}{{ with $alert.Message }}{{ $p_message = (. | trim | replace "@" "@​") }}{{ end }}
-    {{- $p_events := "0" }}{{ with $alert.EventsCount }}{{ $p_events = (printf "%d" (. | int)) }}{{ end }}
-    {{- $p_alert_id := printf "%d" ($alert.ID | int) }}
-    {{- $sim := "" }}{{ with $alert.Simulated }}{{ $sim = (ternary "1" "" .) }}{{ end }}
-    {{- $dtype := "ban" }}{{ $p_duration := "" }}{{ $p_origin := "" }}
-    {{- with $alert.Decisions }}{{ with index . 0 }}
-      {{- with .Type }}{{ $dtype = (. | trim) }}{{ end }}
-      {{- with .Duration }}{{ $p_duration = (. | trim) }}{{ end }}
-      {{- with .Origin }}{{ $p_origin = (. | trim) }}{{ end }}
-      {{- with .Simulated }}{{ if ternary "1" "" . }}{{ $sim = "1" }}{{ end }}{{ end }}
-    {{- end }}{{ end }}
-    {{- $p_target := "" }}{{ $p_path := "" }}{{ $p_user_agent := "" }}
-    {{- range $e := $alert.Events }}{{ range $m := $e.Meta }}{{ with $m.Key }}{{ $k := (. | trim) }}
-      {{- if and (eq $k "target_fqdn") (eq $p_target "") }}{{ with $m.Value }}{{ $p_target = (. | trim | trunc 200 | replace "@" "@​") }}{{ end }}
-      {{- else if and (eq $k "http_path") (eq $p_path "") }}{{ with $m.Value }}{{ $p_path = (. | trim | trunc 200 | replace "@" "@​") }}{{ end }}
-      {{- else if and (eq $k "http_user_agent") (eq $p_user_agent "") }}{{ with $m.Value }}{{ $p_user_agent = (. | trim | trunc 200 | replace "@" "@​") }}{{ end }}
-      {{- end }}
-    {{- end }}{{ end }}{{ end }}
+    {{- range $gi, $key := $shown }}
+    {{- $g := get $groups $key }}{{ $a := get $g "first" }}
+    {{- $p_ip := "" }}{{ with $a.Source }}{{ with .Value }}{{ $p_ip = (. | trim) }}{{ end }}{{ end }}
+    {{- $p_scope := "" }}{{ with $a.Source }}{{ with .Scope }}{{ $p_scope = (. | trim) }}{{ end }}{{ end }}
+    {{- $p_range := "" }}{{ with $a.Source }}{{ with .Range }}{{ $p_range = (. | trim) }}{{ end }}{{ end }}
+    {{- $p_country := "" }}{{ with $a.Source }}{{ with .Cn }}{{ $p_country = (. | trim) }}{{ end }}{{ end }}
+    {{- $p_as_number := "" }}{{ with $a.Source }}{{ with .AsNumber }}{{ $p_as_number = (. | trim) }}{{ end }}{{ end }}
+    {{- $p_as_name := "" }}{{ with $a.Source }}{{ with .AsName }}{{ $p_as_name = (. | trim | replace "@" "@​") }}{{ end }}{{ end }}
+    {{- $p_machine := "" }}{{ with $a.MachineID }}{{ $p_machine = (. | trim) }}{{ end }}
+    {{- $p_message := "" }}{{ with $a.Message }}{{ $p_message = (. | trim | replace "@" "@​") }}{{ end }}
+    {{- $p_alert_id := printf "%d" ($a.ID | int) }}
+    {{- $p_events := printf "%d" (get $g "events") }}{{ $p_alerts := printf "%d" (get $g "alerts") }}{{ $nn := get $g "n" }}
+    {{- $sorted := get $g "sorted" }}{{ $top := (splitn "|" 3 (first $sorted))._2 }}
+    {{- $p_scenario := print (get (get $g "raw") $top) }}{{ $p_label := print (get (get $g "label") $top) }}
     {{- $p_scenario_short := trimPrefix "crowdsecurity/" $p_scenario }}
-    {{- $p_label := "Attack blocked" }}{{ $color := 15942494 }}
-    @@CHAIN@@
+    {{- $items := list }}{{ range $j, $s := $sorted }}{{ if lt $j 6 }}{{ $it := (splitn "|" 3 $s)._2 }}{{ $items = append $items (printf "%s ×%d" $it (get (get $g "scen") $it)) }}{{ end }}{{ end }}
+    {{- $p_scenarios := join " · " $items }}{{ if gt (len $sorted) 6 }}{{ $p_scenarios = printf "%s · +%d more" $p_scenarios (sub (len $sorted) 6) }}{{ end }}
+    {{- $sim := "" }}{{ with $a.Simulated }}{{ $sim = (ternary "1" "" .) }}{{ end }}{{ if get $g "dsim" }}{{ $sim = "1" }}{{ end }}
+    {{- $hasdec := ge (get $g "dsecs") 0 }}
+    {{- $dtype := "ban" }}{{ $p_duration := "" }}{{ $p_origin := "" }}
+    {{- if $hasdec }}{{ $dtype = print (get $g "dtype") }}{{ $p_duration = print (get $g "ddur") }}{{ $p_origin = print (get $g "dorigin") }}{{ end }}
+    {{- $color := 15942494 }}{{ $rk := get $g "rank" }}{{ if eq $rk 4 }}{{ $color = 10979578 }}{{ else if eq $rk 1 }}{{ $color = 16098851 }}{{ end }}
     {{- if eq $dtype "captcha" }}{{ $color = 2282478 }}{{ end }}
+    {{- $human := "" }}{{ if $p_duration }}{{ $dr := durationRound $p_duration }}{{ if ne $dr "0s" }}{{ $num := regexFind "^[0-9]+" $dr }}{{ $human = print $num " " (get $units (trimPrefix $num $dr)) }}{{ if ne $num "1" }}{{ $human = print $human "s" }}{{ end }}{{ end }}{{ end }}
+    {{- $p_ban := "" }}
+    {{- if $hasdec }}
+      {{- if eq $dtype "ban" }}{{ $p_ban = "banned" }}{{ if $human }}{{ $p_ban = print "banned " $human }}{{ end }}{{ if $sim }}{{ $p_ban = print "would be " $p_ban " (simulation)" }}{{ end }}
+      {{- else }}{{ $p_ban = $dtype }}{{ if $human }}{{ $p_ban = print $dtype " for " $human }}{{ end }}{{ if $sim }}{{ $p_ban = print "simulated " $p_ban }}{{ end }}{{ end }}
+    {{- end }}
+    {{- $p_ban_tag := "" }}{{ if $p_ban }}{{ $p_ban_tag = print " → **" $p_ban "**" }}{{ end }}
+    {{- $p_span := "" }}{{ $t0 := get $g "t0" }}{{ $t1 := get $g "t1" }}
+    {{- if and (gt $t0 0) (ge $t1 $t0) }}{{ $s := sub $t1 $t0 }}
+      {{- if lt $s 1 }}{{ $p_span = "under a second" }}
+      {{- else if lt $s 60 }}{{ $p_span = printf "%ds" $s }}
+      {{- else if lt $s 3600 }}{{ $p_span = printf "%dm" (div $s 60) }}{{ if mod $s 60 }}{{ $p_span = printf "%s %ds" $p_span (mod $s 60) }}{{ end }}
+      {{- else if lt $s 86400 }}{{ $p_span = printf "%dh" (div $s 3600) }}{{ if div (mod $s 3600) 60 }}{{ $p_span = printf "%s %dm" $p_span (div (mod $s 3600) 60) }}{{ end }}
+      {{- else }}{{ $p_span = printf "%dd" (div $s 86400) }}{{ if div (mod $s 86400) 3600 }}{{ $p_span = printf "%s %dh" $p_span (div (mod $s 86400) 3600) }}{{ end }}{{ end }}
+    {{- end }}
+    {{- $p_attempts := "one request" }}{{ if ne $nn 1 }}{{ $p_attempts = printf "%d attempts" $nn }}{{ if $p_span }}{{ $p_attempts = printf "%s in %s" $p_attempts $p_span }}{{ end }}{{ end }}
+    {{- $tg := get $g "targets" }}{{ $p_target := "" }}{{ $p_targets := "" }}{{ $p_targets_line := "" }}
+    {{- if $tg }}{{ $p_target = print (first $tg) }}{{ $tl := list }}{{ $bl := list }}
+      {{- range $j, $t := $tg }}{{ if lt $j 3 }}{{ $tl = append $tl $t }}{{ $bl = append $bl (print "**" $t "**") }}{{ end }}{{ end }}
+      {{- $more := "" }}{{ if gt (len $tg) 3 }}{{ $more = printf " and %d more" (sub (len $tg) 3) }}{{ end }}
+      {{- $p_targets = print (join ", " $tl) $more }}{{ $p_targets_line = print "\nAimed at " (join ", " $bl) $more }}
+    {{- end }}
+    {{- $p_path := print (get $g "path0") }}{{ $p_last_path := print (get $g "path1") }}{{ $p_user_agent := print (get $g "ua") }}
+    {{- $p_path_code := "" }}{{ if $p_path }}{{ $p_path_code = print "`" (replace "`" "'"'"'" $p_path) "`" }}{{ end }}
+    {{- $p_last_path_code := "" }}{{ if $p_last_path }}{{ $p_last_path_code = print "`" (replace "`" "'"'"'" $p_last_path) "`" }}{{ end }}
+    {{- $p_requests_line := "" }}
+    {{- if $p_path }}{{ $c0 := $p_path }}{{ if gt (len (regexFindAll "(?s)." $c0 -1)) 100 }}{{ $c0 = print (regexFind "^(?s).{0,99}" $c0) "…" }}{{ end }}
+      {{- $c1 := $p_last_path }}{{ if gt (len (regexFindAll "(?s)." $c1 -1)) 100 }}{{ $c1 = print (regexFind "^(?s).{0,99}" $c1) "…" }}{{ end }}
+      {{- if eq $p_path $p_last_path }}{{ $p_requests_line = print "\nRequest `" (replace "`" "'"'"'" $c0) "`" }}
+      {{- else }}{{ $p_requests_line = print "\nFirst `" (replace "`" "'"'"'" $c0) "` · last `" (replace "`" "'"'"'" $c1) "`" }}{{ end }}
+    {{- end }}
     {{- $p_decision := $dtype }}{{ if $sim }}{{ $p_decision = print "simulated " $dtype }}{{ end }}
     {{- $p_sim_tag := "" }}{{ if $sim }}{{ $p_sim_tag = " (simulation)" }}{{ end }}
-    {{- $p_flag := "" }}{{ $p_country_tag := "" }}{{ if eq (len $p_country) 2 }}{{ $p_flag = print ":flag_" (lower $p_country) ":" }}{{ $p_country_tag = print " " $p_flag " " $p_country }}{{ end }}
+    {{- $p_flag := "" }}{{ $p_country_tag := "" }}{{ $p_flag_emoji := "" }}{{ $p_source_tag := "" }}
+    {{- if eq (len $p_country) 2 }}{{ $p_flag = print ":flag_" (lower $p_country) ":" }}{{ $p_country_tag = print " " $p_flag " " $p_country }}{{ $uc := upper $p_country }}{{ $p_flag_emoji = print (get $ri (substr 0 1 $uc)) (get $ri (substr 1 2 $uc)) }}
+      {{- $p_source_tag = print " · " $p_country }}{{ if $p_flag_emoji }}{{ $p_source_tag = print " · " $p_flag_emoji " " $p_country }}{{ end }}{{ end }}
+    {{- if $p_as_name }}{{ $p_source_tag = print $p_source_tag " · " $p_as_name }}{{ end }}
     {{- $p_as_tag := "" }}{{ if $p_as_name }}{{ $p_as_tag = print " · " $p_as_name }}{{ end }}
     {{- $p_for_duration := "" }}{{ if $p_duration }}{{ $p_for_duration = print " for " $p_duration }}{{ end }}
     {{- $p_target_tag := "" }}{{ if $p_target }}{{ $p_target_tag = print " · aimed at **" $p_target "**" }}{{ end }}
     {{- $p_origin_tag := "" }}{{ if $p_origin }}{{ $p_origin_tag = print " · " $p_origin }}{{ end }}
     {{- $p_machine_tag := "" }}{{ if $p_machine }}{{ $p_machine_tag = print " · " $p_machine }}{{ end }}
-    {{- $p_path_code := "" }}{{ if $p_path }}{{ $p_path_code = print "`" (replace "`" "'"'"'" $p_path) "`" }}{{ end }}
     {{- $p_cti_url := print "https://app.crowdsec.net/cti/" $p_ip }}
     {{- $p_abuseipdb_url := print "https://www.abuseipdb.com/check/" $p_ip }}
     {{- $p_time := print "<t:" (now | unixEpoch) ":R>" }}
-    {{- $title := @@TITLE@@ }}
-    {{- $desc := @@DESC@@ }}
-    {{- $footer := @@FOOTER@@ }}
+    {{- $title := @@TITLE@@ }}{{ if gt (len (regexFindAll "(?s)." $title -1)) $capT }}{{ $title = print (regexFind (print "^(?s)" (repeat (int (div (sub $capT 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capT 1) 1000))) $title) "…" }}{{ end }}
+    {{- $footer := @@FOOTER@@ }}{{ if gt (len (regexFindAll "(?s)." $footer -1)) $capF }}{{ $footer = print (regexFind (print "^(?s)" (repeat (int (div (sub $capF 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capF 1) 1000))) $footer) "…" }}{{ end }}
     {{- $link := @@LINK@@ }}
-    {{- if $i }},{{ end }}
+    {{- $used := add (len (regexFindAll "(?s)." $title -1)) (len (regexFindAll "(?s)." $footer -1)) }}
+    @@FIELDVARS@@
+    {{- $desc := @@DESC@@ }}
+    {{- $dmax := min 4096 (max 50 (sub $budget $used)) }}
+    {{- if gt (len (regexFindAll "(?s)." $desc -1)) $dmax }}{{ $desc = print (regexFind (print "^(?s)" (repeat (int (div (sub $dmax 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $dmax 1) 1000))) $desc) "…" }}{{ end }}
+    {{- if $gi }},{{ end }}
     {
       "title": {{ $title | toJson }},
       "color": @@COLOR@@,
@@ -674,6 +837,28 @@ _CS_GOTPL_HEAD='{{- /* Managed by DCS: the CrowdSec page writes this file. Chang
       @@TIMESTAMP@@
     }
     {{- end }}
+    {{- if $rest }},
+    {{- $lines := list }}{{ $rrank := 0 }}
+    {{- range $key := $rest }}{{ $g := get $groups $key }}{{ $a := get $g "first" }}
+      {{- $ip := "" }}{{ with $a.Source }}{{ with .Value }}{{ $ip = (. | trim) }}{{ end }}{{ end }}
+      {{- $cn := "" }}{{ with $a.Source }}{{ with .Cn }}{{ $cn = (. | trim) }}{{ end }}{{ end }}
+      {{- $where := "" }}{{ if eq (len $cn) 2 }}{{ $uc := upper $cn }}{{ $fe := print (get $ri (substr 0 1 $uc)) (get $ri (substr 1 2 $uc)) }}{{ $where = print " " $cn }}{{ if $fe }}{{ $where = print " " $fe " " $cn }}{{ end }}{{ end }}
+      {{- $top := (splitn "|" 3 (first (get $g "sorted")))._2 }}{{ $nn := get $g "n" }}
+      {{- $att := "one request" }}{{ if ne $nn 1 }}{{ $att = printf "%d attempts" $nn }}{{ end }}
+      {{- if gt (get $g "rank") $rrank }}{{ $rrank = get $g "rank" }}{{ end }}
+      {{- $lines = append $lines (print "`" $ip "`" $where " · " (get (get $g "label") $top) " · " $att) }}
+    {{- end }}
+    {{- $rcolor := 15942494 }}{{ if eq $rrank 4 }}{{ $rcolor = 10979578 }}{{ else if eq $rrank 1 }}{{ $rcolor = 16098851 }}{{ end }}
+    {{- $rtitle := printf "🛡️ %d more %s" (len $rest) (ternary "addresses" "alerts" $by_address) }}
+    {{- $rdesc := join "\n" $lines }}{{ $dmax := min 4096 (max 50 (sub $budget (len (regexFindAll "(?s)." $rtitle -1)))) }}
+    {{- if gt (len (regexFindAll "(?s)." $rdesc -1)) $dmax }}{{ $rdesc = print (regexFind (print "^(?s)" (repeat (int (div (sub $dmax 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $dmax 1) 1000))) $rdesc) "…" }}{{ end }}
+    {
+      "title": {{ $rtitle | toJson }},
+      "color": @@RESTCOLOR@@,
+      "description": {{ $rdesc | toJson }}
+      @@TIMESTAMP@@
+    }
+    {{- end }}
   ]
 }'
 
@@ -688,11 +873,22 @@ _cs_notify_go_template() {
           (toks($str) | map(if test("^\\{[a-z_]+\\}$") and ((.[1:-1]) as $n | $known | index($n)) != null then "$p_" + .[1:-1] else gostr end)) as $parts
           | if ($parts | length) == 0 then "\"\"" elif ($parts | length) == 1 then $parts[0] else "(print " + ($parts | join(" ")) + ")" end;
         def lit($v): "{{ " + ($v | gostr) + " | toJson }}";
+        def rank($fam): {"exploit": 4, "bruteforce": 3, "probe": 1}[$fam] // 2;
+        # a variable cut to CAP characters (CAP may be up to 4096: Go regexps repeat at most 1000 times, so the pattern is built in pieces)
+        def gocut($v; $cap): "{{ if gt (len (regexFindAll \"(?s).\" \($v) -1)) \($cap) }}{{ \($v) = print (regexFind (print \"^(?s)\" (repeat (int (div (sub \($cap) 1) 1000)) \".{0,1000}\") (printf \".{0,%d}\" (mod (sub \($cap) 1) 1000))) \($v)) \"…\" }}{{ end }}";
+        # the label table, then the same guesses scen_row makes for a scenario the table does not know
         ( [ label_table | to_entries[] | .key as $i | .value as $r
-            | (if $i == 0 then "{{- if hasPrefix " else "{{- else if hasPrefix " end) + ($r[0] | gostr) + " $p_scenario }}{{ $p_label = " + ($r[1] | gostr) + " }}{{ $color = "
-              + ({"bruteforce": 15942494, "exploit": 10979578, "probe": 16098851}[$r[2]] | tostring) + " }}" ] + ["{{- end }}"] | join("\n    ") ) as $chain
+            | (if $i == 0 then "{{- if hasPrefix " else "{{- else if hasPrefix " end) + ($r[0] | gostr) + " $sc }}{{ $lb = " + ($r[1] | gostr) + " }}{{ $rank = " + (rank($r[2]) | tostring) + " }}" ]
+          + [ "{{- else if regexMatch \"(?i)cve\" $sc }}{{ $lb = \"Exploit attempt\" }}{{ $rank = 4 }}",
+              "{{- else if regexMatch \"(?i)(^|[-_/])bf($|[-_])|brute\" $sc }}{{ $lb = \"Brute force\" }}{{ $rank = 3 }}",
+              "{{- else if regexMatch \"(?i)spam\" $sc }}{{ $lb = \"Spam\" }}{{ $rank = 2 }}",
+              "{{- end }}" ] | join("\n  ") ) as $chain
         | ( [ $s.message.fields | to_entries[] | .key as $i | .value as $f
-              | "{{- $fn\($i) := \(gexpr($f.name)) }}{{ $fv\($i) := \(gexpr($f.value)) }}{{ if and (ne (trim $fn\($i)) \"\") (ne (trim $fv\($i)) \"\") }}{{ $sep }}\n        {\"name\": {{ $fn\($i) | toJson }}, \"value\": {{ $fv\($i) | toJson }}, \"inline\": \(if $f.inline then "true" else "false" end)}{{ $sep = \",\" }}{{ end }}" ] | join("\n        ") ) as $fields
+              | "{{- $fn\($i) := \(gexpr($f.name)) }}{{ $fv\($i) := \(gexpr($f.value)) }}{{ $fon\($i) := and (ne (trim $fn\($i)) \"\") (ne (trim $fv\($i)) \"\") }}"
+                + "{{ if $fon\($i) }}" + gocut("$fn\($i)"; "$capFN") + gocut("$fv\($i)"; "$capFV")
+                + "{{ $used = add $used (len (regexFindAll \"(?s).\" $fn\($i) -1)) (len (regexFindAll \"(?s).\" $fv\($i) -1)) }}{{ end }}" ] | join("\n    ") ) as $fieldvars
+        | ( [ $s.message.fields | to_entries[] | .key as $i | .value as $f
+              | "{{- if $fon\($i) }}{{ $sep }}\n        {\"name\": {{ $fn\($i) | toJson }}, \"value\": {{ $fv\($i) | toJson }}, \"inline\": \(if $f.inline then "true" else "false" end)}{{ $sep = \",\" }}{{ end }}" ] | join("\n        ") ) as $fields
         | ( if $s.mention.mode == "role" then "<@&" + $s.mention.id + ">" elif $s.mention.mode == "user" then "<@" + $s.mention.id + ">"
             elif $s.mention.mode == "here" then "@here" elif $s.mention.mode == "everyone" then "@everyone" else "" end ) as $mtag
         | ( [$mtag, $s.mention.text] | map(select(length > 0)) | join(" ") ) as $content
@@ -700,7 +896,7 @@ _cs_notify_go_template() {
             elif $s.mention.mode == "here" or $s.mention.mode == "everyone" then "{\"parse\": [\"everyone\"]}" else "{\"parse\": []}" end ) as $mentions
         | ( $s.embed.color | ltrimstr("#") | explode | map(if . >= 97 then . - 87 elif . >= 65 then . - 55 else . - 48 end) | reduce .[] as $d (0; . * 16 + $d) ) as $color_int
         | $head
-        | split("@@STATICVARS@@") | join("{{- $p_domain := \($domain | gostr) }}{{ $p_server := \($server | gostr) }}")
+        | split("@@STATICVARS@@") | join("{{- $p_domain := \($domain | gostr) }}{{ $p_server := \($server | gostr) }}{{ $by_address := \(if ($s.delivery.group_by // "address") == "address" then "true" else "false" end) }}")
         | split("@@USERNAME@@") | join(lit($s.identity.name))
         | split("@@AVATAR@@") | join(if $s.identity.avatar_url != "" then "\"avatar_url\": " + lit($s.identity.avatar_url) + "," else "" end)
         | split("@@CONTENT@@") | join(if $content != "" then "\"content\": " + lit($content) + "," else "" end)
@@ -711,9 +907,15 @@ _cs_notify_go_template() {
         | split("@@FOOTER@@") | join(gexpr($s.message.footer))
         | split("@@LINK@@") | join(gexpr($s.message.link))
         | split("@@COLOR@@") | join(if $s.embed.color_mode == "fixed" then ($color_int | tostring) else "{{ $color }}" end)
+        | split("@@RESTCOLOR@@") | join(if $s.embed.color_mode == "fixed" then ($color_int | tostring) else "{{ $rcolor }}" end)
+        | split("@@FIELDVARS@@") | join($fieldvars)
+        | split("@@NF5@@") | join(([($s.message.fields | length), 1] | max) * 5 | tostring)
         | split("@@FIELDS@@") | join($fields)
         | split("@@TIMESTAMP@@") | join(if $s.message.timestamp then "{{- if true }},\n      \"timestamp\": {{ dateInZone \"2006-01-02T15:04:05Z\" now \"UTC\" | toJson }}\n      {{- end }}" else "" end)'
 }
+
+# The layout of the message the file holds: 2 = one embed per address (or alert) with the grouped placeholders; 1 = one embed per alert (older DCS)
+CS_NOTIFY_LAYOUT=2
 
 # _cs_notify_render_yaml SETTINGS URL — the whole notifications/http.yaml
 _cs_notify_render_yaml() {
@@ -721,9 +923,9 @@ _cs_notify_render_yaml() {
     domain=$(_find_traefik_domain 2>/dev/null); [[ -n "$domain" ]] || domain="${PROXY_DOMAIN:-DCS}"
     server="${SERVER_NAME:-}"; [[ -n "$server" ]] || server=$(hostname 2>/dev/null || echo DCS)
     tpl=$(_cs_notify_go_template "$s" "$domain" "$server") || return 1
-    jq -nr --argjson s "$s" --arg url "$url" --arg tpl "$tpl" '
+    jq -nr --argjson s "$s" --arg url "$url" --arg tpl "$tpl" --argjson v "$CS_NOTIFY_LAYOUT" '
         "# Managed by DCS: the CrowdSec page writes this file (Discord tab). Change it there; a backup of the previous file is kept.\n"
-        + "# dcs-notify: " + ({v: 1, settings: $s} | tojson) + "\n"
+        + "# dcs-notify: " + ({v: $v, settings: $s} | tojson) + "\n"
         + "type: http\nname: http_default\nlog_level: info\n"
         + "group_wait: \($s.delivery.group_wait)s\ngroup_threshold: \($s.delivery.group_threshold)\nmax_retry: \($s.delivery.max_retry)\ntimeout: \($s.delivery.timeout)s\n"
         + "format: |\n" + ($tpl | split("\n") | map("  " + .) | join("\n")) + "\n"
@@ -733,77 +935,163 @@ _cs_notify_render_yaml() {
 # =============================================================================
 # Discord notifications: the same message rendered by DCS (preview and test message)
 #
-# CrowdSec renders the Go template above when a real alert fires. The preview
-# and the test message need the same result without an alert, so this jq
-# program builds the identical payload from an alert in the shape
-# `cscli alerts inspect -d -o json` prints. tests/smoke.sh pins the two
-# together with a payload captured from a real CrowdSec.
+# CrowdSec renders the Go template above when a real batch arrives. The preview
+# and the test message need the same result without one, so this jq program
+# builds the identical payload from alerts in the shape `cscli alerts inspect
+# -d -o json` prints (one alert, or a list: a batch). tests/smoke.sh pins the
+# two together with payloads captured from a real CrowdSec.
 # =============================================================================
 
 _CS_JQ_RENDER='
 def san: gsub("@"; "@​");
 def trm: gsub("^\\s+|\\s+$"; "");
+def cut($l): if length > $l then .[0:$l - 1] + "…" else . end;
 def first_meta($metas; $k): ([ $metas[] | select(.key == $k) | .value | tostring | trm | select(length > 0) ] | .[0]) // "";
-def vals($a; $domain; $server; $now):
-  ($a.source // {}) as $src
-  | (($a.decisions // [])[0] // {}) as $d
-  | ([ ($a.events // [])[] | (.meta // [])[] ]) as $metas
-  | ($a.scenario // "" | tostring | trm | san) as $scenario
-  | ($scenario | scen_row) as $row
-  | (($d.type // "ban") | tostring | trm) as $dtype
-  | ((($a.simulated // false) or ($d.simulated // false))) as $sim
-  | (first_meta($metas; "target_fqdn") | .[0:200] | san) as $target
-  | (first_meta($metas; "http_path") | .[0:200] | san) as $path
-  | (first_meta($metas; "http_user_agent") | .[0:200] | san) as $ua
+def flag_emoji: ascii_upcase | explode | map(if . >= 65 and . <= 90 then [127397 + .] | implode else "" end) | join("");
+# sprig durationRound: the largest unit the length is MORE than, rounded down
+def dround: if . > 31536000 then "\(. / 31536000 | floor)y" elif . > 2592000 then "\(. / 2592000 | floor)mo" elif . > 86400 then "\(. / 86400 | floor)d"
+  elif . > 3600 then "\(. / 3600 | floor)h" elif . > 60 then "\(. / 60 | floor)m" elif . > 1 then "\(. | floor)s" else "0s" end;
+def human_len: dround as $d | if $d == "0s" then "" else ($d | capture("^(?<n>[0-9]+)(?<u>[a-z]+)$")) as $c
+  | $c.n + " " + {"y": "year", "mo": "month", "d": "day", "h": "hour", "m": "minute", "s": "second"}[$c.u] + (if $c.n != "1" then "s" else "" end) end;
+def span_words: if . < 1 then "under a second" elif . < 60 then "\(.)s"
+  elif . < 3600 then "\(. / 60 | floor)m" + (if . % 60 > 0 then " \(. % 60)s" else "" end)
+  elif . < 86400 then "\(. / 3600 | floor)h" + (if ((. % 3600) / 60 | floor) > 0 then " \((. % 3600) / 60 | floor)m" else "" end)
+  else "\(. / 86400 | floor)d" + (if ((. % 86400) / 3600 | floor) > 0 then " \((. % 86400) / 3600 | floor)h" else "" end) end;
+def rank_of($fam): {"exploit": 4, "bruteforce": 3, "probe": 1}[$fam] // 2;
+def rank_color: if . == 4 then 10979578 elif . == 1 then 16098851 else 15942494 end;
+def path_cut: if length > 100 then .[0:99] + "…" else . end;
+def code: "`" + gsub("`"; "'"'"'") + "`";
+# the batch, gathered as the template gathers it: [{first, alerts, events, n, rank, counts: {item: n}, order, raw, label, targets, path0, path1, ua, t0, t1, dec}]
+def gather($alerts; $by_addr):
+  reduce ($alerts | to_entries[]) as $e ({keys: [], g: {}};
+    $e.value as $a
+    | (($a.source // {}).value // "" | tostring | trm) as $ip
+    | (if $by_addr and $ip != "" then "ip " + $ip else "#\($e.key)" end) as $key
+    | (if .g[$key] == null then .keys += [$key] | .g[$key] = {first: $a, alerts: 0, events: 0, n: 0, rank: 0, counts: {}, order: [], raw: {}, label: {}, targets: [], path0: "", path1: "", ua: "", t0: 0, t1: 0, dec: null} else . end)
+    | ($a.scenario // "" | tostring | trm | san) as $sc
+    | ($sc | scen_row) as $row
+    | ($row[1]) as $lb | rank_of($row[2]) as $rank
+    | ([$sc | match("(?i)cve-[0-9]{4}-[0-9]+")] | .[0].string // "") as $cve
+    | (if $cve != "" then ($cve | ascii_upcase) else ($sc | ltrimstr("crowdsecurity/")) end) as $sid
+    | (if $sid != "" then $lb + " " + $sid else $lb end) as $item
+    | (($a.events_count // 0) | floor) as $ev | ([$ev, 1] | max) as $n1
+    | .g[$key] |= (
+        .alerts += 1 | .events += $ev | .n += $n1 | (if $rank > .rank then .rank = $rank else . end)
+        | (if .counts[$item] == null then .order += [$item] | .counts[$item] = 0 | .raw[$item] = $sc | .label[$item] = $lb else . end)
+        | .counts[$item] += $n1
+        | (($a.start_at // "") | iso_secs) as $t | (if $t > 0 and (.t0 == 0 or $t < .t0) then .t0 = $t else . end)
+        | (($a.stop_at // "") | iso_secs) as $t | (if $t > .t1 then .t1 = $t else . end)
+        | reduce ([ ($a.events // [])[] | (.meta // [])[] ][]) as $m (.;
+            (($m.key // "") | tostring | trm) as $k | (($m.value // "") | tostring | trm | .[0:200] | san) as $v
+            | if $k == "target_fqdn" then (if $v != "" and (.targets | index($v)) == null then .targets += [$v] else . end)
+              elif $k == "http_path" then (if $v != "" then (if .path0 == "" then .path0 = $v else . end) | .path1 = $v else . end)
+              elif $k == "http_user_agent" and .ua == "" then .ua = $v
+              else . end)
+        | reduce (($a.decisions // [])[]) as $d (.;
+            (($d.duration // "") | tostring | trm) as $dd | ($dd | dur_secs | floor) as $secs
+            | if .dec == null or $secs > .dec.secs then
+                .dec = {secs: $secs, dur: $dd, type: (if $d.type == null then "ban" else ($d.type | tostring | trm) end), origin: (($d.origin // "") | tostring | trm),
+                        sim: (if $d.simulated == null then false else $d.simulated end)}
+              else . end)
+      ))
+  | . as $st | [ $st.keys[] | $st.g[.] ]
+  | map(. as $g | .sorted = ([ $g.order | to_entries[] | {item: .value, i: .key, c: $g.counts[.value]} ] | sort_by(-.c, .i) | map(.item)));
+def attempts_words($n; $span): if $n == 1 then "one request" else "\($n) attempts" + (if $span != "" then " in " + $span else "" end) end;
+def vals($g; $domain; $server; $now):
+  ($g.first) as $a | ($a.source // {}) as $src
+  | ($g.sorted[0]) as $top
+  | ($g.raw[$top] // "") as $scenario
+  | ($g.dec != null) as $hasdec
+  | (if $hasdec then $g.dec.type else "ban" end) as $dtype
+  | ((($a.simulated // false) == true) or ($hasdec and $g.dec.sim == true)) as $sim
+  | (if $hasdec then $g.dec.dur else "" end) as $dur
+  | (if $hasdec then $g.dec.origin else "" end) as $origin
+  | (if $dur != "" then ($dur | dur_secs | human_len) else "" end) as $human
+  | (if $hasdec | not then ""
+     elif $dtype == "ban" then (if $human != "" then "banned " + $human else "banned" end) | (if $sim then "would be " + . + " (simulation)" else . end)
+     else (if $human != "" then $dtype + " for " + $human else $dtype end) | (if $sim then "simulated " + . else . end) end) as $ban
+  | (if $g.t0 > 0 and $g.t1 >= $g.t0 then ($g.t1 - $g.t0 | span_words) else "" end) as $span
   | (($src.cn // "") | tostring | trm) as $cn
+  | (if ($cn | length) == 2 then ($cn | flag_emoji) else "" end) as $fe
   | (($src.as_name // "") | tostring | trm | san) as $asname
   | (($src.value // $src.ip // "") | tostring | trm) as $ip
-  | (($d.duration // "") | tostring | trm) as $dur
-  | (($d.origin // "") | tostring | trm) as $origin
   | (($a.machine_id // "") | tostring | trm) as $machine
+  | ($g.targets) as $tg
+  | (if ($tg | length) > 3 then " and \(($tg | length) - 3) more" else "" end) as $more
+  | ($g.path0) as $path | ($g.path1) as $lpath
   | { ip: $ip, scope: (($src.scope // "") | tostring | trm), range: (($src.range // "") | tostring | trm), country: $cn,
       flag: (if ($cn | length) == 2 then ":flag_" + ($cn | ascii_downcase) + ":" else "" end),
       country_tag: (if ($cn | length) == 2 then " :flag_" + ($cn | ascii_downcase) + ": " + $cn else "" end),
+      flag_emoji: $fe,
+      source_tag: ((if ($cn | length) == 2 then " · " + (if $fe != "" then $fe + " " else "" end) + $cn else "" end) + (if $asname != "" then " · " + $asname else "" end)),
       as_number: (($src.as_number // "") | tostring | trm), as_name: $asname, as_tag: (if $asname != "" then " · " + $asname else "" end),
-      scenario: $scenario, scenario_short: ($scenario | ltrimstr("crowdsecurity/")), label: $row[1], events: (($a.events_count // 0) | tostring), alert_id: (($a.id // 0) | tostring),
-      message: (($a.message // "") | tostring | trm | san), sim_tag: (if $sim then " (simulation)" else "" end),
+      scenario: $scenario, scenario_short: ($scenario | ltrimstr("crowdsecurity/")), label: ($g.label[$top] // "Attack blocked"),
+      scenarios: (([ $g.sorted[0:6][] as $it | "\($it) ×\($g.counts[$it])" ] | join(" · ")) + (if ($g.sorted | length) > 6 then " · +\(($g.sorted | length) - 6) more" else "" end)),
+      events: ($g.events | tostring), alerts: ($g.alerts | tostring), attempts: attempts_words($g.n; $span), span: $span,
+      alert_id: (($a.id // 0) | tostring), message: (($a.message // "") | tostring | trm | san), sim_tag: (if $sim then " (simulation)" else "" end),
       decision: (if $sim then "simulated " + $dtype else $dtype end), duration: $dur, for_duration: (if $dur != "" then " for " + $dur else "" end),
+      ban: $ban, ban_tag: (if $ban != "" then " → **" + $ban + "**" else "" end),
       origin: $origin, origin_tag: (if $origin != "" then " · " + $origin else "" end),
-      target: $target, target_tag: (if $target != "" then " · aimed at **" + $target + "**" else "" end),
-      path: $path, path_code: (if $path != "" then "`" + ($path | gsub("`"; "'"'"'")) + "`" else "" end), user_agent: $ua,
+      target: ($tg[0] // ""), target_tag: (if ($tg | length) > 0 then " · aimed at **" + $tg[0] + "**" else "" end),
+      targets: (if ($tg | length) > 0 then ($tg[0:3] | join(", ")) + $more else "" end),
+      targets_line: (if ($tg | length) > 0 then "\nAimed at " + ($tg[0:3] | map("**" + . + "**") | join(", ")) + $more else "" end),
+      path: $path, path_code: (if $path != "" then ($path | code) else "" end), last_path: $lpath, last_path_code: (if $lpath != "" then ($lpath | code) else "" end),
+      requests_line: (if $path == "" then "" elif $path == $lpath then "\nRequest " + ($path | path_cut | code) else "\nFirst " + ($path | path_cut | code) + " · last " + ($lpath | path_cut | code) end),
+      user_agent: $g.ua,
       machine: $machine, machine_tag: (if $machine != "" then " · " + $machine else "" end),
       domain: $domain, server: $server, time: ("<t:" + ($now | tostring) + ":R>"),
-      cti_url: ("https://app.crowdsec.net/cti/" + $ip), abuseipdb_url: ("https://www.abuseipdb.com/check/" + $ip) };
+      cti_url: ("https://app.crowdsec.net/cti/" + $ip), abuseipdb_url: ("https://www.abuseipdb.com/check/" + $ip),
+      _color: (if $dtype == "captcha" then 2282478 else ($g.rank | rank_color) end) };
 def fill($t; $v): ($t // "") | gsub("\\{(?<k>[a-z_]+)\\}"; ($v[.k]) // ("{" + .k + "}"));
-def color_of($s; $a; $v):
-  if $s.embed.color_mode == "fixed" then ($s.embed.color | ltrimstr("#") | explode | map(if . >= 97 then . - 87 elif . >= 65 then . - 55 else . - 48 end) | reduce .[] as $d (0; . * 16 + $d))
-  elif ((($a.decisions // [])[0].type // "ban") | tostring | trm) == "captcha" then 2282478
-  else ({"bruteforce": 15942494, "exploit": 10979578, "probe": 16098851}[($a.scenario // "" | tostring | trm | scen_row | .[2])] // 15942494) end;
-def payload($s; $a; $domain; $server; $now):
-  vals($a; $domain; $server; $now) as $v
+def fixed_color($s): $s.embed.color | ltrimstr("#") | explode | map(if . >= 97 then . - 87 elif . >= 65 then . - 55 else . - 48 end) | reduce .[] as $d (0; . * 16 + $d);
+def payload($s; $alerts_in; $domain; $server; $now):
+  ($alerts_in | if type == "array" then . else [.] end) as $alerts
+  | (($s.delivery.group_by // "address") == "address") as $by_addr
+  | gather($alerts; $by_addr) as $groups
+  | (if ($groups | length) > 10 then {shown: $groups[0:9], rest: $groups[9:]} else {shown: $groups, rest: []} end) as $split
+  | (($split.shown | length) + (if ($split.rest | length) > 0 then 1 else 0 end)) as $ne
+  | ((5400 / $ne) | floor) as $budget
+  | (([($s.message.fields | length), 1] | max) * 5) as $nf5
+  | ([256, ([20, ($budget / 5 | floor)] | max)] | min) as $capT | ([2048, ([20, ($budget / 5 | floor)] | max)] | min) as $capF
+  | ([256, ([10, ($budget / $nf5 | floor)] | max)] | min) as $capFN | ([1024, ([20, ($budget * 2 / $nf5 | floor)] | max)] | min) as $capFV
   | ( if $s.mention.mode == "role" then "<@&" + $s.mention.id + ">" elif $s.mention.mode == "user" then "<@" + $s.mention.id + ">"
       elif $s.mention.mode == "here" then "@here" elif $s.mention.mode == "everyone" then "@everyone" else "" end ) as $mtag
   | ( [$mtag, $s.mention.text] | map(select(length > 0)) | join(" ") ) as $content
-  | fill($s.message.link; $v) as $link | fill($s.message.footer; $v) as $footer
-  | [ $s.message.fields[] | {name: fill(.name; $v), value: fill(.value; $v), inline: .inline} | select((.name | trm | length) > 0 and (.value | trm | length) > 0) ] as $fields
+  | [ $split.shown[] | vals(.; $domain; $server; $now) as $v
+      | (fill($s.message.title; $v) | cut($capT)) as $title
+      | (fill($s.message.footer; $v) | cut($capF)) as $footer
+      | fill($s.message.link; $v) as $link
+      | [ $s.message.fields[] | {name: fill(.name; $v), value: fill(.value; $v), inline: .inline} | select((.name | trm | length) > 0 and (.value | trm | length) > 0)
+          | .name |= cut($capFN) | .value |= cut($capFV) ] as $fields
+      | (($title | length) + ($footer | length) + ([ $fields[] | (.name | length) + (.value | length) ] | add // 0)) as $used
+      | ([4096, ([50, $budget - $used] | max)] | min) as $dmax
+      | { title: $title, color: (if $s.embed.color_mode == "fixed" then fixed_color($s) else $v._color end), description: (fill($s.message.description; $v) | cut($dmax)), fields: $fields }
+        + (if $link != "" then {url: $link} else {} end)
+        + (if $footer != "" then {footer: {text: $footer}} else {} end)
+        + (if $s.message.timestamp then {timestamp: ($now | todate)} else {} end) ] as $embeds
+  | ( if ($split.rest | length) == 0 then [] else
+        ( [ $split.rest[] | . as $g | ($g.first.source // {}) as $src | (($src.value // "") | tostring | trm) as $ip | (($src.cn // "") | tostring | trm) as $cn
+            | (if ($cn | length) == 2 then (($cn | flag_emoji) as $fe | if $fe != "" then " " + $fe + " " + $cn else " " + $cn end) else "" end) as $where
+            | "`" + $ip + "`" + $where + " · " + $g.label[$g.sorted[0]] + " · " + attempts_words($g.n; "") ] | join("\n") ) as $rdesc
+        | ("🛡️ \($split.rest | length) more " + (if $by_addr then "addresses" else "alerts" end)) as $rtitle
+        | ([4096, ([50, $budget - ($rtitle | length)] | max)] | min) as $dmax
+        | [ { title: $rtitle, color: (if $s.embed.color_mode == "fixed" then fixed_color($s) else ([ $split.rest[].rank ] | max | rank_color) end), description: ($rdesc | cut($dmax)) }
+            + (if $s.message.timestamp then {timestamp: ($now | todate)} else {} end) ] end ) as $restembed
   | { username: $s.identity.name }
     + (if $s.identity.avatar_url != "" then {avatar_url: $s.identity.avatar_url} else {} end)
     + (if $content != "" then {content: $content} else {} end)
     + { allowed_mentions: (if $s.mention.mode == "role" then {roles: [$s.mention.id]} elif $s.mention.mode == "user" then {users: [$s.mention.id]}
                            elif $s.mention.mode == "here" or $s.mention.mode == "everyone" then {parse: ["everyone"]} else {parse: []} end),
-        embeds: [ { title: fill($s.message.title; $v), color: color_of($s; $a; $v), description: fill($s.message.description; $v), fields: $fields }
-                  + (if $link != "" then {url: $link} else {} end)
-                  + (if $footer != "" then {footer: {text: $footer}} else {} end)
-                  + (if $s.message.timestamp then {timestamp: ($now | todate)} else {} end) ] };
+        embeds: ($embeds + $restembed) };
 '
 
-# _cs_notify_render_payload SETTINGS ALERT_JSON — the Discord payload for one alert (JSON on stdout)
+# _cs_notify_render_payload SETTINGS ALERTS_JSON — the Discord payload for one alert or a batch of them (JSON on stdout)
 _cs_notify_render_payload() {
     local domain server
     domain=$(_find_traefik_domain 2>/dev/null); [[ -n "$domain" ]] || domain="${PROXY_DOMAIN:-DCS}"
     server="${SERVER_NAME:-}"; [[ -n "$server" ]] || server=$(hostname 2>/dev/null || echo DCS)
-    jq -nc --argjson s "$1" --argjson a "$2" --arg domain "${CS_RENDER_DOMAIN:-$domain}" --arg server "${CS_RENDER_SERVER:-$server}" --argjson now "${CS_RENDER_NOW:-$(date +%s)}" \
-        "$_CS_JQ_LABELS$_CS_JQ_RENDER"' payload($s; $a; $domain; $server; $now)'
+    jq -c --argjson s "$1" --arg domain "${CS_RENDER_DOMAIN:-$domain}" --arg server "${CS_RENDER_SERVER:-$server}" --argjson now "${CS_RENDER_NOW:-$(date +%s)}" \
+        "$_CS_JQ_DEFS$_CS_JQ_RENDER"' . as $a | payload($s; $a; $domain; $server; $now)' <<< "$2"
 }
 
 # =============================================================================
@@ -943,12 +1231,16 @@ _cs_webhook_view() {
 
 # GET-side view of the notifications: settings in force, what is wired, the placeholders, the last outcomes
 _cs_notify_view() {
-    local eff="$1" insp="$2" status wired plugin drift=false mode file_mode hraw sha_want errs
+    local eff="$1" insp="$2" status wired plugin drift=false mode file_mode hraw sha_want errs layout=0
     status=$(_cs_json_file "$CS_NOTIFY_STATUS" '{}')
     hraw=$(_cs_live_file "$CS_HTTP_PATH")
     file_mode=missing
     if [[ -n "$hraw" ]]; then
-        if grep -q '^# dcs-notify:' <<< "$hraw"; then file_mode=dcs; else file_mode=other; fi
+        if grep -q '^# dcs-notify:' <<< "$hraw"; then
+            file_mode=dcs
+            # the layout the file was written with (1 = one embed per alert, before the messages were grouped)
+            layout=$(sed -n 's/^# dcs-notify: //p' <<< "$hraw" | head -n 1 | jq -r '(.v // 1) | tostring' 2>/dev/null); [[ "$layout" =~ ^[0-9]+$ ]] || layout=1
+        else file_mode=other; fi
     fi
     sha_want=$(jq -r '.applied_http_sha // ""' <<< "$status")
     [[ "$file_mode" == dcs && -n "$sha_want" && "$sha_want" != "$(_cs_sha "$hraw")" ]] && drift=true
@@ -958,13 +1250,16 @@ _cs_notify_view() {
     errs=$(_cs_delivery_errors)
     jq -nc --argjson eff "$eff" --argjson insp "$insp" --argjson status "$status" --argjson wired "$wired" --argjson plugin "$plugin" --arg fm "$file_mode" --argjson drift "$drift" \
         --argjson webhook "$(_cs_webhook_view "$(jq -r '.webhook.mode' <<< "$eff")")" --argjson ph "$_CS_PLACEHOLDERS" --argjson defaults "$_CS_NOTIFY_DEFAULTS" --argjson errs "$errs" \
-        --argjson samples "$(jq -c 'keys' <<< "$_CS_NOTIFY_SAMPLES")" --arg profmode "$(jq -r '.mode' <<< "$insp")" '
-        { settings: $eff, webhook: $webhook, defaults: $defaults, placeholders: $ph, samples: $samples,
+        --argjson samples "$(jq -c 'keys' <<< "$_CS_NOTIFY_SAMPLES")" --arg profmode "$(jq -r '.mode' <<< "$insp")" --argjson layout "$layout" --argjson want "$CS_NOTIFY_LAYOUT" \
+        --argjson digest "$(_cs_digest_view)" '
+        { settings: $eff, webhook: $webhook, defaults: $defaults, placeholders: $ph, samples: $samples, digest: $digest,
           state: { enabled: $eff.enabled, wired: $wired, plugin_active: $plugin, file: $fm, profile_mode: $profmode, drift: $drift,
-                   working: ($eff.enabled and $wired and $plugin and $webhook.configured) },
+                   working: ($eff.enabled and $wired and $plugin and $webhook.configured),
+                   # the file is DCS'"'"'s but older than the grouped messages: saving (even unchanged) writes the new layout
+                   layout: $layout, layout_outdated: ($fm == "dcs" and $layout < $want) },
           status: { last_test: ($status.last_test // null), last_apply: ($status.last_apply // null), delivery_errors: $errs,
                     note: "CrowdSec logs a failed delivery but not a successful one, so DCS can only show the problems the plugin reports and the result of the last test message." },
-          limits: { title: 200, description: 1500, footer: 200, fields: 8, group_threshold_max: 10 },
+          limits: { title: 200, description: 1500, footer: 200, fields: 8, group_threshold_max: 100, embeds_per_message: 10 },
           info: { unban: "CrowdSec cannot announce a lifted ban. Unbans made from DCS raise the crowdsec_unban event: add a rule for it on the Notifications page to hear about them." } }'
 }
 
@@ -1073,9 +1368,10 @@ handle_crowdsec_notify_preview() {
         sample="alert $alert_id"
     else
         [[ "$sample" =~ ^[a-z]{3,12}$ ]] && jq -e --arg s "$sample" 'has($s)' >/dev/null 2>&1 <<< "$_CS_NOTIFY_SAMPLES" || { _api_error 400 "sample must be one of: $(jq -r 'keys | join(", ")' <<< "$_CS_NOTIFY_SAMPLES")"; return; }
-        alert=$(jq -c --arg s "$sample" '.[$s]' <<< "$_CS_NOTIFY_SAMPLES")
+        alert=$(_cs_notify_sample "$sample")
     fi
-    _api_success "$(jq -nc --arg s "$sample" --argjson p "$(_cs_notify_render_payload "$eff" "$alert")" --argjson a "$alert" '{valid: true, sample: $s, payload: $p, alert: {id: $a.id, scenario: $a.scenario}}')"
+    _api_success "$(jq -nc --arg s "$sample" --argjson p "$(_cs_notify_render_payload "$eff" "$alert")" --argjson a "$alert" \
+        '{valid: true, sample: $s, payload: $p, alert: ($a | if type == "array" then {id: .[0].id, scenario: .[0].scenario, count: length} else {id: .id, scenario: .scenario, count: 1} end)}')"
 }
 
 # _cs_discord_post URL PAYLOAD — post to a Discord webhook; the address travels on curl's standard input, not its command line.
@@ -1123,9 +1419,9 @@ _cs_notify_test_core() {
     eff="$CS_OUT"
     url="$url_in"; [[ -n "$url" ]] || url=$(_cs_webhook_resolve "$(jq -r '.webhook.mode' <<< "$eff")")
     [[ -n "$url" ]] || { _cs_fail 400 "There is no Discord webhook to post to: add one first"; return 1; }
-    alert=$(jq -c --arg s "$sample" '.[$s]' <<< "$_CS_NOTIFY_SAMPLES")
+    alert=$(_cs_notify_sample "$sample")
     payload=$(_cs_notify_render_payload "$eff" "$alert")
-    if [[ "$inc" != yes ]]; then payload=$(jq -c 'del(.content) | .allowed_mentions = {parse: []} | .embeds[0].footer.text = ((.embeds[0].footer.text // "") + " · test message")' <<< "$payload"); fi
+    if [[ "$inc" != yes ]]; then payload=$(jq -c 'del(.content) | .allowed_mentions = {parse: []} | .embeds |= map(.footer.text = ((.footer.text // "") + " · test message"))' <<< "$payload"); fi
     if _cs_discord_post "$url" "$payload"; then ok=true; fi
     msg=$(_cs_discord_explain "$CS_HTTP_CODE" "$CS_HTTP_BODY")
     _cs_status_set last_test "$(jq -nc --argjson at "$(date +%s)" --argjson ok "$ok" --argjson c "${CS_HTTP_CODE:-0}" --arg m "$msg" --arg s "$sample" '{at: $at, ok: $ok, http: $c, message: $m, sample: $s}')"
@@ -1181,6 +1477,198 @@ handle_crowdsec_notifications_apply() {
 }
 
 # =============================================================================
+# The daily summary: the last 24 hours in one Discord message
+#
+# Once a day at CROWDSEC_DIGEST_HOUR (local time, 8 by default, off turns it
+# off) the API's minute clock (_crowdsec_digest_tick in api-server.sh) posts
+# what CrowdSec blocked: how many attempts from how many addresses, the top
+# addresses and attacks, and what happened to the bans. It goes to the webhook
+# of the CrowdSec alerts while those are on. digest.json remembers the day it
+# went out, so a restart or a second process never sends it twice.
+# =============================================================================
+
+CS_DIGEST_STATE="$CROWDSEC_STATE_DIR/digest.json"
+CS_DIGEST_DEFAULT_HOUR=8
+
+# _cs_digest_hour_of VALUE — the hour (0-23) a CROWDSEC_DIGEST_HOUR value stands for, "off", or nothing when it is not a value
+_cs_digest_hour_of() {
+    local h="${1//[[:space:]]/}"
+    if [[ -z "$h" || "${h,,}" == off ]]; then printf 'off'
+    elif [[ "$h" =~ ^[0-9]{1,2}$ ]] && (( 10#$h <= 23 )); then printf '%d' $(( 10#$h ))
+    fi
+}
+# the hour in force (unset = the default; a value that is no hour counts as off)
+_cs_digest_hour() {
+    local h
+    if [[ -z "${CROWDSEC_DIGEST_HOUR+x}" ]]; then printf '%d' "$CS_DIGEST_DEFAULT_HOUR"; return; fi
+    h=$(_cs_digest_hour_of "$CROWDSEC_DIGEST_HOUR"); printf '%s' "${h:-off}"
+}
+
+# The jq program: alerts (cscli alerts list --since 24h), active decisions (decision_rows), the hand-lifted count and the
+# community count → the Discord payload and the numbers behind it
+_CS_JQ_DIGEST='
+def commas: tostring | if test("^[0-9]+$") then (explode | reverse | [ range(0; length) as $i | (if $i > 0 and $i % 3 == 0 then [44] else [] end) + [.[$i]] ] | flatten | reverse | implode) else . end;
+def flag_emoji: ascii_upcase | explode | map(if . >= 65 and . <= 90 then [127397 + .] | implode else "" end) | join("");
+def plural($n; $one; $many): "\($n | commas) " + (if $n == 1 then $one else $many end);
+def item: (.scenario // "" | tostring) as $sc | ($sc | scen_label) as $lb
+  | ([$sc | match("(?i)cve-[0-9]{4}-[0-9]+")] | .[0].string // "") as $cve
+  | (if $cve != "" then ($cve | ascii_upcase) else ($sc | ltrimstr("crowdsecurity/")) end) as $sid
+  | if $sid != "" then $lb + " " + $sid else $lb end;
+(. // []) as $all
+| [ $all[] | select((.kind // "") != "cscli") ] as $det
+| [ $det[] | select((.simulated // false) | not) | {ip: ((.source.value // "") | tostring), cn: (.source.cn | cc), as_name: (.source.as_name // ""), n: ([(.events_count // 0), 1] | max), item: item, label: ((.scenario // "") | scen_label)} ] as $a
+| ($det | map(select(.simulated // false)) | length) as $simulated
+| ($a | map(.n) | add // 0) as $attempts
+| ($a | map(.ip) | unique | length) as $addresses
+| ($a | group_by(.ip) | map({ip: .[0].ip, cn: .[0].cn, as_name: .[0].as_name, n: (map(.n) | add), top: (group_by(.label) | map({l: .[0].label, n: (map(.n) | add)}) | sort_by(-.n) | .[0].l)}) | sort_by(-.n, .ip) | .[0:5]) as $top_ips
+| ($a | group_by(.item) | map({item: .[0].item, n: (map(.n) | add), ips: (map(.ip) | unique | length)}) | sort_by(-.n, .item) | .[0:5]) as $top_items
+| [ $all[] | (.decisions // [])[] | select((.simulated // false) | not) | select((.origin // "") != "CAPI" and ((.origin // "") | startswith("lists") | not)) ] as $decs
+# counted per address: CrowdSec makes a decision for every alert, so one scanner can carry fifty of them
+| ($decs | map(.value // "") | map(select(. != "")) | unique) as $new_vals
+| ($bans | map(select((.simulated | not) and .family != "community") | .value) | unique) as $active_vals
+| ($new_vals | length) as $new_bans
+| ([ $new_vals[] | . as $v | select(($active_vals | index($v)) == null) ] | length) as $ended
+| ($active_vals | length) as $in_force
+| { attempts: $attempts, addresses: $addresses, alerts: ($a | length), simulated: $simulated, new_bans: $new_bans, ended: $ended, lifted: $lifted, in_force: $in_force, community: $community,
+    top_addresses: $top_ips, top_attacks: $top_items } as $sum
+| { summary: $sum,
+    payload: ({ username: $s.identity.name }
+      + (if $s.identity.avatar_url != "" then {avatar_url: $s.identity.avatar_url} else {} end)
+      + { allowed_mentions: {parse: []},
+          embeds: [ { title: ("📊 Yesterday on " + $server),
+                      color: 2282478,
+                      description: ((if $attempts == 0 then "A quiet day: nothing was blocked."
+                                     else "**" + plural($attempts; "attempt"; "attempts") + "** blocked from **" + plural($addresses; "address"; "addresses") + "**" end)
+                                    + (if $simulated > 0 then "\n" + plural($simulated; "more alert"; "more alerts") + " seen in simulation (nothing banned)" else "" end)),
+                      fields: ( [ if ($top_ips | length) > 0 then {name: "Top addresses", inline: false,
+                                    value: ([ $top_ips[] | "`" + .ip + "`" + (if (.cn | length) == 2 then " " + (.cn | flag_emoji) + " " + .cn else "" end) + " · " + plural(.n; "attempt"; "attempts") + " · " + .top ] | join("\n"))} else empty end,
+                                  if ($top_items | length) > 0 then {name: "Top attacks", inline: false,
+                                    value: ([ $top_items[] | .item + " · " + plural(.n; "attempt"; "attempts") + (if .ips > 1 then " from " + plural(.ips; "address"; "addresses") else "" end) ] | join("\n"))} else empty end,
+                                  {name: "Bans", inline: false,
+                                   value: ("**\($new_bans | commas)** " + (if $new_bans == 1 then "address" else "addresses" end) + " banned · **\($ended | commas)** free again · **\($lifted | commas)** lifted by hand · **\($in_force | commas)** banned now"
+                                           + (if $community > 0 then "\nCommunity blocklist: " + plural($community; "address"; "addresses") else "" end))} ] | map(.value |= .[0:1024]) ),
+                      footer: {text: ("CrowdSec · " + $domain + " · the last 24 hours")},
+                      timestamp: ($now | todate) } ] }) }'
+
+# hand-lifted bans in the last 24 hours, from the audit log (DCS's own unbans: one line per unban, "(n)" or "bulk: n of m")
+_cs_digest_lifted() {
+    local f="${API_AUTH_DIR:-$BASE_DIR/.api-auth}/auth-audit.log" since
+    [[ -f "$f" ]] || { printf '0'; return; }
+    since=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || { printf '0'; return; }
+    awk -F' [|] ' -v s="$since" '$1 >= s && $3 ~ /^CROWDSEC_UNBAN *$/ {
+            d = $5; n = 1
+            if (match(d, /bulk: [0-9]+ of/)) { n = substr(d, RSTART + 6, RLENGTH - 9) + 0 }
+            else if (match(d, /\([0-9]+\)$/)) { n = substr(d, RSTART + 1, RLENGTH - 2) + 0 }
+            t += n } END { printf "%d", t + 0 }' "$f" 2>/dev/null || printf '0'
+}
+
+# _cs_digest_settings — the message identity and the webhook the summary uses: the Discord alert settings in force
+_cs_digest_settings() {
+    if [[ -s "$CS_NOTIFY_FILE" ]]; then _cs_notify_saved
+    else
+        local s="$_CS_NOTIFY_DEFAULTS"
+        [[ -z "$(_cs_webhook_resolve global)" && -n "$(_cs_webhook_resolve keep)" ]] && s=$(jq -c '.webhook.mode = "keep"' <<< "$s")
+        # without saved settings the alerts are on when the live profiles notify (the page shows the same)
+        _cs_live_file "$CS_PROFILES_PATH" | grep -q '^[[:space:]]*-[[:space:]]*http_default' || s=$(jq -c '.enabled = false' <<< "$s")
+        printf '%s' "$s"
+    fi
+}
+
+# _cs_digest_build SETTINGS — the payload and the numbers (JSON {summary, payload}); 1 when CrowdSec did not answer
+_cs_digest_build() {
+    local s="$1" raw rows domain server
+    raw=$(_cs_alerts_raw 24h) || return 1
+    rows=$(_cs_decision_rows 2>/dev/null); [[ "$rows" == \[* ]] || rows='[]'
+    domain=$(_find_traefik_domain 2>/dev/null); [[ -n "$domain" ]] || domain="${PROXY_DOMAIN:-DCS}"
+    server="${SERVER_NAME:-}"; [[ -n "$server" ]] || server=$(hostname 2>/dev/null || echo DCS)
+    jq -c --argjson s "$s" --slurpfile bans_f <(printf '%s' "$rows") --argjson lifted "$(_cs_digest_lifted)" --argjson community "$(_cs_community_count 2>/dev/null || echo 0)" \
+        --arg domain "${CS_RENDER_DOMAIN:-$domain}" --arg server "${CS_RENDER_SERVER:-$server}" --argjson now "${CS_RENDER_NOW:-$(date +%s)}" \
+        "$_CS_JQ_DEFS"' ($bans_f[0] // []) as $bans | '"$_CS_JQ_DIGEST" <<< "$raw"
+}
+
+# _cs_digest_record KIND JSON — remember an outcome (kind: scheduled = the day's run, manual = Send now)
+_cs_digest_record() {
+    local cur; cur=$(_cs_json_file "$CS_DIGEST_STATE" '{}')
+    jq -c --arg k "$1" --argjson v "$2" '.[$k] = $v | .last = ($v + {kind: $k})' <<< "$cur" | _cs_json_save "$CS_DIGEST_STATE"
+}
+
+# _cs_digest_send KIND — build and post the summary. 0 = posted (delivered or not: CS_RESULT says which), 1 = not posted (CS_ERR_CODE / CS_ERR_BODY)
+_cs_digest_send() {
+    local kind="$1" s url built payload ok=false msg
+    CS_NAME=$(_crowdsec_container) || CS_NAME=""
+    [[ -n "$CS_NAME" ]] || { _cs_fail 404 "CrowdSec is not running"; return 1; }
+    s=$(_cs_digest_settings)
+    url=$(_cs_webhook_resolve "$(jq -r '.webhook.mode' <<< "$s")")
+    [[ -n "$url" ]] || { _cs_fail 400 "There is no Discord webhook for CrowdSec: set one on the Discord tab"; return 1; }
+    built=$(_cs_digest_build "$s") || { _cs_fail 502 "CrowdSec did not answer: $(_cs_errline)"; return 1; }
+    payload=$(jq -c '.payload' <<< "$built")
+    if _cs_discord_post "$url" "$payload"; then ok=true; fi
+    msg=$(_cs_discord_explain "$CS_HTTP_CODE" "$CS_HTTP_BODY")
+    CS_RESULT=$(jq -nc --argjson ok "$ok" --argjson c "${CS_HTTP_CODE:-0}" --arg m "$msg" --argjson at "$(date +%s)" --arg masked "$(_cs_webhook_mask "$url")" --argjson b "$built" \
+        '{success: $ok, delivered: $ok, http: $c, message: $m, at: $at, webhook: $masked, summary: $b.summary, payload: $b.payload}')
+    _cs_digest_record "$kind" "$(jq -c --arg d "$(date +%F)" '{date: $d, at, ok: .delivered, http, message, attempts: .summary.attempts, addresses: .summary.addresses}' <<< "$CS_RESULT")"
+    return 0
+}
+
+# The day's run (the minute clock calls it in the background once the hour has come): sends once, tries again twice
+# ten minutes apart when Discord did not take it, and notes a day it had nothing to send to
+_cs_digest_scheduled() {
+    local cur tries s
+    cur=$(_cs_json_file "$CS_DIGEST_STATE" '{}')
+    tries=$(jq -r --arg d "$(date +%F)" 'if (.scheduled.date // "") == $d then (.scheduled.tries // 0) else 0 end' <<< "$cur")
+    # claimed first: the next minute's tick sees a run in progress and waits
+    _cs_digest_record scheduled "$(jq -nc --arg d "$(date +%F)" --argjson at "$(date +%s)" --argjson t "$(( tries + 1 ))" '{date: $d, at: $at, ok: false, running: true, tries: $t}')"
+    CS_NAME=$(_crowdsec_container) || CS_NAME=""
+    s=""; [[ -n "$CS_NAME" ]] && s=$(_cs_digest_settings)
+    if [[ -z "$CS_NAME" || "$(jq -r '.enabled' <<< "$s")" != true ]]; then
+        _cs_digest_record scheduled "$(jq -nc --arg d "$(date +%F)" --argjson at "$(date +%s)" --arg why "$([[ -z "$CS_NAME" ]] && echo 'CrowdSec is not running' || echo 'the Discord alerts are off')" \
+            '{date: $d, at: $at, ok: false, skipped: true, message: ("Not sent: " + $why)}')"
+        return 0
+    fi
+    if _cs_digest_send scheduled; then
+        jq -c --argjson t "$(( tries + 1 ))" '.scheduled.tries = $t' <<< "$(_cs_json_file "$CS_DIGEST_STATE" '{}')" | _cs_json_save "$CS_DIGEST_STATE"
+    else
+        _cs_digest_record scheduled "$(jq -nc --arg d "$(date +%F)" --argjson at "$(date +%s)" --argjson t "$(( tries + 1 ))" --arg m "$(jq -r '.message // "not sent"' <<< "$CS_ERR_BODY" 2>/dev/null)" \
+            '{date: $d, at: $at, ok: false, tries: $t, message: $m}')"
+    fi
+    return 0
+}
+
+# The summary as the Discord tab shows it
+_cs_digest_view() {
+    local hour; hour=$(_cs_digest_hour)
+    jq -nc --arg h "$hour" --argjson def "$CS_DIGEST_DEFAULT_HOUR" --argjson st "$(_cs_json_file "$CS_DIGEST_STATE" '{}')" --arg today "$(date +%F)" --argjson nowh "$(( 10#$(date +%H) ))" --arg tz "$(date +%Z)" '
+        { enabled: ($h != "off"), hour: (if $h == "off" then null else ($h | tonumber) end), default_hour: $def, timezone: $tz, setting: "CROWDSEC_DIGEST_HOUR",
+          sent_today: (($st.scheduled.date // "") == $today and ($st.scheduled.ok // false)),
+          next: (if $h == "off" then null elif ($st.scheduled.date // "") == $today then "tomorrow" elif $nowh >= ($h | tonumber) then "soon" else "today" end),
+          scheduled: ($st.scheduled // null), last: ($st.last // null),
+          note: "One message a day with the last 24 hours, to the webhook of the CrowdSec alerts, while those are on." }'
+}
+
+# POST /crowdsec/notifications/digest — Send the daily summary (the last 24 hours) to Discord now, whatever the hour; answers what Discord said and the numbers
+handle_crowdsec_digest_send() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    if _cs_digest_send manual; then
+        _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_DIGEST" "${AUTH_USERNAME:-}" "sent now: HTTP $CS_HTTP_CODE"
+        _api_success "$(jq -c --argjson d "$(_cs_digest_view)" '. + {digest: $d}' <<< "$CS_RESULT")"
+    else _api_response "$CS_ERR_CODE" "$CS_ERR_BODY"; fi
+}
+
+# PUT /crowdsec/notifications/digest — When the daily summary goes out: {hour: 0-23} or {hour: "off"} (CROWDSEC_DIGEST_HOUR in .env, local time)
+handle_crowdsec_digest_set() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local body="$1" raw h
+    [[ "$body" == \{* ]] && jq -e 'type == "object" and has("hour")' >/dev/null 2>&1 <<< "$body" || { _api_error 400 "Send {\"hour\": 8} (0-23) or {\"hour\": \"off\"}"; return; }
+    raw=$(jq -r '.hour | if . == null or . == false then "off" else tostring end' <<< "$body")
+    h=$(_cs_digest_hour_of "$raw")
+    [[ -n "$h" && "$raw" =~ ^([0-9]{1,2}|off|OFF|Off)$ ]] || { _api_error 400 "hour must be a whole number from 0 to 23, or off"; return; }
+    _envfile_set "$BASE_DIR/.env" CROWDSEC_DIGEST_HOUR "$h" bash || { _api_error 500 "Could not write .env"; return; }
+    export CROWDSEC_DIGEST_HOUR="$h"
+    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_DIGEST" "${AUTH_USERNAME:-}" "hour: $h"
+    _api_success "$(jq -c '. + {success: true}' <<< "$(_cs_digest_view)")"
+}
+
+# =============================================================================
 # The Traefik bouncer plugin's own settings (the middleware file)
 #
 # DCS wrote crowdsec-bouncer.yml when it registered the bouncer. The page edits a safe subset of the plugin's options in place:
@@ -1192,7 +1680,7 @@ handle_crowdsec_notifications_apply() {
 
 CS_PLUGIN_STATE="$CROWDSEC_STATE_DIR/plugin.json"
 CS_PLUGIN_LOCK="$CROWDSEC_STATE_DIR/plugin.lock"
-_CS_PLUGIN_DEFAULTS='{"mode":"live","update_interval":60,"default_decision_seconds":60,"http_timeout":10,"remediation_status_code":403,"log_level":"INFO","trust_home":true,"client_trusted_ips":[],"forwarded_headers_trusted_ips":[]}'
+_CS_PLUGIN_DEFAULTS='{"mode":"live","update_interval":60,"default_decision_seconds":10,"http_timeout":10,"remediation_status_code":403,"log_level":"INFO","trust_home":true,"client_trusted_ips":[],"forwarded_headers_trusted_ips":[]}'
 # the proxies in front of Traefik that the shipped middleware believes (Cloudflare's published ranges)
 _CS_PLUGIN_CDN='["173.245.48.0/20","103.21.244.0/22","103.22.200.0/22","103.31.4.0/22","141.101.64.0/18","108.162.192.0/18","190.93.240.0/20","188.114.96.0/20","197.234.240.0/22","198.41.128.0/17","162.158.0.0/15","104.16.0.0/13","104.24.0.0/14","172.64.0.0/13","131.0.72.0/22","2400:cb00::/32","2606:4700::/32","2803:f800::/32","2405:b500::/32","2405:8100::/32","2a06:98c0::/29","2c0f:f248::/32"]'
 _CS_PLUGIN_LIMITS='{"update_interval":[10,3600],"default_decision_seconds":[10,3600],"http_timeout":[1,60],"remediation_status_code":[400,599],"list_max":64,"forwarded_max":128}'
@@ -1319,7 +1807,7 @@ _cs_plugin_view() {
           help: {
             mode: "live: Traefik asks CrowdSec about a visitor the first time it sees one and remembers the answer for a short while. stream: Traefik downloads the whole ban list every few seconds and decides on its own. Live is simplest; stream saves a round trip per new visitor and keeps working for a while if CrowdSec is down.",
             update_interval: "Stream mode only: how often Traefik downloads the ban list. A new ban reaches the door this many seconds later.",
-            default_decision_seconds: "Live mode only: how long Traefik remembers an answer about a visitor. A shorter time means a lifted ban is noticed sooner, at the price of more questions.",
+            default_decision_seconds: "Live mode only: how long a clean verdict is cached. Shorter means a new ban bites faster (and a lifted one is noticed sooner), at the price of one more question to CrowdSec per visitor and window. DCS sets 10 seconds; installs from before keep what they have.",
             http_timeout: "How long Traefik waits for CrowdSec before it gives up on one question.",
             remediation_status_code: "The HTTP status a banned visitor gets. 403 (forbidden) is the usual one; 429 tells well-behaved clients to slow down.",
             log_level: "How much the plugin writes in Traefik'"'"'s log.",

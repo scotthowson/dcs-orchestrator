@@ -9,7 +9,7 @@ http:
           enabled: "true"
           logLevel: INFO
           updateIntervalSeconds: 60
-          defaultDecisionSeconds: 60
+          defaultDecisionSeconds: 10
           httpTimeoutSeconds: 10
           crowdsecMode: live
           crowdsecAppsecEnabled: "false"

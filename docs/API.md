@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `427` in total.
+Every endpoint below is `429` in total.
 
 ## Access levels
 
@@ -288,6 +288,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/crowdsec/notifications/preview` | user | Render the message for a sample alert (probe, ssh, exploit, manual, simulated) or a real one (alert_id) with the settings you are editing: {settings?, sample?, alert_id?} |
 | POST | `/crowdsec/notifications/test` | admin | Post a real sample message to Discord and say what Discord answered: {sample?, settings?, webhook_url?, include_mention?}; a test never pings anyone unless include_mention is true |
 | POST | `/crowdsec/notifications/reset` | admin | Back to the message CrowdSec ships with (title, text, fields, colours, delivery); the webhook and the on/off switch stay |
+| POST | `/crowdsec/notifications/digest` | admin | Send the daily summary (the last 24 hours) to Discord now, whatever the hour; answers what Discord said and the numbers |
 | POST | `/crowdsec/decisions` | admin | Ban an address or a network: {value, duration (90m, 4h, 7d …) or permanent: true, reason}; refuses your own address, this server, the home address, private and far too wide networks |
 | POST | `/crowdsec/decisions/delete` | admin | Lift several bans at once: {ids: [decision ids], values: [addresses or networks]} (at most 200) |
 | POST | `/crowdsec/decisions/import` | admin | Ban many addresses at once: {format: auto\|csv\|json\|values, content, duration?, reason?, permanent?}; every entry is checked like a single ban, refused ones are listed |
@@ -306,6 +307,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/crowdsec/simulation` | admin | {scenario, enabled}: make one scenario alert-only (enabled true) or ban again; {global: true, enabled} switches the whole engine |
 | PUT | `/crowdsec/settings` | admin | Change the ban profile: {profile: {duration, range_duration, escalate: {enabled, max}, overrides: [{pattern, duration}]}, manual_duration, take_over}; validates with CrowdSec, restarts it and rolls back on failure |
 | PUT | `/crowdsec/notifications` | admin | Save and apply the Discord alert settings: {settings: {…any part…}, webhook_url?: "https://discord.com/api/webhooks/…", clear_custom_webhook?: true}; the URL is stored as a secret and never sent back |
+| PUT | `/crowdsec/notifications/digest` | admin | When the daily summary goes out: {hour: 0-23} or {hour: "off"} (CROWDSEC_DIGEST_HOUR in .env, local time) |
 | PUT | `/crowdsec/plugin` | admin | Change the plugin's settings: {settings: {mode, update_interval, default_decision_seconds, http_timeout, remediation_status_code, log_level, trust_home, client_trusted_ips, forwarded_headers_trusted_ips}} (any part); written to Traefik's middleware file atomically, the old one is kept, Traefik reloads by itself |
 | DELETE | `/crowdsec/decisions/{value}` | admin | Lift the ban on one address or network (the value may be an IP or a CIDR range such as 192.0.2.0/24) |
 | DELETE | `/crowdsec/allowlist/{value}` | admin | Take an entry off the allowlist (the home address DCS keeps in sync cannot be removed here) |

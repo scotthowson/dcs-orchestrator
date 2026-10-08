@@ -35,6 +35,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`POST /crowdsec/community/check`** (admin): the one explicit look at the central service. It runs
   `cscli capi status` (and, when that login was accepted, `cscli console status` for the enrolment), at most once per
   10 minutes (429 with `retry_after` otherwise), records the result and answers with the community status.
+### Changed
+
+- **CrowdSec's Discord alerts: one block per address, not one per alert.** A scanner that fired 50 alerts in 7 seconds
+  (one address, several virtual-patching rules) used to arrive as five messages of ten embeds. Each batch CrowdSec hands
+  over is now one message with one embed per source address: `🛡️ 194.26.135.7 · 🇷🇺 RU · Petersburg Internet Network ltd.`,
+  `50 attempts in 7s → banned 4 hours`, every attack it tried with how often, the most frequent first
+  (`Exploit attempt CVE-2025-29927 ×30 · Exploit attempt CVE-2024-4577 ×12 · …`, six, then "+k more"), the hosts it aimed
+  at, its first and last request path, and the CTI / AbuseIPDB links; the colour is the most severe attack's. More than 10
+  addresses make 9 embeds and a tenth that lists the rest, and Discord's 6000 characters are shared out between the
+  embeds and their parts (cut by characters). The batching default is now 30 s / 50 alerts (was 5 s / 10). The new
+  setting `delivery.group_by` (`address`, default, or `alert` for the old layout) and placeholders `{attempts}`, `{span}`,
+  `{alerts}`, `{scenarios}`, `{ban}`, `{ban_tag}`, `{flag_emoji}`, `{source_tag}`, `{targets}`, `{targets_line}`,
+  `{last_path}`, `{last_path_code}`, `{requests_line}`; with grouping every placeholder describes the address's block.
+  The Go template and DCS's own preview were checked against a real CrowdSec 1.8.1 on crafted batches (one address × 50
+  alerts, 3 addresses, 12 addresses, both layouts, an oversized unicode message): the payloads are pinned in
+  `tests/fixtures/crowdsec-discord/`. Two new preview samples: `burst` (one address, 47 alerts) and `crowd`.
+  Scenarios the label table does not know get the same guesses as the page (an unknown `…CVE-…` scenario such as
+  `vpatch-CVE-2025-29927` is an exploit), so the preview and the real message agree there too.
+- **Settings saved by an older DCS move to the new defaults** when they were untouched (the old shipped message, 5 s / 10
+  alerts); a message or a delivery someone changed stays. A notification file written by an older DCS is flagged
+  (`state.layout_outdated` of `GET /crowdsec/notifications`): saving, even without a change, writes the new layout and keeps
+  the webhook. The shipped `notifications-discord.yaml` is now the page's default message (a smoke check keeps them equal);
+  the deploy also fills in the server's name.
+- **Traefik bouncer: a clean verdict is cached 10 s, not 60 s** (`defaultDecisionSeconds` in the shipped middleware and
+  the page's default), so a new ban bites within seconds. Existing installs keep the value their middleware file has;
+  change it on the CrowdSec page's bouncer settings.
+
+### Added
+
+- **A daily CrowdSec summary on Discord.** Once a day at `CROWDSEC_DIGEST_HOUR` (local time, default 8, `off` turns it
+  off) one message sums up the last 24 hours: attempts and addresses, the top five addresses with their countries, the top
+  five attacks, and the bans (addresses banned, already free again, lifted by hand, banned now, community blocklist). It
+  goes to the webhook of the CrowdSec alerts while they are on, from the API's minute clock, once a day
+  (`.data/crowdsec/digest.json`; when Discord refuses it, two more tries ten minutes apart). `POST
+  /crowdsec/notifications/digest` sends it now, `PUT /crowdsec/notifications/digest` `{"hour": 8 | "off"}` sets the hour,
+  and `GET /crowdsec/notifications` carries `digest` (hour, the day's outcome, the last send).
+
+### Notes
+
+- CrowdSec flushes a batch as soon as the wait has passed since its last message: after a quiet spell the first alert of
+  a burst still goes out on its own within a second, and the rest of the burst follows in one message after the wait
+  (seen with CrowdSec 1.8.1). DCS cannot change that from the template.
 
 ## [4.0.39] - 2026-10-08
 

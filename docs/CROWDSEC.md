@@ -150,11 +150,28 @@ Every option of the Discord message is on the **Discord** tab. Nothing is hard-c
 | **Mention** | nobody | a role, a user, `@here` or `@everyone`, plus extra text; a *test message never pings anyone* unless you tick it |
 | **Which events notify** | new bans and simulated bans | and, optionally, detections that did not lead to a ban |
 | **Filters** | none | minimum number of events; only these scenarios; ignore these scenarios |
-| **Delivery** | wait 5 s, group at 10, retry 3×, 10 s timeout | how alerts are batched and retried |
+| **Delivery** | one block per address, wait 30 s, 50 alerts a message, retry 3×, 10 s timeout | how alerts are batched and retried (see *Grouping* below) |
 | **Message** | see below | title, description, footer, link, timestamp, and up to 8 embed fields (name, value, inline) |
+| **Daily summary** | 08:00 | the last 24 hours in one message (see below); `CROWDSEC_DIGEST_HOUR` |
+
+**Grouping.** CrowdSec hands its alerts over in batches: what arrives within the wait (30 s), or at once when 50 have piled up. Each batch is **one Discord message
+with one block per source address**: a scanner that fires 50 alerts in a few seconds is one block, not 50. The block says where it came from
+(`🛡️ 194.26.135.7 · 🇷🇺 RU · Petersburg Internet Network ltd.`), how many attempts over how long and the ban (`50 attempts in 7s → banned 4 hours`),
+every attack it tried with how often, the most frequent first (`Exploit attempt CVE-2025-29927 ×41 · Exploit attempt CVE-2024-4577 ×4 · Attack blocked appsec-vpatch ×2`,
+six, then "+k more"), the hosts it aimed at and its first and last request path, and the CTI / AbuseIPDB links. The colour is the most severe attack's.
+Discord takes 10 blocks and 6000 characters a message: more than 10 addresses make 9 blocks and a tenth that lists the rest, and every part is cut to fit.
+*Group by alert* gives the old one-block-per-alert layout. Note CrowdSec's own timing: after a quiet spell the **first** alert of a burst goes out within a second
+(CrowdSec flushes as soon as the wait has passed since its last message), the rest of the burst follows in one message after the wait.
+Settings saved by an older DCS keep working: an untouched message and delivery move to these defaults; a message you wrote stays yours. A notification file
+written by an older DCS is pointed out on the tab: saving (even without a change) writes the new layout and keeps the webhook.
+
+**Daily summary.** Once a day at `CROWDSEC_DIGEST_HOUR` (this server's local time, default 8; `off` turns it off; the Discord tab sets it) one message sums up
+the last 24 hours: attempts and addresses, the top five addresses with their countries, the top five attacks, and the bans (addresses banned, already free
+again, lifted by hand, banned now, plus the community blocklist). It goes to the webhook of the alerts, only while they are on, and once a day: a restart does
+not send it twice (`.data/crowdsec/digest.json`); when Discord refuses it, it is tried twice more, ten minutes apart. **Send now** on the tab posts it at once.
 
 The message is text with placeholders like `{ip}`, `{country_tag}` or `{label}`; the editor has a picker that inserts them, a **live preview** that shows the embed as
-Discord will draw it (rendered by the server with the same code that sends the real message, so what you see is what arrives), a sample selector (web probing,
+Discord will draw it (rendered by the server with the same code that sends the real message, so what you see is what arrives), a sample selector (a burst from one address, three addresses at once, web probing,
 SSH, exploit, manual ban, simulation), and **Send test message**, which really posts to the webhook and reports what Discord answered. The last test, the last
 save and recent delivery errors are shown. **Reset to the shipped message** puts the default back and keeps the webhook and the on/off switch.
 
@@ -165,9 +182,16 @@ save and recent delivery errors are shown. **Reset to the shipped message** puts
 | `{as_number}` `{as_name}` `{as_tag}` | autonomous system number, who runs the network, " · Name" (empty when unknown) |
 | `{scenario}` `{scenario_short}` `{label}` | full scenario name, without the `crowdsecurity/` prefix, and the plain-language attack type |
 | `{events}` `{alert_id}` `{message}` `{sim_tag}` | number of log lines, CrowdSec's alert number and one-line summary, " (simulation)" |
+| `{attempts}` `{span}` `{alerts}` `{scenarios}` | "50 attempts in 7s" (or "one request"), the time from first to last request, the number of alerts, every attack with its count |
+| `{ban}` `{ban_tag}` | the longest decision in words ("banned 10 years", "captcha for 4 hours", "would be banned 4 hours (simulation)"), " → **…**" |
+| `{flag_emoji}` `{source_tag}` | the flag as an emoji (works in titles), " · 🇳🇱 NL · IP Volume inc" |
+| `{targets}` `{targets_line}` `{last_path}` `{last_path_code}` `{requests_line}` | all hosts attacked (three, then "and k more"), the same as a line of its own, the last path, a "First … · last …" line |
 | `{decision}` `{duration}` `{for_duration}` | ban, how long, " for 4h" |
 | `{origin}` `{origin_tag}` | where the decision came from (detection or manual) |
 | `{target}` `{target_tag}` `{path}` `{path_code}` `{user_agent}` | the site attacked, the first request's path and user agent |
+
+With grouping by address every placeholder describes the address's block: `{events}` and `{attempts}` add up its alerts, `{label}` and `{scenario}` are the attack it
+tried most, the decision is the longest one.
 | `{machine}` `{machine_tag}` `{domain}` `{server}` | the engine, your domain, this DCS server's name |
 | `{time}` | Discord's live "x minutes ago" stamp |
 | `{cti_url}` `{abuseipdb_url}` | the address on CrowdSec CTI and on AbuseIPDB |
@@ -194,7 +218,7 @@ so registering the bouncer again or a re-deploy keeps them) - Traefik reloads th
 | --- | --- | --- |
 | **Mode** | live | *live*: Traefik asks CrowdSec about a visitor the first time it sees one and remembers the answer. *stream*: Traefik downloads the whole ban list every few seconds and decides on its own (a new ban reaches the door that many seconds later, and it keeps working for a while if CrowdSec is down) |
 | **Update interval** | 60 s (10 s to 1 h) | stream only: how often the ban list is downloaded |
-| **Remember an answer for** | 60 s (10 s to 1 h) | live only: how long an answer about a visitor is kept; shorter means a lifted ban is noticed sooner |
+| **Remember an answer for** | 10 s (10 s to 1 h) | live only: how long a clean verdict is cached; shorter means a new ban bites faster (and a lifted one is noticed sooner). Installs from before keep what they have (60 s then) |
 | **Timeout** | 10 s (1 to 60 s) | how long Traefik waits for CrowdSec before it gives up on one question |
 | **Status a banned visitor gets** | 403 (400 to 599) | 403 forbidden is the usual one; 429 tells well-behaved clients to slow down |
 | **Log level** | INFO | how much the plugin writes in Traefik's log |
@@ -324,6 +348,7 @@ Viewers may `GET` and may draw the Discord preview (it only renders, it never se
 | `GET /routes` | every route now says `crowdsec`: `protected`, `bypass` or `off` (CrowdSec is not set up on the proxy) |
 | `GET /crowdsec/simulation` · `POST` | alert-only scenarios |
 | `GET /crowdsec/notifications` · `PUT` · `POST …/preview` · `POST …/test` · `POST …/reset` | the Discord editor |
+| `POST /crowdsec/notifications/digest` · `PUT …/digest` | send the daily summary now; its hour (`{"hour": 8}` or `"off"`) |
 | `GET /crowdsec/hub` · `POST …/update` · `…/upgrade` · `…/install` · `…/remove` | the hub |
 | `GET /crowdsec/logs` · `GET /crowdsec/community` · `POST …/community/check` · `POST …/community/register` · `POST /crowdsec/console/enroll` · `POST /crowdsec/service` | log, community (read locally; check is the one login, every 10 min at most), start/restart/reload |
 
