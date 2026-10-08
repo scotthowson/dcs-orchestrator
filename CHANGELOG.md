@@ -28,6 +28,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the newest pull that is not stale, its type, version and address those of the newest active connection, and the
   children are no rows of their own (CrowdSec refuses to delete them by themselves anyway). "Never pulled" only shows
   when neither the bouncer nor a recent connection ever pulled.
+- **"Register again" no longer breaks a Traefik that uses its own copy of the bouncer middleware.** With both the
+  person's `crowdsec-bouncer` (in `TraefikRoutes.yml`, the one Traefik uses) and DCS's `crowdsec-bouncer.yml` (which
+  Traefik skips as "already configured"), registering again deleted the bouncer whose key Traefik used and wrote the
+  new key only into the ignored file: the plugin failed open with no sign on the page. The new key is now written into
+  every file that defines `crowdsec-bouncer` first (the `crowdsecLapiKey:` value replaced in place, its quoting and the
+  rest of the file kept, a timestamped `.dcs-bak` copy beside it), and only then is the bouncer made again with that
+  key. A definition DCS cannot edit (no write access, a key file instead of a key line) stops it before anything
+  changes, and the answer says why. The status names the situation as an information row: "Traefik uses the copy in
+  TraefikRoutes.yml; DCS's file is ignored", with the file to delete to tidy up, never as a bouncer that has not pulled.
+- **A credentials backup is never removed by a later failed registration** that started in the same second.
 
 ### Added
 

@@ -5999,7 +5999,7 @@ cst_community_register() {
     cst_call admin POST /crowdsec/community/register
     cst_is "community/register" 200
     cst_j "community/register" '.registered' true '.restarted' true '.healthy' true '.community.capi.reachable' true '.community.capi.forbidden' null '.community.needs_register' false \
-        '.message | test("accepts the new login")' true '.console_note | test("enrol it again")' true '.backup | test("^/etc/crowdsec/online_api_credentials[.]yaml[.][0-9]{8}T[0-9]{6}Z[.]bak$")' true
+        '.message | test("accepts the new login")' true '.console_note | test("enrol it again")' true '.backup | test("^/etc/crowdsec/online_api_credentials[.]yaml[.][0-9]{8}T[0-9]{6}Z(-[0-9]+)?[.]bak$")' true
     bak="$CST/fake/rootfs$(jq -r '.backup' <<< "$CST_BODY")"
     login1=$(grep '^login:' "$creds")
     check "community/register: CrowdSec has a new login" yes "$([[ -n "$login1" && "$login1" != "$login0" ]] && echo yes || echo no)"
@@ -7115,6 +7115,49 @@ cst_plugin_duplicate() {
     cst_is "duplicate: registering with no other definition" 200
     check "duplicate: …DCS writes its file as before" yes "$([[ -e "$mwf" ]] && echo yes || echo no)"
     check "duplicate: …and its bouncer" 1 "$(cst_cs bouncers list -o json | jq '[.[] | select(.name == "dcs-traefik-bouncer")] | length')"
+    cst_plugin_both
+}
+
+# ---- both definitions (the real server): the person's copy in TraefikRoutes.yml is the one Traefik uses, DCS's is skipped. Register again must not
+# leave Traefik with a key CrowdSec no longer knows ---------------------------------------------------------------------------------------------------------
+cst_bouncer_key() { cst_mock_dump | jq -r --arg n "$1" '.cs.bouncers[] | select(.name == $n) | .key'; }      # the key CrowdSec holds for a bouncer
+cst_mock_dump() { FAKE_CS_DIR="$CST/fake" python3 "$CST_MOCK_RUN" --mock-dump 2>/dev/null; }
+cst_plugin_both() {
+    local trf mwf k0 k1 bak n
+    trf="$(cst_tr)/TraefikRoutes.yml"; mwf=$(cst_mwf)
+    cst_plugin_world
+    k0=$(cst_bouncer_key dcs-traefik-bouncer)
+    # the person's own definition carries the key of DCS's bouncer (they copied it), and another middleware with a key of its own
+    printf 'http:\n  middlewares:\n    other-plugin:\n      plugin:\n        x:\n          crowdsecLapiKey: "not-this-one"\n    crowdsec-bouncer:\n      plugin:\n        crowdsec-bouncer-traefik-plugin:\n          enabled: "true"\n          crowdsecLapiKey: "%s"  # pasted by hand\n          crowdsecLapiHost: CrowdSec:8080\n  routers: {}\n' "$k0" > "$trf"
+    chmod 640 "$trf"
+    cst_mock --mock-set bouncer_idle=dcs-traefik-bouncer "bouncer_child=dcs-traefik-bouncer@172.19.0.7,Crowdsec-Bouncer-Traefik-Plugin,30"
+    cst_uncache; cst_call admin GET /crowdsec/status
+    cst_j "both copies: the row says which copy Traefik uses" '.issues | map(select(.code == "bouncer_duplicate"))[0].title' "Traefik uses the copy in TraefikRoutes.yml; DCS's file is ignored" \
+        '.issues | map(select(.code == "bouncer_duplicate"))[0].severity' info '.issues | map(select(.code == "bouncer_duplicate"))[0].cleanup.file' networking-security/crowdsec-bouncer.yml
+    cst_j "both copies: …and it is never taken for a bouncer that has not pulled" '.issues | map(.code) | index("bouncer_idle")' null '.bouncer.last_pull != null' true \
+        '.issues | map(select(.severity == "warning")) | length' 0
+    cst_call admin POST /crowdsec/bouncers/register-traefik
+    cst_is "both copies: register again" 200
+    k1=$(cst_bouncer_key dcs-traefik-bouncer)
+    check "both copies: …CrowdSec has a new key" yes "$([[ -n "$k1" && "$k1" != "$k0" ]] && echo yes || echo no)"
+    check "both copies: …the copy Traefik uses has it, quoted as before, the note kept" "          crowdsecLapiKey: \"$k1\"" "$(grep -F "$k1" "$trf")"
+    check "both copies: …DCS's copy has it too" 1 "$(grep -cF "crowdsecLapiKey: $k1" "$mwf")"
+    check "both copies: …the other middleware's key is untouched" 1 "$(grep -c 'crowdsecLapiKey: "not-this-one"' "$trf")"
+    bak=$(find "$(cst_tr)" -maxdepth 1 -name 'TraefikRoutes.yml.*.dcs-bak' | head -n 1)
+    check "both copies: …the previous file is kept beside it, as private as it was" "1 640" "$(grep -cF "$k0" "$bak" 2>/dev/null) $(stat -c %a "$bak" 2>/dev/null)"
+    check "both copies: …Traefik never reads the backup (not a .yml)" "" "$(find "$(cst_tr)" -name '*.dcs-bak' -name '*.yml')"
+    check "both copies: …the file keeps its mode" 640 "$(stat -c %a "$trf")"
+    cst_t "both copies: …the answer says where the key went" '.message | test("TraefikRoutes.yml")'
+    # -- a definition DCS cannot put a key into (a key file): nothing changes, the bouncer whose key Traefik has stays
+    rm -f "$bak"
+    printf 'http:\n  middlewares:\n    crowdsec-bouncer:\n      plugin:\n        crowdsec-bouncer-traefik-plugin:\n          crowdsecLapiKeyFile: /run/secrets/bouncer-key\n' > "$trf"
+    n=$(md5sum "$trf" "$mwf")
+    cst_call admin POST /crowdsec/bouncers/register-traefik
+    cst_is "both copies: a definition without a key line is not touched" 502
+    cst_t "both copies: …it says why and that the bouncer was kept" '(.message | test("TraefikRoutes.yml")) and (.message | test("kept"))'
+    check "both copies: …CrowdSec still has the same key" "$k1" "$(cst_bouncer_key dcs-traefik-bouncer)"
+    check "both copies: …and the files are as they were, without a backup" "$n|0" "$(md5sum "$trf" "$mwf")|$(find "$(cst_tr)" -maxdepth 1 -name '*.dcs-bak' | wc -l | tr -d ' ')"
+    rm -f "$trf"
 }
 
 cst_part_plugin() {

@@ -818,9 +818,11 @@ _cs_status_core() {
                     fix: {id: "register_bouncer", label: "Register again", kind: "api", method: "POST", path: "/crowdsec/bouncers/register-traefik", body: null, primary: false}}] else [] end)
               + (if $b.registered and $b.last_pull == null and $tr.present then [{code: "bouncer_idle", severity: "info", title: "Traefik has not asked the bouncer yet",
                     detail: "The bouncer is registered but has never pulled a decision. It starts pulling with the first request that goes through the crowdsec-bouncer middleware.", fix: null}] else [] end)
-              + (if $tr.present and $enf.middleware_present and ($enf.own_middleware // false) then [{code: "bouncer_duplicate", severity: "info", title: "The bouncer middleware is defined twice",
-                    detail: ("Traefik reads crowdsec-bouncer from " + ($enf.defined_elsewhere | join(", ")) + " and skips the copy DCS wrote (" + ($enf.middleware_file | split("/") | .[-2:] | join("/")) + "), so the bouncer DCS registered (" + $d.bouncer.name + ") is not the one in use"
-                      + (if $b.pulled_by then ": Traefik asks CrowdSec as " + $b.pulled_by else "" end) + ". Protection is not affected. Delete DCS'"'"'s copy and its bouncer to tidy up, or keep them as a spare."), fix: null}] else [] end)
+              + (if $tr.present and $enf.middleware_present and ($enf.own_middleware // false) then [{code: "bouncer_duplicate", severity: "info",
+                    title: ("Traefik uses the copy in " + ($enf.defined_elsewhere | join(", ")) + "; DCS'"'"'s file is ignored"),
+                    detail: ("crowdsec-bouncer is defined in " + ($enf.defined_elsewhere | join(", ")) + " and in DCS'"'"'s file (" + ($enf.middleware_file | split("/") | .[-2:] | join("/")) + "). Traefik keeps the first definition and skips the other (its log says \"middleware already configured\"), so DCS'"'"'s file is ignored"
+                      + (if $b.pulled_by then "; Traefik asks CrowdSec as " + $b.pulled_by else "" end) + ". Protection is not affected, and Register again puts the new key into both files. To tidy up, delete DCS'"'"'s file."),
+                    cleanup: {file: ($enf.middleware_file | split("/") | .[-2:] | join("/")), used: $enf.defined_elsewhere}, fix: null}] else [] end)
               + (if ($d.machines | map((.datasources // {}) | to_entries | map(.value) | add // 0) | add // 0) == 0 then [{code: "no_datasource", severity: "warning", title: "CrowdSec is not reading any log",
                     detail: "No acquisition source is configured, so nothing is analysed and no attack can be detected. The Traefik access log should be listed in /etc/crowdsec/acquis.d.", fix: null}] else [] end)
               + (if $d.counts.updates > 0 then [{code: "hub_updates", severity: "info", title: (($d.counts.updates | tostring) + " hub item(s) can be updated"),
@@ -1725,6 +1727,31 @@ handle_crowdsec_bouncer_delete() {
     _api_success "$(jq -nc --arg n "$name" --arg mine "$CROWDSEC_BOUNCER_NAME" '{success: true, name: $n, was_dcs_bouncer: ($n == $mine), message: ("Bouncer " + $n + " removed" + (if $n == $mine then ". Traefik no longer hears about bans until you register the Traefik bouncer again." else "" end))}')"
 }
 
+# _cs_mw_key count|get|set FILE [KEY] — the crowdsecLapiKey of the crowdsec-bouncer middleware in a Traefik YAML file: how many there are,
+# their values, or the file with each one replaced by KEY on stdout (its quoting kept). Only lines inside the crowdsec-bouncer block count.
+_cs_mw_key() {
+    K="${3:-}" M="$1" awk '
+        function ind(s) { match(s, /^[ \t]*/); return RLENGTH }
+        { line = $0; sub(/\r$/, "", line) }
+        inblk && line !~ /^[ \t]*(#.*)?$/ && ind(line) <= bi { inblk = 0 }
+        line ~ /^[ \t]*["\047]?crowdsec-bouncer["\047]?:[ \t]*(#.*)?$/ { inblk = 1; bi = ind(line) }
+        inblk && line ~ /^[ \t]*["\047]?crowdsecLapiKey["\047]?:/ {
+            n++
+            v = line; sub(/^[^:]*:[ \t]*/, "", v)
+            if (ENVIRON["M"] == "get") { sub(/[ \t]+#.*$/, "", v); gsub(/^["\047]|["\047]$/, "", v); print v }
+            if (ENVIRON["M"] == "set") { pre = line; sub(/:.*$/, ":", pre); q = ""; if (v ~ /^"/) q = "\""; else if (v ~ /^\047/) q = "\047"; $0 = pre " " q ENVIRON["K"] q }
+        }
+        ENVIRON["M"] == "set" { print }
+        END { if (ENVIRON["M"] == "count") print n + 0 }' "$2"
+}
+
+# _cs_mw_keys_restore SUFFIX FILE… — put the backups FILE.SUFFIX back (a register that could not finish)
+_cs_mw_keys_restore() {
+    local sfx="$1" f; shift
+    for f in "$@"; do [[ -f "$f.$sfx" ]] && cp -p "$f.$sfx" "$f" 2>/dev/null; done
+    return 0
+}
+
 # Register the bouncer Traefik uses: a LAPI key, the middleware file, the chain, the plugin declaration. Shared by the deploy hook and the
 # "register again" button. Usage: _cs_bouncer_register CONTAINER TEMPLATE_DIR TARGET_STACK TARGET_DIR LOGFILE
 _cs_bouncer_register() {
@@ -1744,8 +1771,48 @@ _cs_bouncer_register() {
         fi
         return 0
     fi
+    # Both: the person's definition is the one Traefik uses, and DCS's copy is skipped ("middleware already configured"). Deleting the bouncer and
+    # writing the new key into DCS's copy alone left Traefik asking with a key CrowdSec no longer knew, the plugin failing open, and nothing on the
+    # page said so. So the new key is made here and written into EVERY file that defines crowdsec-bouncer first (a backup beside each), and only
+    # then is the bouncer made again, with that key. A file DCS cannot edit stops it before anything changes: the old bouncer stays.
+    local -a others=()
+    local newkey="" oldkey="" f sfx="" rel
+    if [[ -n "$own" ]]; then
+        mapfile -t others < <(_traefik_mw_files crowdsec-bouncer "$dir" | grep -vxF "$mine")
+        for f in "${others[@]}"; do
+            rel="${f#"$(dirname "$dir")/"}"
+            if [[ ! -w "$f" || ! -w "$(dirname "$f")" ]]; then
+                echo "[dcs] Traefik reads crowdsec-bouncer from $rel, and DCS cannot edit that file (no write access): nothing was changed and the bouncer whose key it holds was kept. Make the file writable for DCS, or put a new key in it by hand." >> "$log"; return 1
+            fi
+            if [[ "$(_cs_mw_key count "$f")" != 1 ]]; then
+                echo "[dcs] Traefik reads crowdsec-bouncer from $rel, which has no single crowdsecLapiKey line DCS could replace (a key file or a variable?): nothing was changed and the bouncer whose key it holds was kept." >> "$log"; return 1
+            fi
+        done
+        [[ -z "$oldkey" ]] && oldkey=$(_cs_mw_key get "${others[0]}" | head -n 1)
+        newkey=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 43)
+        [[ ${#newkey} -eq 43 ]] || { echo "[dcs] could not make a new key: nothing was changed" >> "$log"; return 1; }
+        sfx="$(date -u +%Y%m%dT%H%M%SZ).dcs-bak"
+        for f in "${others[@]}"; do
+            rel="${f#"$(dirname "$dir")/"}"
+            if ! { cp -p "$f" "$f.$sfx" && _cs_mw_key set "$f" "$newkey" > "$f.dcs-tmp" && chmod --reference="$f" "$f.dcs-tmp" && mv -f "$f.dcs-tmp" "$f"; } 2>/dev/null; then
+                rm -f "$f.dcs-tmp"; _cs_mw_keys_restore "$sfx" "${others[@]}"
+                echo "[dcs] could not write the new key into $rel: the files are as they were and the bouncer whose key they hold was kept" >> "$log"; return 1
+            fi
+            echo "[dcs] the new key is in $rel, the copy Traefik uses (the previous file is kept beside it as $(basename "$f").$sfx)" >> "$log"
+        done
+    fi
     docker exec "$container" cscli bouncers delete "$CROWDSEC_BOUNCER_NAME" >/dev/null 2>&1 || true
-    key=$(docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" -o raw 2>>"$log" | tail -1 | tr -d '\r\n ')
+    if [[ -n "$newkey" ]]; then
+        key=$(docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" --key "$newkey" -o raw 2>>"$log" | tail -1 | tr -d '\r\n ')
+        if [[ "$key" != "$newkey" ]]; then
+            # the files go back, and the bouncer with the key they hold (when it was the one deleted) comes back as well
+            _cs_mw_keys_restore "$sfx" "${others[@]}"
+            [[ -n "$oldkey" ]] && docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" --key "$oldkey" -o raw >/dev/null 2>&1
+            echo "[dcs] could not register the Traefik bouncer with the new key: the files are as they were and the previous key works again" >> "$log"; return 1
+        fi
+    else
+        key=$(docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" -o raw 2>>"$log" | tail -1 | tr -d '\r\n ')
+    fi
     if [[ ! "$key" =~ ^[A-Za-z0-9+/=_-]{20,}$ ]]; then echo "[dcs] could not register the Traefik bouncer (cscli gave no key)" >> "$log"; return 1; fi
     lan=$(grep -m1 '^TRAEFIK_TRUSTED_LAN=' "$target_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
     if [[ -z "$lan" ]]; then
@@ -2114,7 +2181,10 @@ handle_crowdsec_community_register() {
     ts=$(date -u +%Y%m%dT%H%M%SZ)
     # the way back: the current login, copied beside it inside the container (it keeps its mode, 600). `cscli capi register` has no --force
     # and needs none: it overwrites the credentials file only once the central service has accepted the new login
-    if timeout 15 docker exec "$CS_NAME" cp -p "$CROWDSEC_CAPI_CREDS" "$CROWDSEC_CAPI_CREDS.$ts.bak" >/dev/null 2>&1 </dev/null; then bak="$CROWDSEC_CAPI_CREDS.$ts.bak"; fi
+    # (a name of its own: a failed try removes its copy, and must never take an earlier one with it)
+    local cand="$CROWDSEC_CAPI_CREDS.$ts.bak" n=1
+    while (( n < 20 )) && timeout 10 docker exec "$CS_NAME" test -e "$cand" >/dev/null 2>&1 </dev/null; do n=$(( n + 1 )); cand="$CROWDSEC_CAPI_CREDS.$ts-$n.bak"; done
+    if timeout 15 docker exec "$CS_NAME" cp -p "$CROWDSEC_CAPI_CREDS" "$cand" >/dev/null 2>&1 </dev/null; then bak="$cand"; fi
     CS_TIMEOUT=60 _cs_run out capi register; rc=$?
     text=$(printf '%s\n%s\n' "$CS_ERR" "$out")
     if (( rc != 0 )); then
