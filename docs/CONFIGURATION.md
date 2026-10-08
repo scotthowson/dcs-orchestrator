@@ -180,6 +180,22 @@ them finds them; [Templates → Traefik add-ons](TEMPLATES.md#traefik-add-ons) s
 
 [Proxmox guide → the route feed](PROXMOX.md#4-a-traefik-in-another-vm-or-machine-the-route-feed) explains the setup.
 
+## Chat
+
+One room per server for everyone signed in to it: the dashboard's bubble in the bottom-right corner. Messages live in
+`.data/chat/` on the server (a fleet's VMs have no room of their own: the hub's room is the server's room); the
+dashboard gets them live over its event stream. Bot accounts and API keys stay out of the room.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `CHAT_ENABLED` | `true` | The room on or off. Off answers `404` (`reason: "chat_off"`) and hides the bubble on every dashboard. Admins switch it in Settings → Appearance too |
+| `CHAT_USERS_CAN_POST` | `true` | Accounts with the user role may write; `false` keeps them to reading (admins always write) |
+| `CHAT_RETENTION_DAYS`, `CHAT_RETENTION_MAX` | `30`, `2000` | Messages are kept this many days, and at most this many (the oldest go first) |
+| `CHAT_RATE_LIMIT` | `20` | Messages (and edits) one person may send a minute; more answers `429` with `retry_after` |
+
+One edits their own message for 15 minutes and deletes their own; an admin deletes any and clears the room (both
+in the audit log, never with the text). A message is plain text, 1-2000 characters.
+
 ## Notifications
 
 | Key | Default | Meaning |

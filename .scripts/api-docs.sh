@@ -66,7 +66,7 @@ extract_descriptions() {
             next
         }
         { last=""; hint="" }
-    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh
+    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh "$BASE_DIR"/.lib/chat.sh
 }
 
 # Fallback description from the handler name: handle_stack_compose_save → "Stack compose save"
@@ -123,6 +123,7 @@ doc_path() {
         "/crowdsec/trust/*")            p="/crowdsec/trust/{value}" ;;
         "/crowdsec/bouncers/*")         p="/crowdsec/bouncers/{name}" ;;
         "/themes/*")                    p="/themes/{name}" ;;
+        "/chat/messages/*")             p="/chat/messages/{id}" ;;
     esac
     printf '%s' "$p"
 }
@@ -164,6 +165,7 @@ group_of() {
         automations|automations/*|schedules|schedules/*) printf 'Automation' ;;
         plugins|plugins/*) printf 'Plugins' ;;
         terminal/*) printf 'Terminal' ;;
+        chat/*) printf 'Chat' ;;
         *) printf 'Other' ;;
     esac
 }
@@ -245,7 +247,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 USAGE
     local g
     local IFS_SAVE="$IFS"
-    for g in "System" "Authentication" "Setup wizard" "Stacks" "Containers" "Images" "Networks and volumes" "Templates" "Routing and DNS" "CrowdSec" "Logs and events" "Updates and maintenance" "Backups and maintenance" "Configuration" "Notifications" "Automation" "Plugins" "Terminal" "Other"; do
+    for g in "System" "Authentication" "Setup wizard" "Stacks" "Containers" "Images" "Networks and volumes" "Templates" "Routing and DNS" "CrowdSec" "Logs and events" "Updates and maintenance" "Backups and maintenance" "Configuration" "Notifications" "Automation" "Plugins" "Terminal" "Chat" "Other"; do
         local any=0 r
         for r in "${rows[@]}"; do [[ "${r%%$'\t'*}" == "$g" ]] && { any=1; break; }; done
         [[ $any -eq 0 ]] && continue

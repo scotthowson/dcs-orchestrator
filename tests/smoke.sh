@@ -8982,6 +8982,201 @@ cst_main() {
 cst_main
 # <<< CrowdSec page
 
+# >>> Chat: one room per server (an install of its own: accounts, settings and the room's files are its alone)
+if [[ "${SMOKE_ONLY:-}" != crowdsec ]]; then
+echo "Chat: the server's room (send, edit, delete, clear, roles, limits, retention, the off switch, the live stream)"
+CHW="$WORK-chat"; rm -rf "$CHW"
+mkdir -p "$CHW/.scripts" "$CHW/.lib" "$CHW/.config" "$CHW/Stacks" "$CHW/.data" "$CHW/logs" "$CHW/.api-auth"
+cp "$ROOT/.scripts/api-server.sh" "$ROOT/.scripts/api-dispatch.sh" "$CHW/.scripts/"; cp "$ROOT/VERSION" "$CHW/"
+cp -r "$ROOT/.lib/." "$CHW/.lib/"; cp -r "$ROOT/.config/." "$CHW/.config/"
+grep -vE '^(API_BIND|API_AUTH_ENABLED|API_INSECURE_NO_AUTH|API_TRUSTED_PROXIES|API_IP_WHITELIST|API_PORT|CHAT_[A-Z_]+)=' "$ROOT/.env.example" > "$CHW/.env"
+printf 'API_PORT=9876\nMETRICS_ENABLED=false\n' >> "$CHW/.env"
+CHAPI="$CHW/.scripts/api-server.sh"; CHD="$CHW/.data/chat"
+# ch_req WHO METHOD PATH [BODY]: WHO is a session token, a dcs_ key, or "" for none
+ch_req() {
+    local who="$1" m="$2" p="$3" b="${4:-}" h="" n
+    [[ -n "$who" ]] && h="Authorization: Bearer $who"$'\r\n'
+    n=$(printf '%s' "$b" | wc -c)   # bytes, whatever the locale
+    printf '%s %s HTTP/1.1\r\n%sContent-Length: %d\r\n\r\n%s' "$m" "$p" "$h" "$n" "$b" \
+        | env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request 2>/dev/null
+}
+ch_env() { sed -i "/^${1}=/d" "$CHW/.env"; [[ $# -gt 1 ]] && printf '%s=%s\n' "$1" "$2" >> "$CHW/.env"; return 0; }
+ch_post() { ch_req "$1" POST /chat/messages "$(jq -cn --arg t "$2" '{text: $t}')"; }
+CHA=$(ch_req "" POST /auth/setup '{"username":"scott","password":"correct horse battery"}' | body_of | jq -r '.token // empty')
+_inv() { ch_req "$CHA" POST /auth/invite '{"role":"user"}' | body_of | jq -r '.code // empty'; }
+CHU=$(ch_req "" POST /auth/register "{\"username\":\"austin\",\"password\":\"austin-pass-123\",\"invite_code\":\"$(_inv)\"}" | body_of | jq -r '.token // empty')
+CHV=$(ch_req "" POST /auth/register "{\"username\":\"robin\",\"password\":\"robin-pass-1234\",\"invite_code\":\"$(_inv)\"}" | body_of | jq -r '.token // empty')
+ch_req "$CHA" POST /auth/users '{"username":"chat-bot","password":"Botpass-1234","role":"bot"}' >/dev/null
+CHB=$(ch_req "" POST /auth/login '{"username":"chat-bot","password":"Botpass-1234"}' | body_of | jq -r '.token // empty')
+CHK=$(ch_req "$CHA" POST /auth/keys '{"name":"chat-key","role":"operate"}' | body_of | jq -r '.key // empty')
+check "chat: the accounts for the room"          "yes yes yes yes yes" "$(for t in "$CHA" "$CHU" "$CHV" "$CHB" "$CHK"; do [[ ${#t} -ge 32 ]] && printf 'yes ' || printf 'no '; done | sed 's/ $//')"
+
+# who may come in
+check "chat: an admin reads the room"            200 "$(ch_req "$CHA" GET /chat/messages | status_of)"
+check "chat: a user reads the room"              200 "$(ch_req "$CHU" GET /chat/messages | status_of)"
+check "chat: no session, no room"                401 "$(ch_req "" GET /chat/messages | status_of)"
+check "chat: a bot account stays out (read)"     403 "$(ch_req "$CHB" GET /chat/messages | status_of)"
+check "chat: a bot account stays out (send)"     403 "$(ch_post "$CHB" "beep" | status_of)"
+check "chat: a bot account stays out (presence)" 403 "$(ch_req "$CHB" GET /chat/presence | status_of)"
+check "chat: an API key stays out (read)"        403 "$(ch_req "$CHK" GET /chat/messages | status_of)"
+check "chat: an API key stays out (send)"        403 "$(ch_post "$CHK" "hello" | status_of)"
+check "chat: an empty room"                      "0 false" "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '"\(.messages | length) \(.has_more)"')"
+check "chat: the room is the server's"           "server server null true 30 2000 20 2000 900" "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.room | "\(.id) \(.kind) \(.server) \(.me.can_post) \(.retention.days) \(.retention.max_messages) \(.rate_limit_per_minute) \(.max_length) \(.edit_window)"')"
+check "chat: the caller is named, a user does not moderate" "austin user false" "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.room.me | "\(.user) \(.role) \(.can_moderate)"')"
+check "chat: an admin moderates"                 true "$(ch_req "$CHA" GET /chat/messages | body_of | jq -r '.room.me.can_moderate')"
+check "chat: GET /config says it is on"          "true true 30 2000 20" "$(ch_req "$CHU" GET /config | body_of | jq -r '"\(.chat_enabled) \(.chat_users_can_post) \(.chat_retention_days) \(.chat_retention_max) \(.chat_rate_limit)"')"
+
+# sending
+M1=$(ch_req "$CHA" POST /chat/messages '{"text":"  hello\u0007 there\r\nsecond line ‮evil​  "}' | body_of)
+check "chat: an admin sends"                     "1 scott admin" "$(jq -r '.message | "\(.id) \(.user) \(.role)"' <<< "$M1")"
+check "chat: control characters and direction overrides go, newlines stay, trimmed" '"hello there\nsecond line evil"' "$(jq -c '.message.text' <<< "$M1")"
+check "chat: a message carries its time and no origin server yet" "number null" "$(jq -r '.message | "\(.ts | type) \(.server)"' <<< "$M1")"
+M2=$(ch_post "$CHU" "hi scott" | body_of)
+check "chat: a user sends, ids follow on"        "2 austin user" "$(jq -r '.message | "\(.id) \(.user) \(.role)"' <<< "$M2")"
+check "chat: no text is refused"                 400 "$(ch_req "$CHU" POST /chat/messages '{}' | status_of)"
+check "chat: text that is not a string is refused" 400 "$(ch_req "$CHU" POST /chat/messages '{"text":["a"]}' | status_of)"
+check "chat: a body that is not JSON is refused" 400 "$(ch_req "$CHU" POST /chat/messages 'hello' | status_of)"
+check "chat: blanks alone are refused"           400 "$(ch_post "$CHU" $'  \n\t  ' | status_of)"
+check "chat: 2001 characters are refused"        400 "$(ch_post "$CHU" "$(printf 'a%.0s' {1..2001})" | status_of)"
+check "chat: 2000 characters (two bytes each) are fine" "200 2000" "$(R=$(ch_post "$CHV" "$(printf 'é%.0s' {1..2000})"); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '.message.text | length')")"
+check "chat: what was sent is what is read"      "hello there|hi scott" "$(ch_req "$CHV" GET /chat/messages | body_of | jq -r '[.messages[] | select(.id < 3) | .text | split("\n")[0]] | join("|")')"
+check "chat: ?since=<id> gives the newer ones"   "2,3" "$(ch_req "$CHV" GET '/chat/messages?since=1' | body_of | jq -r '[.messages[].id] | join(",")')"
+check "chat: ?before=<id> gives the older ones"  "1" "$(ch_req "$CHV" GET '/chat/messages?before=2' | body_of | jq -r '[.messages[].id] | join(",")')"
+check "chat: ?limit= takes the newest, says there is more" "2,3 true" "$(ch_req "$CHV" GET '/chat/messages?limit=2' | body_of | jq -r '"\([.messages[].id] | join(",")) \(.has_more)"')"
+check "chat: ?since=<a time> gives what came or changed after it" "0" "$(ch_req "$CHV" GET "/chat/messages?since=$(( $(date +%s) + 5 ))" | body_of | jq -r '.messages | length')"
+check "chat: a bad since is refused"             400 "$(ch_req "$CHV" GET '/chat/messages?since=abc' | status_of)"
+check "chat: the room's files are private"       "700 600 600" "$(stat -c %a "$CHD" "$CHD/messages.jsonl" "$CHD/live.jsonl" | tr '\n' ' ' | sed 's/ $//')"
+check "chat: a message is not an audited operation (no POST line)" 0 "$(grep -c '/chat/' "$CHW/.api-auth/auth-audit.log" 2>/dev/null || true)"
+
+# editing
+check "chat: someone else's message cannot be edited" 403 "$(ch_req "$CHU" PUT /chat/messages/1 '{"text":"mine now"}' | status_of)"
+check "chat: not even by an admin"               403 "$(ch_req "$CHA" PUT /chat/messages/2 '{"text":"edited by scott"}' | status_of)"
+E2=$(ch_req "$CHU" PUT /chat/messages/2 '{"text":"hi scott, edited"}' | body_of)
+check "chat: one's own message is edited"        "hi scott, edited number" "$(jq -r '.message | "\(.text) \(.edited | type)"' <<< "$E2")"
+check "chat: an edit to nothing is refused"      400 "$(ch_req "$CHU" PUT /chat/messages/2 '{"text":"   "}' | status_of)"
+check "chat: an unknown message"                 404 "$(ch_req "$CHU" PUT /chat/messages/999 '{"text":"x"}' | status_of)"
+check "chat: a message id is a number"           400 "$(ch_req "$CHU" PUT '/chat/messages/1;id' '{"text":"x"}' | status_of)"
+_old=$(( $(date +%s) - 1000 ))
+jq -c --argjson t "$_old" 'if .id == 2 then .ts = $t else . end' "$CHD/messages.jsonl" > "$CHD/m.tmp" && mv "$CHD/m.tmp" "$CHD/messages.jsonl"
+check "chat: after 15 minutes it stays as it is" 409 "$(ch_req "$CHU" PUT /chat/messages/2 '{"text":"too late"}' | status_of)"
+
+# deleting
+check "chat: a user cannot delete someone else's" 403 "$(ch_req "$CHU" DELETE /chat/messages/1 | status_of)"
+D3=$(ch_req "$CHV" DELETE /chat/messages/3 | body_of)
+check "chat: one's own message is deleted, a mark stays" "true  robin" "$(jq -r '.message | "\(.deleted) \(.text) \(.deleted_by)"' <<< "$D3")"
+check "chat: deleted once is enough"             404 "$(ch_req "$CHV" DELETE /chat/messages/3 | status_of)"
+check "chat: a deleted message cannot be edited" 404 "$(ch_req "$CHV" PUT /chat/messages/3 '{"text":"back"}' | status_of)"
+check "chat: the room shows it as deleted, without its text" "true " "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.messages[] | select(.id == 3) | "\(.deleted) \(.text)"')"
+check "chat: deleting one's own is not in the audit" 0 "$(grep -c chat_message_removed "$CHW/.data/audit.jsonl" 2>/dev/null || true)"
+ch_post "$CHU" "a secret plan 7Q2Z" >/dev/null
+_mid=$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.messages[-1].id')
+check "chat: an admin deletes anyone's"          "true scott" "$(ch_req "$CHA" DELETE "/chat/messages/$_mid" | body_of | jq -r '.message | "\(.deleted) \(.deleted_by)"')"
+check "chat: …and that is in the audit, naming who and whose" 1 "$(grep -c "scott removed message #$_mid by austin" "$CHW/.data/audit.jsonl" 2>/dev/null || true)"
+check "chat: the text is in no log and no audit" 0 "$(cat "$CHW/.data/audit.jsonl" "$CHW/.api-auth/auth-audit.log" "$CHW"/logs/* 2>/dev/null | grep -c '7Q2Z' || true)"
+check "chat: the text is gone from the room's file" 0 "$(grep -c '7Q2Z' "$CHD/messages.jsonl" || true)"
+
+# typing and presence
+check "chat: typing goes out"                    "true" "$(ch_req "$CHU" POST /chat/typing | body_of | jq -r '.sent')"
+check "chat: …once in 3 s"                       "false" "$(ch_req "$CHU" POST /chat/typing | body_of | jq -r '.sent')"
+check "chat: …as a live event"                   austin "$(grep '"typing"' "$CHD/live.jsonl" | tail -1 | jq -r '.user')"
+check "chat: a bot does not type"                403 "$(ch_req "$CHB" POST /chat/typing | status_of)"
+check "chat: presence lists who is here, with the role" "austin:user robin:user scott:admin" "$(ch_req "$CHU" GET /chat/presence | body_of | jq -r '[.online[] | "\(.user):\(.role)"] | sort | join(" ")')"
+touch -d '-5 minutes' "$CHD/presence/robin"
+check "chat: someone gone for minutes is not online" "austin scott" "$(ch_req "$CHU" GET /chat/presence | body_of | jq -r '[.online[].user] | sort | join(" ")')"
+check "chat: the room's answer lists them too"   "austin scott" "$(ch_req "$CHA" GET /chat/messages | body_of | jq -r '[.room.members_online[].user] | sort | join(" ")')"
+check "chat: no presence for a bot"              no "$([[ -e "$CHD/presence/chat-bot" ]] && echo yes || echo no)"
+
+# the rate limit
+ch_env CHAT_RATE_LIMIT 3
+ch_post "$CHV" one >/dev/null; ch_post "$CHV" two >/dev/null; ch_post "$CHV" three >/dev/null
+_rl=$(ch_post "$CHV" four)
+check "chat: past the limit a minute: 429"       429 "$(status_of <<< "$_rl")"
+check "chat: …saying how long to wait"           "rate_limited yes" "$(body_of <<< "$_rl" | jq -r '"\(.reason) \(if .retry_after >= 1 and .retry_after <= 60 then "yes" else "no" end)"')"
+check "chat: …and only for that person"          200 "$(ch_post "$CHA" "still here" | status_of)"
+check "chat: edits count too"                    429 "$(ch_req "$CHV" PUT "/chat/messages/$(ch_req "$CHV" GET /chat/messages | body_of | jq -r '[.messages[] | select(.user == "robin" and .deleted != true)][-1].id')" '{"text":"x"}' | status_of)"
+ch_env CHAT_RATE_LIMIT
+
+# users read only
+ch_env CHAT_USERS_CAN_POST false
+check "chat: users read only: a user reads"      "200 false" "$(R=$(ch_req "$CHU" GET /chat/messages); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '.room.me.can_post')")"
+check "chat: …a user cannot send"                403 "$(ch_post "$CHU" "may I" | status_of)"
+check "chat: …or type"                           403 "$(ch_req "$CHU" POST /chat/typing | status_of)"
+check "chat: …an admin still sends"              200 "$(ch_post "$CHA" "only me" | status_of)"
+ch_env CHAT_USERS_CAN_POST
+
+# retention
+_now=$(date +%s)
+{ for i in $(seq 1 5); do printf '{"id":%d,"ts":%d,"user":"scott","role":"admin","text":"old %d","server":null}\n' "$i" $(( _now - 40 * 86400 )) "$i"; done
+  printf 'this line is damaged\n'
+  for i in $(seq 6 64); do printf '{"id":%d,"ts":%d,"user":"scott","role":"admin","text":"m%d","server":null}\n' "$i" "$_now" "$i"; done; } > "$CHD/messages.jsonl"
+printf '64' > "$CHD/seq"
+check "chat: older than CHAT_RETENTION_DAYS is not shown, a damaged line is skipped" "59 6" "$(ch_req "$CHA" GET '/chat/messages?limit=500' | body_of | jq -r '"\(.messages | length) \(.messages[0].id)"')"
+ch_env CHAT_RETENTION_MAX 50
+ch_post "$CHA" "the newest" >/dev/null
+check "chat: the room keeps CHAT_RETENTION_MAX (the oldest go)" "50 65" "$(printf '%s %s' "$(wc -l < "$CHD/messages.jsonl")" "$(tail -1 "$CHD/messages.jsonl" | jq -r '.id')")"
+check "chat: …and nothing older than the days"   0 "$(grep -c '"old ' "$CHD/messages.jsonl" || true)"
+check "chat: ids go on after a rotation"         66 "$(ch_post "$CHA" "after" | body_of | jq -r '.message.id')"
+ch_env CHAT_RETENTION_MAX
+
+# clearing the room
+check "chat: a user cannot clear the room"       403 "$(ch_req "$CHU" DELETE /chat/messages | status_of)"
+_cl=$(ch_req "$CHA" DELETE /chat/messages | body_of)
+check "chat: an admin clears the room"           "true 50" "$(jq -r '"\(.success) \(.removed)"' <<< "$_cl")"
+check "chat: …it is empty, saying who cleared it" "0 scott" "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '"\(.messages | length) \(.room.cleared_by)"')"
+check "chat: …in the audit"                      1 "$(grep -c 'scott cleared the chat room (50 messages)' "$CHW/.data/audit.jsonl" || true)"
+check "chat: …and live"                          clear "$(tail -1 "$CHD/live.jsonl" | jq -r '.type')"
+check "chat: ids do not start again"             67 "$(ch_post "$CHU" "fresh start" | body_of | jq -r '.message.id')"
+
+# the live stream (event "chat" over GET /stream)
+_sse_out="$CHW/sse-user.out"; _sse_bot="$CHW/sse-bot.out"
+touch -d '-10 minutes' "$CHD/presence/austin"
+{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHU"; sleep 6; } | timeout 5 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_out" 2>/dev/null &
+_sse_pid=$!
+{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHB"; sleep 6; } | timeout 5 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_bot" 2>/dev/null &
+_sse_bpid=$!
+sleep 2
+ch_post "$CHA" "live from scott" >/dev/null
+_lid=$(ch_req "$CHA" GET /chat/messages | body_of | jq -r '.messages[-1].id')
+ch_req "$CHA" PUT "/chat/messages/$_lid" '{"text":"live, edited"}' >/dev/null
+ch_req "$CHA" DELETE "/chat/messages/$_lid" >/dev/null
+wait "$_sse_pid" "$_sse_bpid" 2>/dev/null
+check "chat: the stream carries the room's events" "message edit delete" "$(sed -n 's/^data: //p' "$_sse_out" | jq -r 'select(.type? == "message" or .type? == "edit" or .type? == "delete") | .type' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+check "chat: …with the message"                  "live from scott" "$(sed -n 's/^data: //p' "$_sse_out" | jq -r 'select(.type? == "message") | .message.text' 2>/dev/null | head -1)"
+check "chat: …as event: chat"                    3 "$(grep -c '^event: chat' "$_sse_out")"
+check "chat: …never to a bot's stream"           0 "$(grep -c '^event: chat' "$_sse_bot" || true)"
+check "chat: …which still gets its metrics"      yes "$(grep -q '^event: metrics' "$_sse_bot" && echo yes || echo no)"
+check "chat: an open stream keeps its person online" yes "$(ch_req "$CHA" GET /chat/presence | body_of | jq -r 'if any(.online[]; .user == "austin") then "yes" else "no" end')"
+sleep 1
+check "chat: a closed stream leaves no reader behind" 0 "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl" | wc -l)"
+
+# the off switch
+check "chat: a bad value for the switch is refused" 400 "$(ch_req "$CHA" POST /config '{"CHAT_ENABLED":"maybe"}' | status_of)"
+check "chat: a bad number is refused"            400 "$(ch_req "$CHA" POST /config '{"CHAT_RATE_LIMIT":"0"}' | status_of)"
+check "chat: a user cannot switch it"            403 "$(ch_req "$CHU" POST /config '{"CHAT_ENABLED":"false"}' | status_of)"
+check "chat: an admin switches it off"           200 "$(ch_req "$CHA" POST /config '{"CHAT_ENABLED":"false"}' | status_of)"
+check "chat: …every open dashboard hears it"     '{"type":"state","enabled":false}' "$(tail -1 "$CHD/live.jsonl")"
+check "chat: off: GET /config says so"           false "$(ch_req "$CHU" GET /config | body_of | jq -r '.chat_enabled')"
+_off=$(ch_req "$CHU" GET /chat/messages)
+check "chat: off: the room answers 404, chat_off" "404 chat_off" "$(printf '%s %s' "$(status_of <<< "$_off")" "$(body_of <<< "$_off" | jq -r '.reason')")"
+check "chat: off: nothing is sent"               404 "$(ch_post "$CHA" "anyone?" | status_of)"
+check "chat: off: no presence"                   404 "$(ch_req "$CHU" GET /chat/presence | status_of)"
+check "chat: back on"                            "200 200" "$(printf '%s %s' "$(ch_req "$CHA" POST /config '{"CHAT_ENABLED":"true"}' | status_of)" "$(ch_req "$CHU" GET /chat/messages | status_of)")"
+check "chat: the other settings are saved"       "CHAT_RETENTION_DAYS=14" "$(ch_req "$CHA" POST /config '{"CHAT_RETENTION_DAYS":"14"}' >/dev/null; grep '^CHAT_RETENTION_DAYS=' "$CHW/.env")"
+check "chat: …and read back"                     14 "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.room.retention.days')"
+
+# a fleet member has no room of its own
+printf '{"hub":{"url":"http://hub.example:9876","member_id":"vm1"},"members":[]}\n' > "$CHW/.data/fleet.json"
+_mem=$(ch_req "$CHA" GET /chat/messages)
+check "chat: a VM of a fleet points at the hub's room" "404 chat_on_hub" "$(printf '%s %s' "$(status_of <<< "$_mem")" "$(body_of <<< "$_mem" | jq -r '.reason')")"
+rm -f "$CHW/.data/fleet.json"
+
+# the route policy as documented
+check "chat: docs: reading and sending are for every account, clearing for admins" "user user user user admin user" \
+    "$(for r in 'GET /chat/messages' 'GET /chat/presence' 'POST /chat/messages' 'PUT /chat/messages/{id}' 'DELETE /chat/messages' 'DELETE /chat/messages/{id}'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+rm -rf "$CHW"
+fi
+# <<< Chat
+
 if [[ "${SMOKE_ONLY:-}" != crowdsec ]]; then
 echo "Factory reset (last: it removes the accounts)"
 cp "$ROOT/.env.example" "$WORK/.env.example"   # what the reset copies back over .env
