@@ -3,6 +3,39 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The CrowdSec page no longer gets the engine throttled by the community service.** `GET /crowdsec/community` ran
+  `cscli capi status` and `cscli console status` on every poll (cache 120 s), and each of them is a fresh login at
+  CrowdSec's Central API (`console status` asks it whether the engine is enrolled). With the page open that was a login
+  or two every two minutes; with CrowdSec's own logins at every start and reload, enrolment tries and registrations
+  on top, the central service paused the engine and answered 403 Forbidden to its metrics, signals and blocklist pull
+  for an hour or more, and the page then advised registering again, which is one more login and extends the pause.
+  The status is now derived locally, without any login: the engine's own log about its exchanges with the central
+  service (`docker logs --since 48h`: `capi metrics: sending`/`failed`, `Signal push`, the community-blocklist update,
+  the HTTP client's `status code 403` notes, reloads, the console's PAPI start line), `config.yaml` (online_client,
+  sharing, pull), `console.yaml`, the credentials file, `docker inspect`'s start time and DCS's own record of the
+  logins it caused (`.data/crowdsec/capi-activity.json`). New fields beside every existing one: `capi.state`
+  (`ok`, `paused`, `refused`, `unknown`, `disabled`), `capi.last_success`, `capi.last_refusal`, `capi.refused_since`,
+  `capi.started_at`, `capi.reloaded_at`, `capi.last_check`, `capi.check_available_at`, `capi.dcs_logins_last_hour`,
+  `capi.last_dcs_login`, `console.known` and `console.checked_at`. `paused` is a run of 403s that began less than two
+  hours ago, a 403 within an hour after a start or reload, or any 403 while DCS itself logged in within the hour; it
+  says it recovers on its own and that registering now would extend the pause. `needs_register` is true only in
+  `refused` (403 for two hours or more with nothing accepted in between).
+- **Registering again and enrolling wait while the engine is paused.** `POST /crowdsec/community/register` and
+  `POST /crowdsec/console/enroll` answer 409 `reason: "paused"` with the explanation instead of logging in again;
+  `{"force": true}` in the body overrides it. Registering no longer checks the new login with `capi status` right
+  after the restart: CrowdSec's own reports show it within minutes. Every login DCS causes (check, register, the
+  restart after it, enrol) is recorded with its time.
+
+### Added
+
+- **`POST /crowdsec/community/check`** (admin): the one explicit look at the central service. It runs
+  `cscli capi status` (and, when that login was accepted, `cscli console status` for the enrolment), at most once per
+  10 minutes (429 with `retry_after` otherwise), records the result and answers with the community status.
+
 ## [4.0.39] - 2026-10-08
 
 ### Fixed

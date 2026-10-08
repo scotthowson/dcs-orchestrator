@@ -269,10 +269,15 @@ bundle for a Traefik + SSH server (each with a sentence on what it does), search
 * **Bouncers**: every program that enforces bans (Traefik's plugin, a firewall bouncer …): type, version, address, last pull. Add one (the API key is shown **once**, with a copy button)
   or delete one (its key stops working at once; deleting the Traefik one stops enforcement until it is registered again).
 * **Machines**: the engines that report to this CrowdSec (this container's agent, others you enrolled).
-* **Community**: whether the community blocklist is pulled, whether your detections are shared, whether the machine is enrolled in the CrowdSec Console. A `403 Forbidden` from CrowdSec's
-  Central API means CrowdSec refuses this server, its login or its address (not a broken install): the page says so and gives the two steps (`docker exec CrowdSec cscli capi register`, then
-  restart CrowdSec). If registering is refused with 403 as well, it is the address that is refused; that usually clears by itself, and CrowdSec can lift it. Local detections, bans and
-  alerts keep working; only the shared blocklist is missing.
+* **Community**: whether the community blocklist is pulled, whether your detections are shared, whether the machine is enrolled in the CrowdSec Console. The status is read
+  locally and never logs in at CrowdSec's Central API: `cscli capi status` and `cscli console status` each make a fresh login, and the central service pauses an engine
+  that logs in too often (it then answers `403 Forbidden` to its metrics, signals and blocklist pull for an hour or more). DCS reads what the engine already logs about its
+  own exchanges with the central service, its config files and its start time, and names one state: **ok**; **paused** (403s that began less than two hours ago, right
+  after a start or reload, or while DCS itself logged in within the hour: it recovers on its own, and registering again would only extend it, so *Register again* and
+  enrolling answer "paused" unless forced); **refused** (403 for two hours or more with nothing accepted in between: *Register again*, then enrol in the console again if it
+  was enrolled); **unknown** (nothing logged yet); **disabled** (no `online_client`, e.g. `DISABLE_ONLINE_API`). *Check now* (`POST /crowdsec/community/check`) is the one
+  real login, at most once per 10 minutes. If registering is refused with 403 as well, it is the address that is refused; that usually clears by itself. Local detections,
+  bans and alerts keep working throughout; only the shared blocklist is missing.
 
 ## 10. Logs
 
@@ -320,7 +325,7 @@ Viewers may `GET` and may draw the Discord preview (it only renders, it never se
 | `GET /crowdsec/simulation` · `POST` | alert-only scenarios |
 | `GET /crowdsec/notifications` · `PUT` · `POST …/preview` · `POST …/test` · `POST …/reset` | the Discord editor |
 | `GET /crowdsec/hub` · `POST …/update` · `…/upgrade` · `…/install` · `…/remove` | the hub |
-| `GET /crowdsec/logs` · `GET /crowdsec/community` · `POST /crowdsec/service` | log, community, start/restart/reload |
+| `GET /crowdsec/logs` · `GET /crowdsec/community` · `POST …/community/check` · `POST …/community/register` · `POST /crowdsec/console/enroll` · `POST /crowdsec/service` | log, community (read locally; check is the one login, every 10 min at most), start/restart/reload |
 
 ## 14. Troubleshooting
 

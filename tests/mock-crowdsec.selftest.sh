@@ -108,6 +108,17 @@ eq "metrics acquisition reads" "$(cs metrics -o json | jq '.acquisition["file:/v
 eq "capi status text" "$(cs capi status | sed -n 3p)" "You can successfully interact with Central API (CAPI)"
 eq "lapi status text" "$(cs lapi status | tail -1)" "You can successfully interact with Local API (LAPI)"
 eq "console status json" "$(cs console status -o json | jq -c '[.console.registered, .sharing_options.custom]')" "[true,true]"
+like "data: the engine logs its own Central API exchanges" "$(docker logs -t CrowdSec 2>&1 | grep -c 'capi metrics: sending')" '^[1-9]'
+mock --mock-set capi_log=clear started_ago=600 capi_log=forbidden@120,reload@60,enrolled@30
+eq "capi_log: clear, then a 403 run, a reload and an enrolled line" "$(docker logs CrowdSec 2>&1 | grep -cE 'capi metrics|status code 403|SIGHUP|enrolled in the console|community-blocklist')" "5"
+like "capi_log: the refusal reads like CrowdSec's" "$(docker logs CrowdSec 2>&1 | grep 'capi metrics: failed')" 'level=error msg="capi metrics: failed: API error: Forbidden"'
+like "started_ago moves StartedAt" "$(docker inspect -f '{{.State.StartedAt}}' CrowdSec)" "^$(date -u -d @$(( $(date +%s) - 600 )) +%Y-%m-%dT%H:%M)"
+mock --mock-set capi=disabled
+nolike "capi=disabled: no online_client in config.yaml" "$(docker exec CrowdSec cat /etc/crowdsec/config.yaml | grep -v '^ *#')" 'online_client:'
+mock --mock-set capi=unregistered
+rc "capi=unregistered: no credentials file" 1 docker exec CrowdSec test -s /etc/crowdsec/online_api_credentials.yaml
+mock --mock-set capi=ok
+like "capi=ok: both back" "$(docker exec CrowdSec cat /etc/crowdsec/config.yaml)$(docker exec CrowdSec test -s /etc/crowdsec/online_api_credentials.yaml && echo CREDS)" '    online_client:.*CREDS$'
 eq "hub list has the 7 real sections" "$(cs hub list -o json 2>/dev/null | jq -c 'keys')" '["appsec-configs","appsec-rules","collections","contexts","parsers","postoverflows","scenarios"]'
 eq "installed collections" "$(cs collections list -o json | jq -r '.collections | map(.name) | join(" ")')" "crowdsecurity/base-http-scenarios crowdsecurity/http-cve crowdsecurity/linux crowdsecurity/sshd crowdsecurity/traefik crowdsecurity/whitelist-good-actors"
 eq "171 collections available" "$(cs collections list -a -o json | jq '.collections | length')" "171"

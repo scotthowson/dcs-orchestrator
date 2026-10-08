@@ -5963,28 +5963,131 @@ cst_bouncer_connections() {
 }
 
 cst_services_community() {
-    local v
+    local mark
     cst_world data traefik --traefik
+    mark=$(cst_argv_n)
     cst_call admin GET /crowdsec/community
     cst_is "community" 200
     cst_j "community" '.capi.registered' true '.capi.reachable' true '.capi.sharing' true '.capi.pulling' true '.capi.error' null '.console.enrolled' false '.console.registered' true '.community_decisions' 40
+    cst_j "community: read from the engine's own log" '.capi.state' ok '.capi.source' local '.capi.last_success | test("^20")' true '.capi.last_refusal' null '.capi.refused_since' null \
+        '.capi.started_at | test("^20")' true '.needs_register' false '.hint' null '.console.known' false '.console.sharing.custom' true '.console.sharing.manual' false
+    check "community: a look never logs in at the central service (no capi/console status, register or enrol)" 0 "$(cst_argv_since "$mark" | grep -cE 'cscli (capi|console) ')"
     cst_call viewer GET /crowdsec/community
     cst_is "community: a viewer may look" 200
-    for v in error unregistered disabled; do
-        cst_mock --mock-set capi=$v
-        cst_call admin GET /crowdsec/community
-        cst_j "community/$v" '.capi.reachable' false '.capi.error | length > 10' true '.community_decisions' 40
-    done
-    cst_j "community/error: a DNS failure is not called a refusal" '.capi.forbidden' null '.capi.error | test("Register again")' false '.needs_register' false
-    cst_mock --mock-set capi=forbidden
-    cst_uncache; cst_call admin GET /crowdsec/community
-    cst_j "community/forbidden: the 403 is explained, the community list is what is missing" '.capi.reachable' false '.capi.forbidden' true '.capi.error | test("Forbidden")' true \
-        '.capi.error | test("Register again")' true '.capi.error | test("keep working")' true '.community_decisions' 40
-    cst_j "community/forbidden: …it names the button, not a shell command" '.capi.error | test("Run:|docker exec|cscli capi register")' false
-    cst_j "community/forbidden: …and the dashboard can tell it needs you" '.needs_register' true '.last_register' null
+    # -- a fresh engine (nothing about the central service in its log yet): unknown, and nothing alarming
+    cst_world empty traefik --traefik
+    cst_call admin GET /crowdsec/community
+    cst_j "community/unknown: a fresh engine" '.capi.state' unknown '.capi.registered' true '.capi.reachable' false '.capi.error' null '.needs_register' false '.hint' null
+    # -- switched off, or no login at all: from the files
+    cst_world data traefik --traefik
+    cst_mock --mock-set capi=disabled
+    cst_call admin GET /crowdsec/community
+    cst_j "community/disabled: no online_client in config.yaml" '.capi.state' disabled '.capi.registered' false '.capi.reachable' false '.capi.sharing' false '.needs_register' false
+    cst_mock --mock-set capi=unregistered
+    cst_call admin GET /crowdsec/community
+    cst_j "community/unregistered: no credentials file" '.capi.state' unknown '.capi.registered' false '.needs_register' false
     cst_mock --mock-set capi=ok
+    # -- the central service cannot be reached: not a refusal
+    cst_mock --mock-set capi_log=fail@90
+    cst_call admin GET /crowdsec/community
+    cst_j "community/unreachable: a DNS failure is not a refusal" '.capi.state' ok '.capi.forbidden' null '.capi.reachable' false '.capi.error | test("no such host")' true \
+        '.capi.error | test("Register again")' false '.needs_register' false
+    # -- 403s that began minutes ago: the central service is pausing the engine; registering would make it worse
+    cst_mock --mock-set capi_log=forbidden@300
+    cst_call admin GET /crowdsec/community
+    cst_j "community/paused: a fresh run of 403s" '.capi.state' paused '.capi.forbidden' true '.capi.reachable' false '.needs_register' false \
+        '.hint' "The community service is pausing this engine after many logins today (starts, reloads, checks). It recovers on its own within an hour or two; registering again now would extend the pause." \
+        '.capi.refused_since == .capi.last_refusal' true '.capi.error | test("Forbidden")' true '.capi.error | test("Register again")' false
+    # -- 403 for three hours without one success: refused, and only now registering again is the advice
+    cst_mock --mock-set capi_log=clear started_ago=30000 capi_log=forbidden@11000,forbidden@7200,forbidden@1800,forbidden@600
+    cst_call admin GET /crowdsec/community
+    cst_j "community/refused: 403 for 3 hours" '.capi.state' refused '.needs_register' true '.capi.forbidden' true '.capi.last_success' null \
+        '.hint' "The community service has refused this engine's login for 3 hours. Register again (Community, on the CrowdSec page); console enrolment may need redoing afterwards."
+    cst_j "community/refused: …it names the button, not a shell command" '.capi.error | test("Run:|docker exec|cscli capi register")' false
+    # -- one exchange that went through ends the run
+    cst_mock --mock-set capi_log=push@300
+    cst_call admin GET /crowdsec/community
+    cst_j "community/refused: a signal push that went through ends it" '.capi.state' ok '.capi.refused_since' null '.needs_register' false '.capi.last_refusal | test("^20")' true '.hint' null
+    # -- a 403 within the hour after a start or a reload is the start's own login being throttled: paused, even in a long run
+    cst_mock --mock-set capi_log=clear started_ago=1200 capi_log=forbidden@10800,forbidden@7200,forbidden@600
+    cst_call admin GET /crowdsec/community
+    cst_j "community/paused: a 403 within an hour after a start" '.capi.state' paused '.needs_register' false
+    cst_mock --mock-set capi_log=clear started_ago=30000 capi_log=forbidden@10800,forbidden@7200,reload@900,forbidden@600
+    cst_call admin GET /crowdsec/community
+    cst_j "community/paused: …or after a reload" '.capi.state' paused '.capi.reloaded_at | test("^20")' true '.needs_register' false
+    cst_mock --mock-set capi_log=enrolled@100
+    cst_call admin GET /crowdsec/community
+    cst_j "community: an enrolled engine says so in its log" '.console.enrolled' true '.console.known' true
+    cst_community_check
     cst_community_register
     cst_console_enroll
+}
+
+# ---- the one explicit look at the central service (a real login): at most once per 10 minutes ----------------------------------------------------------
+cst_community_check() {
+    local mark sf="$CST/.data/crowdsec/capi-activity.json"
+    cst_world data traefik --traefik
+    cst_try "community/check: a viewer may not" 403 viewer POST /crowdsec/community/check
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/check
+    cst_is "community/check" 200
+    cst_j "community/check" '.capi.state' ok '.capi.last_check.result' ok '.capi.last_check.message | test("accepts")' true '.capi.check_available_at | test("^20")' true \
+        '.capi.dcs_logins_last_hour' 2 '.console.known' true '.console.checked_at | test("^20")' true '.console.enrolled' false
+    check "community/check: …one capi status" 1 "$(cst_argv_since "$mark" | grep -cx 'exec CrowdSec cscli capi status ')"
+    check "community/check: …and, the login accepted, one console status" 1 "$(cst_argv_since "$mark" | grep -c 'exec CrowdSec cscli console status ')"
+    check "community/check: the audit log has it" 1 "$(grep -c '"action":"auth.crowdsec_capi_check".*community check: ok' "$CST/.data/audit.jsonl")"
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/check
+    cst_is "community/check: again within 10 minutes" 429
+    cst_j "community/check: again" '.reason' too_soon '.retry_after > 500' true '.message | test("login")' true
+    check "community/check: …and CrowdSec was not asked" 0 "$(cst_argv_since "$mark" | grep -cE 'cscli (capi|console) ')"
+    # -- 10 minutes later the central service refuses: one login, recorded; the check itself is a fresh 403 (paused)
+    jq '.check.epoch -= 601' "$sf" > "$sf.t" && mv -f "$sf.t" "$sf"
+    cst_mock --mock-set capi=forbidden
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/check
+    cst_is "community/check: refused" 200
+    cst_j "community/check: refused" '.capi.last_check.result' forbidden '.capi.state' paused '.needs_register' false '.capi.forbidden' true
+    check "community/check: …no console status after a refused login" 0 "$(cst_argv_since "$mark" | grep -c 'cscli console status')"
+    # -- a long run of 403s, but DCS itself logged in within the hour: still paused; an hour later: refused
+    cst_mock --mock-set capi_log=clear started_ago=30000 capi_log=forbidden@10800,forbidden@7200
+    cst_call admin GET /crowdsec/community
+    cst_j "community/check: DCS's own login within the hour keeps it paused" '.capi.state' paused '.capi.last_dcs_login | test("^20")' true
+    jq '.logins |= map(.epoch -= 3700) | .check.epoch -= 3700 | .console.epoch -= 3700' "$sf" > "$sf.t" && mv -f "$sf.t" "$sf"
+    rm -rf "$CST/.data/cache/crowdsec"
+    cst_call admin GET /crowdsec/community
+    cst_j "community/check: …an hour later it is refused" '.capi.state' refused '.needs_register' true '.capi.dcs_logins_last_hour' 0
+    # -- no CrowdSec
+    cst_world absent
+    cst_try "community/check: no CrowdSec" 404 admin POST /crowdsec/community/check
+
+    # ---- while the central service pauses the engine, registering and enrolling wait (one more login extends the pause), unless forced ----
+    local rates="$CST/.data/rates/crowdsec-capi-register" erates="$CST/.data/rates/crowdsec-console-enroll" key="cm1x2y3z4a5b6c7d8e9f0ghij"
+    cst_world data traefik --traefik
+    rm -f "$rates" "$erates"
+    cst_mock --mock-set capi=forbidden capi_log=forbidden@300
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/register
+    cst_is "community/register: paused" 409
+    cst_j "community/register: paused" '.reason' paused '.paused' true '.can_force' true '.message | test("extend the pause")' true '.needs_register' false
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\"}"
+    cst_is "console/enroll: paused" 409
+    cst_j "console/enroll: paused" '.reason' paused '.needs_register' false '.needs_overwrite' false '.message | test("pausing this engine")' true
+    check "community/register + console/enroll: paused: …CrowdSec was not asked, nothing restarted" 0 "$(cst_argv_since "$mark" | grep -cE 'cscli (capi|console) |^restart ')"
+    check "community/register: paused: …and the try does not count against the three" 0 "$(cat "$rates" 2>/dev/null | wc -l | tr -d " ")"
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/community/register '{"force":true}'
+    cst_is "community/register: paused, forced" 200
+    cst_j "community/register: forced" '.registered' true '.restarted' true '.community.capi.state' paused '.community.needs_register' false
+    check "community/register: forced: …capi register ran" 1 "$(cst_argv_since "$mark" | grep -cx 'exec CrowdSec cscli capi register ')"
+    cst_call admin GET /crowdsec/community
+    cst_j "community/register: the registration and the restart are DCS logins" '.capi.dcs_logins_last_hour' 2 '.capi.state' paused
+    mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/console/enroll "{\"key\":\"$key\",\"force\":true}"
+    cst_is "console/enroll: paused, forced" 200
+    check "console/enroll: forced: …CrowdSec was asked" 1 "$(cst_argv_since "$mark" | grep -c ' console enroll ')"
+    check "console/enroll: forced: …the key is in no DCS record" 0 "$(grep -c "$key" "$CST/.data/crowdsec/capi-activity.json")"
+    rm -f "$rates" "$erates"
 }
 
 # ---- registering with the community again (CAPI answers 403 to this engine's login): one click instead of a shell ----------------------------------
@@ -5999,7 +6102,7 @@ cst_community_register() {
     cst_call admin POST /crowdsec/community/register
     cst_is "community/register" 200
     cst_j "community/register" '.registered' true '.restarted' true '.healthy' true '.community.capi.reachable' true '.community.capi.forbidden' null '.community.needs_register' false \
-        '.message | test("accepts the new login")' true '.console_note | test("enrol it again")' true '.backup | test("^/etc/crowdsec/online_api_credentials[.]yaml[.][0-9]{8}T[0-9]{6}Z(-[0-9]+)?[.]bak$")' true
+        '.message | test("shows within a few minutes whether the central service accepts the new login")' true '.console_note | test("enrol it again")' true '.backup | test("^/etc/crowdsec/online_api_credentials[.]yaml[.][0-9]{8}T[0-9]{6}Z(-[0-9]+)?[.]bak$")' true
     bak="$CST/fake/rootfs$(jq -r '.backup' <<< "$CST_BODY")"
     login1=$(grep '^login:' "$creds")
     check "community/register: CrowdSec has a new login" yes "$([[ -n "$login1" && "$login1" != "$login0" ]] && echo yes || echo no)"
@@ -6007,6 +6110,7 @@ cst_community_register() {
     check "community/register: …and the copy is as private as the original" 600 "$(stat -c %a "$bak" 2>/dev/null)"
     check "community/register: CrowdSec was restarted once (it reads the new login when it starts)" 1 "$(cst_argv_since "$mark" | grep -c '^restart CrowdSec')"
     check "community/register: …the cscli call is exactly capi register" 1 "$(cst_argv_since "$mark" | grep -cx 'exec CrowdSec cscli capi register ')"
+    check "community/register: …and nothing logs in to check it afterwards" 0 "$(cst_argv_since "$mark" | grep -cE 'cscli (capi|console) status')"
     check "community/register: the audit log has it" 1 "$(grep -c '"action":"auth.crowdsec_capi_register".*registered again' "$CST/.data/audit.jsonl")"
     cst_call admin GET /crowdsec/community
     cst_j "community/register: the status afterwards" '.capi.reachable' true '.needs_register' false '.last_register.ok' true '.last_register.at | test("^20")' true
@@ -6019,7 +6123,7 @@ cst_community_register() {
     check "community/register: …the login is unchanged" "$login1" "$(grep '^login:' "$creds")"
     check "community/register: …and only the first copy is there" 1 "$(find "$CST/fake/rootfs/etc/crowdsec" -maxdepth 1 -name 'online_api_credentials.yaml.*.bak' | wc -l | tr -d ' ')"
     cst_call admin GET /crowdsec/community
-    cst_j "community/register: the status remembers the refusal" '.needs_register' true '.last_register.ok' false '.last_register.reason' refused
+    cst_j "community/register: the status remembers the refusal" '.needs_register' false '.last_register.ok' false '.last_register.reason' refused
 
     # -- the central service cannot be reached; the community connection is switched off
     rm -f "$rates"
@@ -8018,7 +8122,7 @@ CST_WRITES=(
     'POST /crowdsec/notifications {"webhook":"https://discord.com/api/webhooks/111111111111111111/NOTAREALTOKEN_0123456789-abcdefghij"}'
     'POST /crowdsec/notifications/test {}' 'POST /crowdsec/notifications/reset -' 'POST /crowdsec/trust {"ip":"198.18.9.9"}' 'DELETE /crowdsec/trust/198.18.9.9 -'
     'PUT /crowdsec/plugin {"settings":{"mode":"stream"}}' 'POST /crowdsec/traefik/restart -' 'POST /fleet/routes {"http":{"routers":{}}}'
-    'POST /crowdsec/community/register -' 'POST /crowdsec/console/enroll {"key":"cm1x2y3z4a5b6c7d8e9f0ghij"}'
+    'POST /crowdsec/community/register -' 'POST /crowdsec/community/check -' 'POST /crowdsec/console/enroll {"key":"cm1x2y3z4a5b6c7d8e9f0ghij"}'
 )
 
 cst_security_roles() {

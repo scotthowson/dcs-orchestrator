@@ -36,7 +36,8 @@ CONTROL VERBS (first argument starts with --mock-)
         empty       healthy, only the local machine, stock profiles, no decisions/alerts/bouncers/allowlists
         data        healthy, ~14 decisions from 8 countries (+ a permanent ban, a simulated one, a manual Ip and Range,
                     a CAPI blocklist alert with 40 decisions), alerts up to 6 days old, 6 of them without an active
-                    decision, 2 bouncers, 1 machine, 2 allowlists, an outdated collection, metrics with traffic
+                    decision, 2 bouncers, 1 machine, 2 allowlists, an outdated collection, metrics with traffic; its log has the
+                    engine's own Central API exchanges (a blocklist pull after the start, `capi metrics: sending` every 30 min)
         old         like data but CrowdSec 1.6.5 (no allowlists, no -B, `null` for empty JSON lists, old hub messages)
         Presets other than absent/defined/empty use the `data` dataset behind their container state.
         --traefik adds a running `Traefik` container (compose project networking-security).
@@ -55,7 +56,15 @@ CONTROL VERBS (first argument starts with --mock-)
         cscli_slow_ms=N     every cscli call sleeps N ms first (before the lock is taken)
         empty_json=null|[]|auto   what `-o json` prints for an empty decisions/alerts list (auto: [] for >= 1.7)
         capi=ok|error|forbidden|unregistered|disabled   `cscli capi status` / `console status` (forbidden: the Central API answers 403 to the login,
-                            as it does when it refuses the server's address)
+                            as it does when it refuses the server's address). Both make a real CAPI login in CrowdSec 1.8 (console status
+                            asks CAPI whether the engine is enrolled). disabled also comments the online_client out of config.yaml (as
+                            DISABLE_ONLINE_API removes it), unregistered removes online_api_credentials.yaml; any other mode puts both back
+        capi_log=KIND@AGE[,KIND@AGE...]|clear   append the log lines the running engine writes about its own exchanges with the Central
+                            API, AGE seconds ago (mock time): ok (`capi metrics: sending`), push (`Signal push: 3 signals to push`), pull (a
+                            community-blocklist update), forbidden (a metrics send refused with 403, with the HTTP client's retry notes),
+                            fail (a pull that cannot resolve api.crowdsec.net), reload (SIGHUP), enrolled (the PAPI start line of an enrolled
+                            engine); clear removes every such line
+        started_ago=N       the CrowdSec container started N seconds ago (docker inspect's StartedAt)
         capi_register=ok|forbidden|error   what `cscli capi register` meets (ok: new credentials are written, and a forbidden CAPI
                             answers again after the next restart; forbidden: the address is refused; error: no DNS)
         enroll=ok|invalid|already   what `cscli console enroll KEY` meets (ok: enrolled, and the engine is then "already" enrolled;
@@ -2894,6 +2903,14 @@ def seed_logs(st, t):
         log_add(st, c['finished'], 'info', 'crowdsec shutdown')
         return
     log_startup(st, c['started'])
+    if st['preset'] != 'empty' and st['containers']['CrowdSec'].get('health_forced') != 'starting':
+        # a running engine's own exchanges with the Central API: the blocklist pull after start, metrics every 30 minutes
+        capi_log(st, 'pull', c['started'] + 90)
+        k = c['started'] + 1800
+        while k < t:
+            capi_log(st, 'ok', k)
+            k += 1800
+        st['logs'].sort(key=lambda x: x[0])
 
 
 # ==================================================================================================
@@ -6515,7 +6532,7 @@ def log_call(fdir, argv):
 
 
 KNOBS = ('docker_down', 'lapi_down', 'health', 'status', 'version', 'discord', 'traefik', 'health_delay', 'restart_fails', 'cscli_slow_ms',
-         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer', 'capi_register', 'enroll', 'bouncer_child', 'bouncer_idle')
+         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer', 'capi_register', 'enroll', 'bouncer_child', 'bouncer_idle', 'capi_log', 'started_ago')
 
 
 def control(fdir, argv):
@@ -6577,6 +6594,59 @@ def control(fdir, argv):
         fail('%s: unknown control verb %s' % (PROG, verb), 2)
 
 
+CAPI_LOG_RE = re.compile(r'capi|Central API|Signal push|community-blocklist|status code 403|attempt \d out of|SIGHUP received|Reload is finished|enrolled in the console')
+
+
+def capi_log(st, kind, t):
+    """the lines a running CrowdSec 1.8 writes about one exchange with the Central API (texts from pkg/apiserver/apic*.go)"""
+    if kind == 'ok':
+        log_add(st, t, 'info', 'capi metrics: sending')
+    elif kind == 'push':
+        log_add(st, t, 'info', 'Signal push: 3 signals to push')
+    elif kind == 'pull':
+        log_add(st, t, 'info', 'Starting community-blocklist update')
+        log_add(st, t + 0.8, 'info', 'capi/community-blocklist : 12 explicit deletions')
+        log_add(st, t + 1.2, 'info', 'crowdsecurity/community-blocklist : added 1500 entries, deleted 12 entries (alert:42)')
+    elif kind == 'forbidden':
+        log_add(st, t, 'info', 'capi metrics: sending')
+        log_add(st, t + 0.3, 'info', 'attempt 1 out of 2')
+        log_add(st, t + 1.3, 'info', 'attempt 2 out of 2')
+        log_add(st, t + 2.3, 'info', 'max attempts reached for status code 403')
+        log_add(st, t + 2.31, 'error', 'capi metrics: failed: API error: Forbidden')
+    elif kind == 'fail':
+        log_add(st, t, 'info', 'Starting community-blocklist update')
+        log_add(st, t + 5, 'error', 'capi pull top: get stream: performing request: Get "https://api.crowdsec.net/v3/decisions/stream?&startup=false": '
+                'dial tcp: lookup api.crowdsec.net: no such host')
+    elif kind == 'reload':
+        log_add(st, t, 'warning', 'SIGHUP received, reloading')
+        log_add(st, t + 0.002, 'info', 'Reload is finished')
+    elif kind == 'enrolled':
+        log_add(st, t, 'info', 'Machine is enrolled in the console, Loading PAPI Client')
+    else:
+        fail('%s: capi_log kinds are ok|push|pull|forbidden|fail|reload|enrolled' % PROG, 2)
+
+
+def capi_files(st, mode):
+    """disabled: no online_client in config.yaml; unregistered: no credentials file; otherwise both are there"""
+    if 'CrowdSec' not in st['containers']:
+        return
+    fs = FS(st)
+    conf = fs.read('/etc/crowdsec/config.yaml')
+    if conf is not None:
+        if mode == 'disabled':
+            conf = re.sub(r'(?m)^(\s*)(online_client:.*\n)(\s*)(credentials_path:)', r'\1#\2\3#\4', conf)
+        else:
+            conf = re.sub(r'(?m)^(\s*)#(online_client:.*\n)(\s*)#(credentials_path:)', r'\1\2\3\4', conf)
+        fs.write('/etc/crowdsec/config.yaml', conf)
+    creds = '/etc/crowdsec/online_api_credentials.yaml'
+    if mode == 'unregistered':
+        if fs.exists(creds):
+            fs.remove(creds)
+    elif not fs.exists(creds):
+        rng = Rng(st)
+        fs.write(creds, 'url: https://api.crowdsec.net/\nlogin: %s\npassword: %s\n' % (rng.hexstr(32), rng.hexstr(32)), 0o600)
+
+
 def set_knob(st, k, v):
     kn = st['knobs']
     c = st['containers'].get('CrowdSec')
@@ -6590,6 +6660,23 @@ def set_knob(st, k, v):
             fail('%s: capi must be ok|error|forbidden|unregistered|disabled' % PROG, 2)
         kn[k] = v
         kn.pop('capi_pending', None)
+        capi_files(st, v)
+    elif k == 'capi_log':
+        if v == 'clear':
+            st['logs'] = [x for x in st['logs'] if not CAPI_LOG_RE.search(x[2])]
+        else:
+            for item in v.split(','):
+                kind, _, age = item.partition('@')
+                try:
+                    a = float(age)
+                except ValueError:
+                    fail('%s: capi_log is KIND@AGE[,KIND@AGE...] or clear' % PROG, 2)
+                capi_log(st, kind, t - a)
+            st['logs'].sort(key=lambda x: x[0])
+    elif k == 'started_ago':
+        if c is None:
+            fail('%s: no CrowdSec container' % PROG, 2)
+        c['started'] = t - float(v)
     elif k == 'capi_register':
         if v not in ('ok', 'forbidden', 'error'):
             fail('%s: capi_register must be ok|forbidden|error' % PROG, 2)

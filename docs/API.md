@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `426` in total.
+Every endpoint below is `427` in total.
 
 ## Access levels
 
@@ -278,7 +278,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/crowdsec/hub` | user | Installed collections, scenarios and parsers (with which have updates) and a short list of suggestions; ?type=collections\|scenarios\|parsers&available=1&q= lists what can be installed |
 | GET | `/crowdsec/logs` | user | The tail of the container's log: lines (10-500), level (all\|warn\|error), q (text), lapi=1 to include the noisy API request lines |
 | GET | `/crowdsec/simulation` | user | Which scenarios only alert (simulation mode) and which ban |
-| GET | `/crowdsec/community` | user | Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console; needs_register is true when the Central API refuses this engine's login (POST /crowdsec/community/register fixes that), last_register says how the last attempt went |
+| GET | `/crowdsec/community` | user | Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console, read locally (never a login at the central service): capi.state is ok, paused (the central service throttles the engine after many logins; it recovers by itself), refused (403 for 2 h or more: needs_register, POST /crowdsec/community/register fixes it), unknown or disabled; hint says it in plain words, last_register how the last attempt went |
 | GET | `/crowdsec/settings` | user | The default ban length CrowdSec uses, repeat-offender escalation and per-scenario lengths; says whether DCS can edit the file safely |
 | GET | `/crowdsec/notifications` | user | The Discord alert settings in force (webhook masked), what is wired, the placeholders for the message, and the last test/delivery outcome |
 | GET | `/crowdsec/plugin` | user | The Traefik bouncer plugin's settings (mode, how often it asks, how long it remembers, timeout, the status a banned visitor sees, trusted networks), the defaults and the limits |
@@ -295,8 +295,9 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/crowdsec/bouncers` | admin | Register a bouncer and show its API key ONCE: {name} |
 | POST | `/crowdsec/bouncers/register-traefik` | admin | Register the Traefik bouncer again: a fresh key, the middleware file and the chain entry (the fix for "bans are not enforced") |
 | POST | `/crowdsec/service` | admin | Start, restart or reload CrowdSec: {action: start\|restart\|reload} |
-| POST | `/crowdsec/community/register` | admin | Register this engine with CrowdSec's Central API again (a new login, for when CAPI answers 403): keeps a copy of the old login beside it, restarts CrowdSec and answers with the fresh community status. Console enrolment belongs to the engine's identity and may need doing again |
-| POST | `/crowdsec/console/enroll` | admin | Enrol this engine in the CrowdSec console: {key (the enrolment key from app.crowdsec.net), name?, overwrite?}; the key is never logged or echoed |
+| POST | `/crowdsec/community/register` | admin | Register this engine with CrowdSec's Central API again (a new login, for when CAPI has refused it for hours): keeps a copy of the old login beside it, restarts CrowdSec and answers with the community status. While the central service is only pausing the engine (capi.state paused) it answers 409 paused, unless the body says {"force": true}: registering is one more login and extends the pause. Console enrolment belongs to the engine's identity and may need doing again |
+| POST | `/crowdsec/community/check` | admin | Ask the central service now whether it accepts this engine (cscli capi status: a real login, so at most once per 10 minutes; 429 with retry_after otherwise) and answer with the community status |
+| POST | `/crowdsec/console/enroll` | admin | Enrol this engine in the CrowdSec console: {key (the enrolment key from app.crowdsec.net), name?, overwrite?, force?}; the key is never logged or echoed. 409 paused while the central service is pausing the engine (unless force: true) |
 | POST | `/crowdsec/traefik/restart` | admin | Restart Traefik (it loads a plugin declared in its static configuration only when it starts) and wait until it runs again |
 | POST | `/crowdsec/hub/update` | admin | Fetch the newest hub index (needs internet on the server) |
 | POST | `/crowdsec/hub/upgrade` | admin | Upgrade every installed collection, scenario and parser, then reload |

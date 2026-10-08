@@ -32,6 +32,8 @@ CROWDSEC_ALLOWLIST_MARK="Managed by DCS:"
 # CrowdSec's login at its Central API (inside the container), and what DCS remembers of the last time it registered again
 CROWDSEC_CAPI_CREDS="/etc/crowdsec/online_api_credentials.yaml"
 CROWDSEC_REGISTER_STATE="$CROWDSEC_STATE_DIR/capi-register.json"
+# the community logins DCS caused (checks, registrations, enrolments) and what the last check found: the status is derived without logging in
+CROWDSEC_CAPI_STATE="$CROWDSEC_STATE_DIR/capi-activity.json"
 
 # the container this request works on, set by _cs_target
 CS_NAME=""
@@ -2126,42 +2128,253 @@ _cs_register_last() {
     [[ "$j" == \{* ]] && printf '%s' "$j" || printf 'null'
 }
 
-# _cs_community_json — the community answer (see GET /crowdsec/community), kept 2 minutes
+# -----------------------------------------------------------------------------
+# The community status, read locally. `cscli capi status` and `cscli console status` each make a fresh LOGIN at
+# CrowdSec's Central API (api.crowdsec.net); the central service throttles an engine that logs in too often and then
+# answers 403 Forbidden to everything it sends (metrics, signals, the blocklist pull) for an hour or more. So the
+# status the page polls never calls either of them: it is derived from what the engine already logs about its own
+# exchanges with the central service (container log), its config files and DCS's own record of the logins it caused.
+# Only POST /crowdsec/community/check logs in, on request, at most once per 10 minutes.
+# -----------------------------------------------------------------------------
+
+# how far back the container log is read for the community exchanges
+CROWDSEC_CAPI_WINDOW_HOURS=48
+# lines worth reading (case-insensitive): the push, pull and metrics loops, the HTTP client's 403 notes, reloads, console enrolment
+_CS_CAPI_LOG_RE='capi|central api|signal push|sending signal|community-blocklist|usage metrics|status code 403|http code 403|sighup received|enrolled in the console|authenticate watcher|pushed [0-9]+ signals|added [0-9]+ entries'
+
+# DCS's own record of the community logins it caused: {logins: [{at, epoch, kind, result}], check: {at, epoch, result, message}, console: {...}}
+_cs_capi_state() {
+    local j=""
+    [[ -s "$CROWDSEC_CAPI_STATE" ]] && j=$(jq -c 'if type == "object" then . else {} end' "$CROWDSEC_CAPI_STATE" 2>/dev/null)
+    [[ "$j" == \{* ]] && printf '%s' "$j" || printf '{}'
+}
+# _cs_capi_update FILTER [jq options…] — change that record under a lock (the cached community answer is dropped)
+_cs_capi_update() {
+    local filter="$1"; shift
+    mkdir -p "$(dirname "$CROWDSEC_CAPI_STATE")" 2>/dev/null
+    (
+        command -v flock >/dev/null 2>&1 && flock -w 5 9
+        local cur tmp="$CROWDSEC_CAPI_STATE.$$.tmp"
+        cur=$(_cs_capi_state)
+        if jq -c "$@" "$filter" <<< "$cur" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then mv -f "$tmp" "$CROWDSEC_CAPI_STATE"; else rm -f "$tmp"; fi
+    ) 9>"$CROWDSEC_CAPI_STATE.lock"
+    rm -f "$(_cs_cache_file community)" 2>/dev/null
+    return 0
+}
+# _cs_capi_note_login KIND RESULT — DCS made CrowdSec log in to the central service (check, register, restart, enroll); kept a week, newest 100
+_cs_capi_note_login() {
+    _cs_capi_update '.logins = (((.logins // []) + [{at: ($now | todate), epoch: $now, kind: $k, result: $r}]) | map(select((.epoch // 0) > $now - 604800)) | .[-100:])' \
+        --argjson now "$(date +%s)" --arg k "$1" --arg r "$2"
+}
+
+# what config.yaml says about the central service (cached 10 min): {online, sharing, community, blocklists, credentials_path, log_level}
+# (no online_client, or one without credentials_path: the community connection is switched off, e.g. DISABLE_ONLINE_API)
+_cs_capi_config() {
+    local v
+    v=$(_cs_cache_get capi_config 600) || {
+        v=$(timeout 8 docker exec "$CS_NAME" cat /etc/crowdsec/config.yaml 2>/dev/null </dev/null | awk '
+            function ind(s) { match(s, /^ */); return RLENGTH }
+            function val(s) { sub(/^[^:]*:[ \t]*/, "", s); sub(/[ \t]+#.*$/, "", s); gsub(/^["\047]|["\047]$/, "", s); return s }
+            function tf(s) { s = tolower(s); return (s == "false" || s == "no" || s == "off") ? "false" : "true" }
+            BEGIN { oc = -1; pull = -1; online = 0; creds = ""; sharing = "true"; community = "true"; blocklists = "true"; ll = ""; top = "" }
+            /^[ \t]*(#|$)/ { next }
+            { i = ind($0); line = $0; sub(/^ +/, "", line) }
+            oc >= 0 && i <= oc { oc = -1; pull = -1 }
+            pull >= 0 && i <= pull { pull = -1 }
+            i == 0 { top = line; sub(/:.*/, "", top) }
+            top == "common" && i > 0 && line ~ /^log_level:/ { ll = val(line) }
+            line ~ /^online_client:[ \t]*(#.*)?$/ { oc = i; online = 1; next }
+            oc >= 0 && line ~ /^credentials_path:/ { creds = val(line) }
+            oc >= 0 && line ~ /^sharing:/ { sharing = tf(val(line)) }
+            oc >= 0 && line ~ /^pull:[ \t]*(#.*)?$/ { pull = i; next }
+            pull >= 0 && line ~ /^community:/ { community = tf(val(line)) }
+            pull >= 0 && line ~ /^blocklists:/ { blocklists = tf(val(line)) }
+            END {
+                gsub(/["\\]/, "", creds); gsub(/["\\]/, "", ll)
+                printf "{\"online\":%s,\"sharing\":%s,\"community\":%s,\"blocklists\":%s,\"credentials_path\":\"%s\",\"log_level\":\"%s\"}", \
+                    ((online && creds != "") ? "true" : "false"), sharing, community, blocklists, creds, ll
+            }')
+        jq -e . >/dev/null 2>&1 <<< "$v" || v=""
+        [[ -n "$v" ]] && printf '%s' "$v" | _cs_cache_put capi_config
+    }
+    [[ -n "$v" ]] && printf '%s' "$v" || printf '{}'
+}
+
+# the console sharing options of console.yaml (cached 10 min): {context, custom, manual, tainted} with CrowdSec's defaults
+_cs_console_sharing() {
+    local v
+    v=$(_cs_cache_get console_sharing 600) || {
+        v=$(timeout 8 docker exec "$CS_NAME" cat /etc/crowdsec/console.yaml 2>/dev/null </dev/null | awk '
+            function tf(s, d) { sub(/^[^:]*:[ \t]*/, "", s); sub(/[ \t]+#.*$/, "", s); s = tolower(s); return s == "true" ? "true" : (s == "false" ? "false" : d) }
+            BEGIN { m = "false"; c = "true"; t = "true"; x = "false" }
+            /^share_manual_decisions:/ { m = tf($0, m) } /^share_custom:/ { c = tf($0, c) } /^share_tainted:/ { t = tf($0, t) } /^share_context:/ { x = tf($0, x) }
+            END { printf "{\"context\":%s,\"custom\":%s,\"manual\":%s,\"tainted\":%s}", x, c, m, t }')
+        jq -e . >/dev/null 2>&1 <<< "$v" || v='{"context":false,"custom":true,"manual":false,"tainted":true}'
+        printf '%s' "$v" | _cs_cache_put console_sharing
+    }
+    printf '%s' "$v"
+}
+
+# _cs_community_json [fresh] — the community answer (see GET /crowdsec/community), kept 2 minutes; never a login at the central service
 _cs_community_json() {
-    local out capi console cached
-    if cached=$(_cs_cache_get community 120); then _cs_community_last "$cached"; return 0; fi
-    CS_TIMEOUT=25 _cs_run out capi status; local rc=$?
-    capi=$(printf '%s\n%s\n' "$CS_ERR" "$out" | jq -Rsc --argjson rc "$rc" '
-        . as $t | { registered: (($t | test("Loaded credentials|You can successfully interact")) ),
-                    reachable: ($t | test("successfully interact with Central API")),
-                    sharing: ($t | test("Sharing signals is enabled")), pulling: ($t | test("Pulling community blocklist is enabled")),
-                    console_blocklists: ($t | test("Pulling blocklists from the console is enabled")),
-                    error: (if $rc == 0 then null else ($t | split("\n") | map(select(test("^Error|level=(fatal|error)"))) | .[-1] // "CAPI did not answer") end) }')
-    [[ "$capi" == \{* ]] || capi='{"registered":false,"reachable":false,"sharing":false,"pulling":false,"console_blocklists":false,"error":"could not read CAPI status"}'
-    # HTTP 403 from the Central API is CrowdSec refusing this server, either its login or its address; the message alone reads like a broken install.
-    # Most often it is the login (this server was cut off for a month that way): registering again makes a new one, from the CrowdSec page
-    local hint="HTTP 403: CrowdSec's Central API is refusing this server. Most often it no longer accepts this engine's login: Register again (Community, on the CrowdSec page) makes a new login and restarts CrowdSec. If registering is refused with 403 as well, it is the server's address: that usually clears by itself. Detections, bans and alerts here keep working; only the shared blocklist is missing."
-    capi=$(jq -c --arg hint "$hint" 'if ((.error // "") | test("Forbidden|403")) then .error += " " + $hint | .forbidden = true else . end' <<< "$capi")
-    _cs_run out console status -o json || true
-    console=$(jq -c '{authenticated: (.console.authenticated // false), enrolled: (.console.enrolled // false), registered: (.console.registered // false), decision_management: (.console.decision_management // false), plan: (.console.plan // ""),
-                      sharing: (.sharing_options // {})}' <<< "$out" 2>/dev/null); [[ "$console" == \{* ]] || console='{"authenticated":false,"enrolled":false,"registered":false,"decision_management":false,"plan":"","sharing":{}}'
-    local res
-    res=$(jq -nc --argjson capi "$capi" --argjson console "$console" --argjson community "$(_cs_community_count)" \
-        '{capi: $capi, console: $console, community_decisions: $community,
-          needs_register: (($capi.forbidden // false) or (($capi.error // "") | test("no credentials|credentials file|online_api_credentials"; "i"))),
-          note: (if $console.enrolled then "This engine is enrolled in the CrowdSec console." else "Not enrolled in the CrowdSec console. Enrolling is optional: it adds a web dashboard and extra blocklists (cscli console enroll <key>)." end)}') || return 1
+    local cached
+    if [[ "${1:-}" != fresh ]] && cached=$(_cs_cache_get community 120); then _cs_community_last "$cached"; return 0; fi
+    local cfg path creds=false started raw sharing st res
+    cfg=$(_cs_capi_config)
+    path=$(jq -r '.credentials_path // ""' <<< "$cfg" 2>/dev/null)
+    [[ "$path" == /* && "$path" != *'$'* ]] || path="$CROWDSEC_CAPI_CREDS"
+    timeout 8 docker exec "$CS_NAME" test -s "$path" >/dev/null 2>&1 </dev/null && creds=true
+    started=$(timeout 8 docker inspect -f '{{.State.StartedAt}}' "$CS_NAME" 2>/dev/null </dev/null)
+    raw=$(timeout 20 docker logs -t --since "${CROWDSEC_CAPI_WINDOW_HOURS}h" "$CS_NAME" 2>&1 </dev/null \
+        | grep -v -E 'module=lapi|HTTP/[0-9.]+ [0-9]{3} ' | grep -i -E "$_CS_CAPI_LOG_RE" | tail -n 4000)
+    sharing=$(_cs_console_sharing)
+    st=$(_cs_capi_state)
+    res=$(printf '%s\n' "$raw" | jq -Rsc --argjson now "$(date +%s)" --arg started "$started" --argjson cfg "$cfg" --argjson creds "$creds" \
+        --argjson sharing "$sharing" --argjson st "$st" --argjson community "$(_cs_community_count)" --argjson win "$CROWDSEC_CAPI_WINDOW_HOURS" '
+        def iso: if . == null then null else (floor | todate) end;
+        def epoch: if type == "string" and length >= 19 then (.[0:19] + "Z" | try fromdateiso8601 catch null) else null end;
+        def msgof: ((capture("msg=\"(?<m>(?:\\\\.|[^\"\\\\])*)\"") | .m | gsub("\\\\\""; "\"")) // (capture("\"msg\":\"(?<m>[^\"]*)\"") | .m) // .);
+        ($started | epoch | if . != null and . > 0 then . else null end) as $start
+        | ($st.logins // []) as $logins
+        | ([$logins[] | .epoch // 0] | max // 0) as $dcs_last
+        | ([$logins[] | select((.epoch // 0) > $now - 3600)] | length) as $dcs_hour
+        | ($st.check // null) as $chk
+        # each line: docker'"'"'s own timestamp, then what CrowdSec wrote
+        | [ split("\n")[] | select(length > 21) | (index(" ")) as $i | select($i != null)
+            | { t: (.[0:$i] | epoch), m: .[($i + 1):] } | select(.t != null)
+            | .m as $m
+            | .k = (if ($m | test("SIGHUP received"; "i")) then "reload"
+                    elif ($m | test("Machine is enrolled in the console"; "i")) then "enrolled"
+                    elif ($m | test("Forbidden|status code 403|http code 403|(^|[^0-9.:])403([^0-9]|$)"; "i")) then "refusal"
+                    elif ($m | test("level=(error|fatal)|\"level\":\"(error|fatal)\"")) then "fail"
+                    elif ($m | test("capi metrics: sending|Signal push: [0-9]+ signals|Starting community-blocklist update"; "i")) then "attempt"
+                    elif ($m | test("Sent [0-9]+ usage metrics|capi/community-blocklist : ([0-9]+ explicit deletions|received 0 new entries)|: added [0-9]+ entries, deleted [0-9]+ entries|pushed [0-9]+ signals"; "i")) then "success"
+                    else "other" end) ]
+        # the last explicit check counts like a line of the log
+        | . + (if $chk != null and (($chk.epoch // 0) > 0) and ($chk.result | IN("ok", "forbidden", "error")) then
+                [{t: $chk.epoch, m: ("DCS check: " + ($chk.message // "")), k: ({ok: "success", forbidden: "refusal", error: "fail"}[$chk.result])}] else [] end)
+        | sort_by(.t) as $raw
+        | [ $raw[] | select(.k == "refusal" or .k == "fail") | .t ] as $bad
+        # an attempt ("sending", "N signals to push", "update") is a success when no failure follows it within a minute
+        | [ $raw[] | if .k == "attempt" then (.t as $t | if $t > $now - 60 then .k = "pending" elif any($bad[]; . > $t and . <= $t + 60) then .k = "attempt_failed" else .k = "success" end) else . end ] as $ev
+        | ([$ev[] | select(.k == "success") | .t] | max) as $ls
+        | ([$ev[] | select(.k == "refusal") | .t] | max) as $lr
+        | ([$ev[] | select(.k == "fail")] | last) as $lf
+        | (if $lr != null and ($ls == null or $lr > $ls) then ([$ev[] | select(.k == "refusal" and ($ls == null or .t > $ls)) | .t] | min) else null end) as $rs
+        | ([$ev[] | select(.k == "reload") | .t] | max) as $rl
+        | ([$start, $rl] | map(select(. != null)) | max) as $boot
+        | ($cfg.online != false) as $online
+        | ($online and $creds) as $registered
+        | (if ($online | not) then "disabled"
+           elif ($registered | not) then "unknown"
+           elif $rs != null then
+               (if ($now - $rs) < 7200 or ($boot != null and $lr >= $boot and ($lr - $boot) <= 3600) or ($now - $dcs_last) < 3600 then "paused" else "refused" end)
+           elif $ls != null then "ok"
+           else "unknown" end) as $state
+        | (if $state == "paused" then "The community service is pausing this engine after many logins today (starts, reloads, checks). It recovers on its own within an hour or two; registering again now would extend the pause."
+           elif $state == "refused" then "The community service has refused this engine'"'"'s login for \((($now - $rs) / 3600) | floor) hours. Register again (Community, on the CrowdSec page); console enrolment may need redoing afterwards."
+           else null end) as $hint
+        | (if $state == "paused" or $state == "refused" then "The community service answers 403 Forbidden. " + $hint
+           elif $state != "disabled" and $lf != null and $lf.t > ($ls // 0) and $lf.t > ($lr // 0) then "CrowdSec could not reach the community service: " + ($lf.m | msgof | .[0:200])
+           else null end) as $error
+        | ([$ev[] | select(.k == "enrolled" and ($start == null or .t >= $start))] | length > 0) as $log_enrolled
+        | ($st.console // null) as $cr
+        | { capi: ({ registered: $registered, reachable: ($state == "ok" and $error == null),
+                     sharing: ($registered and $cfg.sharing != false), pulling: ($registered and $cfg.community != false),
+                     console_blocklists: ($registered and $cfg.blocklists != false), error: $error }
+                   + (if $state == "paused" or $state == "refused" then {forbidden: true} else {} end)
+                   + { state: $state, last_success: ($ls | iso), last_refusal: ($lr | iso), refused_since: ($rs | iso),
+                       started_at: ($start | iso), reloaded_at: ($rl | iso),
+                       last_check: (if $chk != null and ($chk.result // "") != "running" then {at: $chk.at, result: $chk.result, message: ($chk.message // null)} else null end),
+                       check_available_at: (if $chk != null and (($chk.epoch // 0) + 600) > $now then (($chk.epoch + 600) | iso) else null end),
+                       dcs_logins_last_hour: $dcs_hour, last_dcs_login: (if $dcs_last > 0 then ($dcs_last | iso) else null end),
+                       source: "local", window_hours: $win }),
+            console: { authenticated: (if $cr != null and (($cr.epoch // 0) >= ($boot // 0)) then ($cr.authenticated // false) else ($state == "ok") end),
+                       enrolled: ($log_enrolled or ($cr.enrolled // false)), registered: $registered,
+                       decision_management: ($cr.decision_management // false), plan: ($cr.plan // ""), sharing: $sharing,
+                       known: ($log_enrolled or $cr != null), checked_at: ($cr.at // null) },
+            community_decisions: $community,
+            needs_register: ($state == "refused"),
+            hint: $hint,
+            note: (if ($log_enrolled or ($cr.enrolled // false)) then "This engine is enrolled in the CrowdSec console." else "Not enrolled in the CrowdSec console. Enrolling is optional: it adds a web dashboard and extra blocklists (cscli console enroll <key>)." end) }') || return 1
+    [[ "$res" == \{* ]] || return 1
     printf '%s' "$res" | _cs_cache_put community
     _cs_community_last "$res"
 }
 # (how the last registration went is DCS's own record: added to every answer, cached or not)
 _cs_community_last() { jq -c --argjson last "$(_cs_register_last)" '. + {last_register: $last}' <<< "$1"; }
 
-# GET /crowdsec/community — Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console; needs_register is true when the Central API refuses this engine's login (POST /crowdsec/community/register fixes that), last_register says how the last attempt went
+# GET /crowdsec/community — Is the community blocklist (CAPI) pulled, are signals shared, is the machine enrolled in the CrowdSec console, read locally (never a login at the central service): capi.state is ok, paused (the central service throttles the engine after many logins; it recovers by itself), refused (403 for 2 h or more: needs_register, POST /crowdsec/community/register fixes it), unknown or disabled; hint says it in plain words, last_register how the last attempt went
 handle_crowdsec_community() {
     _cs_target || return
     local res
-    res=$(_cs_community_json)
+    res=$(_cs_community_json) || { _api_error 502 "Could not read the community status from CrowdSec"; return; }
     _api_success "$res"
+}
+
+# POST /crowdsec/community/check — Ask the central service now whether it accepts this engine (cscli capi status: a real login, so at most once per 10 minutes; 429 with retry_after otherwise) and answer with the community status
+handle_crowdsec_community_check() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    _cs_target || return
+    local now verdict out rc text result msg e
+    now=$(date +%s)
+    mkdir -p "$(dirname "$CROWDSEC_CAPI_STATE")" 2>/dev/null
+    # one check per 10 minutes, decided and reserved under the lock (two clicks at once make one login)
+    verdict=$( {
+        command -v flock >/dev/null 2>&1 && flock -w 5 9
+        cur=$(_cs_capi_state); last=$(jq -r '(.check.epoch // 0) | floor' <<< "$cur" 2>/dev/null); [[ "$last" =~ ^[0-9]+$ ]] || last=0
+        if (( now - last < 600 )); then printf 'wait %d %s' $(( 600 - (now - last) )) "$(jq -r '.check.at // ""' <<< "$cur")"
+        else
+            tmp="$CROWDSEC_CAPI_STATE.$$.tmp"
+            jq -c --argjson now "$now" '.check = {at: ($now | todate), epoch: $now, result: "running"}' <<< "$cur" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]] && mv -f "$tmp" "$CROWDSEC_CAPI_STATE"
+            printf 'go'
+        fi
+    } 9>"$CROWDSEC_CAPI_STATE.lock" )
+    if [[ "$verdict" == wait* ]]; then
+        local wait at; read -r _ wait at <<< "$verdict"
+        _api_response 429 "$(jq -nc --argjson w "$wait" --arg at "$at" '{error: true, code: 429, reason: "too_soon", retry_after: $w, last_check: (if $at == "" then null else $at end),
+            message: ("Checked less than 10 minutes ago. Each check is a login at the community service, which pauses engines that log in too often: try again in " + (if $w >= 60 then "\(($w + 59) / 60 | floor) min" else "\($w) s" end) + ".")}')"
+        return
+    fi
+    CS_TIMEOUT=25 _cs_run out capi status; rc=$?
+    text=$(printf '%s\n%s\n' "$CS_ERR" "$out")
+    e=$(_cs_errline "$text")
+    if (( rc == 0 )) && grep -q 'successfully interact with Central API' <<< "$text"; then
+        result=ok; msg="The community service accepts this engine's login."
+    elif grep -qiE 'no configuration for Central API|online_client' <<< "$text"; then
+        result=disabled; msg="This CrowdSec has its community connection switched off (DISABLE_ONLINE_API in its stack, or no online_client in config.yaml)."
+    elif grep -qE '403|Forbidden' <<< "$text"; then
+        result=forbidden; msg="The community service refused this engine's login (HTTP 403)."
+    else
+        result=error; msg="CrowdSec could not reach the community service: ${e:-no answer}"
+    fi
+    _cs_capi_note_login check "$result"
+    if [[ "$result" == ok ]]; then
+        # the console's view (enrolled, plan) comes with a login too: only when the first one was accepted
+        local cons
+        if _cs_run out console status -o json; then
+            cons=$(jq -c '{authenticated: (.console.authenticated // false), enrolled: (.console.enrolled // false), registered: (.console.registered // false),
+                           decision_management: (.console.decision_management // false), plan: (.console.plan // "")}' <<< "$out" 2>/dev/null)
+        fi
+        _cs_capi_note_login check console
+        [[ "$cons" == \{* ]] && _cs_capi_update '.console = ($c + {at: ($now | todate), epoch: $now})' --argjson c "$cons" --argjson now "$(date +%s)"
+    fi
+    _cs_capi_update '.check = {at: ($now | todate), epoch: $now, result: $r, message: $m}' --argjson now "$now" --arg r "$result" --arg m "$msg"
+    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CAPI_CHECK" "${AUTH_USERNAME:-}" "community check: $result"
+    local res
+    res=$(_cs_community_json fresh) || { _api_error 502 "Could not read the community status from CrowdSec"; return; }
+    _api_success "$res"
+}
+
+# _cs_capi_paused BODY — answers 409 "paused" and returns 0 when the central service is pausing this engine and BODY does not say force: true
+_cs_capi_paused() {
+    local body="$1" cur
+    [[ "$body" == \{* ]] && jq -e '.force == true' >/dev/null 2>&1 <<< "$body" && return 1
+    cur=$(_cs_community_json fresh) || return 1
+    jq -e '.capi.state == "paused"' >/dev/null 2>&1 <<< "$cur" || return 1
+    _api_response 409 "$(jq -c '{error: true, code: 409, reason: "paused", paused: true, state: .capi.state, message: .hint, hint: .hint,
+        refused_since: .capi.refused_since, last_refusal: .capi.last_refusal, needs_register: false, needs_overwrite: false, can_force: true}' <<< "$cur")"
+    return 0
 }
 
 # _cs_register_note OK REASON MESSAGE — remember how registering again went (the community answer shows it)
@@ -2171,10 +2384,12 @@ _cs_register_note() {
         > "$CROWDSEC_REGISTER_STATE.tmp" 2>/dev/null && mv -f "$CROWDSEC_REGISTER_STATE.tmp" "$CROWDSEC_REGISTER_STATE"
 }
 
-# POST /crowdsec/community/register — Register this engine with CrowdSec's Central API again (a new login, for when CAPI answers 403): keeps a copy of the old login beside it, restarts CrowdSec and answers with the fresh community status. Console enrolment belongs to the engine's identity and may need doing again
+# POST /crowdsec/community/register — Register this engine with CrowdSec's Central API again (a new login, for when CAPI has refused it for hours): keeps a copy of the old login beside it, restarts CrowdSec and answers with the community status. While the central service is only pausing the engine (capi.state paused) it answers 409 paused, unless the body says {"force": true}: registering is one more login and extends the pause. Console enrolment belongs to the engine's identity and may need doing again
 handle_crowdsec_community_register() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local body="${1:-}"
     _cs_target || return
+    _cs_capi_paused "$body" && return
     # CrowdSec's central service limits registrations too: three tries in ten minutes are plenty
     _api_rate_window "$API_RATE_DIR/crowdsec-capi-register" 3 600 || { _api_error 429 "Registering again was tried 3 times in the last 10 minutes. Wait a few minutes before trying again."; return; }
     local out rc text e bak="" ts reason msg code
@@ -2187,6 +2402,7 @@ handle_crowdsec_community_register() {
     if timeout 15 docker exec "$CS_NAME" cp -p "$CROWDSEC_CAPI_CREDS" "$cand" >/dev/null 2>&1 </dev/null; then bak="$cand"; fi
     CS_TIMEOUT=60 _cs_run out capi register; rc=$?
     text=$(printf '%s\n%s\n' "$CS_ERR" "$out")
+    _cs_capi_note_login register "$( (( rc == 0 )) && echo ok || echo failed)"
     if (( rc != 0 )); then
         # nothing changed: the copy is not needed
         [[ -n "$bak" ]] && { timeout 10 docker exec "$CS_NAME" rm -f "$bak" >/dev/null 2>&1 </dev/null || true; }
@@ -2214,6 +2430,7 @@ handle_crowdsec_community_register() {
     _crowdsec_cfg_lib
     local restarted=true healthy=false
     timeout 120 docker restart "$CS_NAME" >/dev/null 2>&1 </dev/null || restarted=false
+    [[ "$restarted" == true ]] && _cs_capi_note_login restart register
     [[ "$restarted" == true ]] && _cs_wait_healthy 90 && healthy=true
     _cs_cache_clear
     _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CAPI_REGISTER" "${AUTH_USERNAME:-}" "registered again${bak:+ (old login kept as $bak)}"
@@ -2226,10 +2443,10 @@ handle_crowdsec_community_register() {
         return
     fi
     local fresh
-    fresh=$(_cs_community_json); [[ "$fresh" == \{* ]] || fresh='null'
-    msg=$(jq -r 'if . == null then "Registered with the CrowdSec community again and restarted CrowdSec."
-                 elif .capi.reachable then "Registered with the CrowdSec community again and restarted CrowdSec. The central service accepts the new login."
-                 else "Registered again and restarted CrowdSec, but the central service does not accept the new login yet: " + (.capi.error // "no answer") end' <<< "$fresh")
+    # (no `capi status` to see whether the new login works: that would be one more login right after two. CrowdSec's own
+    # metrics, signals and blocklist pull show it within minutes, and the community status reads them)
+    fresh=$(_cs_community_json fresh); [[ "$fresh" == \{* ]] || fresh='null'
+    msg="Registered with the CrowdSec community again and restarted CrowdSec. The community status shows within a few minutes whether the central service accepts the new login (CrowdSec reports to it on its own; DCS does not log in to check)."
     _cs_register_note true "" "$msg"
     _api_success "$(jq -nc --arg m "$msg" --arg b "$bak" --arg cn "$console_note" --argjson fresh "$fresh" --argjson last "$(_cs_register_last)" \
         '{success: true, registered: true, restarted: true, healthy: true, backup: (if $b == "" then null else $b end), message: $m, console_note: $cn,
@@ -2248,7 +2465,7 @@ _cs_enroll_name() {
     printf '%s' "${n:-dcs}"
 }
 
-# POST /crowdsec/console/enroll — Enrol this engine in the CrowdSec console: {key (the enrolment key from app.crowdsec.net), name?, overwrite?}; the key is never logged or echoed
+# POST /crowdsec/console/enroll — Enrol this engine in the CrowdSec console: {key (the enrolment key from app.crowdsec.net), name?, overwrite?, force?}; the key is never logged or echoed. 409 paused while the central service is pausing the engine (unless force: true)
 handle_crowdsec_console_enroll() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     local body="$1" key name asked overwrite out rc text e code reason msg
@@ -2264,6 +2481,8 @@ handle_crowdsec_console_enroll() {
     name=$(_cs_enroll_name "$asked")
     overwrite=$(jq -r 'if .overwrite == true then "yes" else "no" end' <<< "$body")
     _cs_target || return
+    # enrolling is a login at the central service too: not while it is pausing this engine (unless force)
+    _cs_capi_paused "$body" && return
     # every try reaches CrowdSec's central service: ten in ten minutes are plenty
     _api_rate_window "$API_RATE_DIR/crowdsec-console-enroll" 10 600 || { _api_error 429 "Enrolment was tried 10 times in the last 10 minutes. Wait a few minutes before trying again."; return; }
     # (-o human: "already enrolled" is a warning, which cscli prints in human mode only, whatever config.yaml says)
@@ -2272,6 +2491,7 @@ handle_crowdsec_console_enroll() {
     args+=("$key")
     CS_TIMEOUT=60 _cs_run out "${args[@]}"; rc=$?
     text=$(printf '%s\n%s\n' "$CS_ERR" "$out"); text="${text//"$key"/<key>}"
+    _cs_capi_note_login enroll "$( (( rc == 0 )) && echo ok || echo failed)"
     e=$(_cs_errline "$text")
     _cs_cache_clear
     if (( rc == 0 )) && grep -qi 'already enrolled' <<< "$text"; then
