@@ -469,6 +469,26 @@ def dur_secs:
     | if $neg then -$v else $v end
   end;
 def iso_secs: if . == null or . == "" then 0 else (tostring | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch 0) end;
+# CrowdSec 1.6.3+ files the pulls of a key used from another address under an auto-created child "<name>@<ip>" (it cannot be deleted on its own):
+# the parent keeps last_pull null and no type while the Traefik plugin pulls every few seconds as dcs-traefik-bouncer@172.19.0.7. Each parent
+# carries its children as connections (newest first; active = pulled in the last 2 minutes, stale = not in 24 h or never); its last_pull is the
+# newest of its own and its children'"'"'s that are not stale, its type, version and address those of the newest active connection. The children are
+# no rows of their own. (A child whose parent is gone stays a row.)
+def fold_bouncers($now):
+  (. // []) as $all
+  | ($all | map(.name // "")) as $names
+  | def parent_name: if ((.auto_created // false) and ((.name // "") | test("@"))) then ((.name | sub("@[^@]*$"; "")) as $p | if ($names | index($p)) != null then $p else null end) else null end;
+  [ $all[] | select(parent_name == null) | . as $p
+    | ([ $all[] | select(parent_name == $p.name)
+         | (.last_pull // null) as $lp | (if $lp == null then null else ($lp | iso_secs) end) as $s
+         | {name, ip: (.ip_address // ""), type: (.type // ""), version: (.version // ""), last_pull: $lp, created_at: (.created_at // ""),
+            active: ($s != null and ($now - $s) <= 120), stale: ($s == null or ($now - $s) > 86400), _s: ($s // 0)} ]
+       | sort_by(-._s) | map(del(._s))) as $c
+    | ($c | map(select(.active)) | .[0] // null) as $act
+    | ([ ($p.last_pull // null) ] + ($c | map(select(.stale | not) | .last_pull)) | map(select(. != null)) | sort_by(iso_secs) | last // null) as $lp
+    | $p + {last_pull: $lp, connections: $c, connections_active: ($c | map(select(.active)) | length)}
+      + (if $act == null then {} else {type: (if $act.type != "" then $act.type else ($p.type // "") end), version: (if $act.version != "" then $act.version else ($p.version // "") end),
+                                       ip_address: (if $act.ip != "" then $act.ip else ($p.ip_address // "") end)} end) ];
 def cc: ((. // "") | tostring | ascii_upcase);
 def decision_rows($asof):
   [ (. // [])[] as $a | ($a.decisions // [])[]
@@ -681,7 +701,7 @@ _cs_gather() {
         | ($me[0].decisions // {}) as $md
         | ([$md | to_entries[] | .value | to_entries[] | select(.key == "CAPI" or (.key | startswith("lists"))) | .value | to_entries[] | .value] | add // 0) as $community
         | ([$md | to_entries[] | .value | to_entries[] | .value | to_entries[] | .value] | add // 0) as $active_all
-        | ($bo[0] // []) as $bouncers
+        | ($bo[0] | fold_bouncers($asof)) as $bouncers
         | ($bouncers | map(select(.name == $bname)) | .[0] // null) as $dcsb
         | ($hb[0] // {}) as $hub
         | { rows: $rows[0:50],
@@ -693,8 +713,10 @@ _cs_gather() {
                       updates: ([($hub | to_entries[] | .value | if type == "array" then .[] else empty end) | select((.status // "") | contains("update-available"))] | length),
                       countries_24h: ([$al[0][] | .source.cn | select(. != null and . != "")] | unique | length),
                       sources_24h: ([$al[0][] | .source.value] | unique | length) },
-            bouncers: ($bouncers | map({name, type: (.type // ""), version: (.version // ""), ip_address: (.ip_address // ""), last_pull: (.last_pull // null), created_at: (.created_at // ""), revoked: (.revoked // false)})),
-            bouncer: (if $dcsb == null then {registered: false, name: $bname} else {registered: true, name: $bname, last_pull: ($dcsb.last_pull // null), type: ($dcsb.type // ""), version: ($dcsb.version // ""), ip_address: ($dcsb.ip_address // ""), created_at: ($dcsb.created_at // "")} end),
+            bouncers: ($bouncers | map({name, type: (.type // ""), version: (.version // ""), ip_address: (.ip_address // ""), last_pull: (.last_pull // null), created_at: (.created_at // ""), revoked: (.revoked // false),
+                                        auto_created: (.auto_created // false), connections: (.connections // []), connections_active: (.connections_active // 0)})),
+            bouncer: (if $dcsb == null then {registered: false, name: $bname} else {registered: true, name: $bname, last_pull: ($dcsb.last_pull // null), type: ($dcsb.type // ""), version: ($dcsb.version // ""), ip_address: ($dcsb.ip_address // ""), created_at: ($dcsb.created_at // ""),
+                      connections: ($dcsb.connections // []), connections_active: ($dcsb.connections_active // 0)} end),
             machines: ($ma[0] | map({id: (.machineId // ""), ip_address: (.ipAddress // ""), version: (.version // ""), validated: (.isValidated // false), last_push: (.last_push // null), last_heartbeat: (.last_heartbeat // null), os: (.os // ""), datasources: (.datasources // {})})),
             acquisition: {sources: $sources, reads: $reads, parsed: $parsed, unparsed: ($sources | map(.unparsed) | add // 0), parse_rate: (if $reads > 0 then (($parsed / $reads * 1000 | round) / 1000) else null end)},
             active_all: $active_all }' 2>/dev/null
@@ -1642,7 +1664,7 @@ handle_crowdsec_allowlist_remove() {
 # Bouncers and machines
 # =============================================================================
 
-# GET /crowdsec/bouncers — The programs that enforce bans (Traefik's plugin, a firewall …): last pull, type, version, and what DCS registered for Traefik
+# GET /crowdsec/bouncers — The programs that enforce bans (Traefik's plugin, a firewall …): last pull, type, version, and what DCS registered for Traefik; the connections CrowdSec files under name@ip are folded into their bouncer (connections)
 handle_crowdsec_bouncers() {
     _cs_target || return
     local raw enf
@@ -1650,9 +1672,9 @@ handle_crowdsec_bouncers() {
     enf=$(_cs_enforcement_json)
     _cs_probe
     _api_success "$(jq -c --argjson enf "$enf" --argjson tr "$CS_TRAEFIK" --arg mine "$CROWDSEC_BOUNCER_NAME" --argjson now "$(date +%s)" "$_CS_JQ_DEFS"'
-        [ (. // [])[] | (.last_pull // null) as $lp | ($lp | if . == null then null else iso_secs end) as $lps
+        [ fold_bouncers($now)[] | (.last_pull // null) as $lp | ($lp | if . == null then null else iso_secs end) as $lps
           | { name, type: (.type // ""), version: (.version // ""), ip_address: (.ip_address // ""), last_pull: $lp, created_at: (.created_at // ""), revoked: (.revoked // false),
-              auto_created: (.auto_created // false), dcs: (.name == $mine),
+              auto_created: (.auto_created // false), dcs: (.name == $mine), connections: (.connections // []), connections_active: (.connections_active // 0),
               status: (if .revoked then "revoked" elif $lps == null then "never" elif ($now - $lps) < 900 then "active" else "idle" end) } ] as $b
         | { bouncers: $b, count: ($b | length), dcs_bouncer: ($b | map(select(.dcs)) | .[0] // null), name: $mine, enforcement: $enf, traefik: $tr,
             traefik_registerable: ($tr.present and $enf.routes_dir != "") }' <<< "$raw")"

@@ -272,7 +272,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/crowdsec/alerts` | user | Recent detections (window 1h/6h/24h/7d/30d, q, scenario, country, ip, simulated, limit, offset) with facets; each row says whether its source is banned now |
 | GET | `/crowdsec/alerts/{id}` | user | One alert with the requests that raised it (path, status, user agent, target …) |
 | GET | `/crowdsec/allowlist` | user | Everything that is never banned: entries with comment and expiry, which are managed by DCS (the home address, also kept on CrowdSec's allowlist for its AppSec WAF: home.allowlist) and which can be removed; says which mechanism is in use |
-| GET | `/crowdsec/bouncers` | user | The programs that enforce bans (Traefik's plugin, a firewall …): last pull, type, version, and what DCS registered for Traefik |
+| GET | `/crowdsec/bouncers` | user | The programs that enforce bans (Traefik's plugin, a firewall …): last pull, type, version, and what DCS registered for Traefik; the connections CrowdSec files under name@ip are folded into their bouncer (connections) |
 | GET | `/crowdsec/machines` | user | The engines that report to this CrowdSec (this container's own agent, others you enrolled) |
 | GET | `/crowdsec/metrics` | user | What has been happening: alerts over time, top scenarios, top countries, top sources and networks, the map points, log-reading counters (window=24h\|7d\|30d) |
 | GET | `/crowdsec/hub` | user | Installed collections, scenarios and parsers (with which have updates) and a short list of suggestions; ?type=collections\|scenarios\|parsers&available=1&q= lists what can be installed |

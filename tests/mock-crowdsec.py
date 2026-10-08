@@ -61,6 +61,9 @@ CONTROL VERBS (first argument starts with --mock-)
         enroll=ok|invalid|already   what `cscli console enroll KEY` meets (ok: enrolled, and the engine is then "already" enrolled;
                             invalid: the attachment key is refused; already: enrolled before, only --overwrite enrols again).
                             A forbidden CAPI refuses the login first (403).
+        bouncer_child=NAME@IP,TYPE,AGE   CrowdSec 1.6.3+ files a key's pulls from another address under an auto-created child NAME@IP:
+                            add (or replace) one of TYPE that last pulled AGE seconds ago (AGE "never": not yet); -NAME@IP removes it
+        bouncer_idle=NAME   the bouncer NAME as the parent of such children looks: never pulled, no type, version or address
         traefik_bouncer=NAME   add (or replace) a Traefik-plugin bouncer NAME that pulled 20 s ago (a proxy that has its own middleware and key):
                             --mock-set traefik_bouncer=traefik-bouncer@172.19.0.6 ; traefik_bouncer=-NAME removes it again
         hub_cascade=1|0     the real cscli also flags an enabled collection "update available" when one of its members is behind (one level);
@@ -5230,7 +5233,10 @@ class BouncerCmds(object):
                 if self.fl.get('ignore-missing'):
                     continue
                 self.fatal('unable to delete bouncer %s: ent: bouncer not found' % name)
-            self.cs['bouncers'].remove(b)
+            if b.get('auto_created'):
+                self.fatal('unable to delete bouncer: bouncer %s is auto-created and cannot be deleted, delete parent bouncer instead' % name)
+            # (1.6.3+: the connections CrowdSec filed under name@ip for this key go with it)
+            self.cs['bouncers'] = [x for x in self.cs['bouncers'] if x is not b and not (x.get('auto_created') and x['name'].startswith(name + '@'))]
             self.run.touch()
             self.log('info', "bouncer '%s' deleted successfully" % name)
 
@@ -6509,7 +6515,7 @@ def log_call(fdir, argv):
 
 
 KNOBS = ('docker_down', 'lapi_down', 'health', 'status', 'version', 'discord', 'traefik', 'health_delay', 'restart_fails', 'cscli_slow_ms',
-         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer', 'capi_register', 'enroll')
+         'empty_json', 'capi', 'hub_cascade', 'traefik_bouncer', 'capi_register', 'enroll', 'bouncer_child', 'bouncer_idle')
 
 
 def control(fdir, argv):
@@ -6592,6 +6598,27 @@ def set_knob(st, k, v):
         if v not in ('ok', 'invalid', 'already'):
             fail('%s: enroll must be ok|invalid|already' % PROG, 2)
         kn[k] = v
+    elif k == 'bouncer_child':
+        cs = st.get('cs')
+        if cs is None:
+            fail('%s: no CrowdSec state' % PROG, 2)
+        remove = v.startswith('-')
+        parts = (v[1:] if remove else v).split(',')
+        name = parts[0]
+        if '@' not in name or (not remove and len(parts) != 3):
+            fail('%s: bouncer_child is NAME@IP,TYPE,AGE or -NAME@IP' % PROG, 2)
+        cs['bouncers'] = [b for b in cs['bouncers'] if b['name'] != name]
+        if not remove:
+            age = None if parts[2] == 'never' else float(parts[2])
+            cs['bouncers'].append({'name': name, 'created': t - 2 * 86400, 'updated': t - (age or 0), 'ip': name.split('@', 1)[1], 'type': parts[1],
+                                   'version': 'v1.4.4' if 'raefik' in parts[1] else '', 'last_pull': None if age is None else t - age,
+                                   'key': 'k' * 43, 'auto_created': True})
+    elif k == 'bouncer_idle':
+        cs = st.get('cs')
+        b = next((x for x in (cs or {}).get('bouncers', []) if x['name'] == v), None)
+        if b is None:
+            fail('%s: no bouncer %s' % (PROG, v), 2)
+        b.update({'last_pull': None, 'type': '', 'version': '', 'ip': ''})
     elif k == 'traefik_bouncer':
         cs = st.get('cs')
         if cs is None:

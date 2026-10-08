@@ -5924,6 +5924,44 @@ cst_services_logs() {
     cst_is "logs: Docker does not answer" 503
 }
 
+# ---- CrowdSec 1.6.3+ files a key's pulls from a container address under an auto-created "<name>@<ip>": the bouncer is the parent, the pulls are its connections ----
+cst_bouncer_connections() {
+    local b="dcs-traefik-bouncer"
+    cst_world data traefik --traefik
+    # (what the real server showed: the parent never pulled and has no type; the plugin pulls every 30 s as a child; a stray child from a manual test 11 h ago)
+    cst_mock --mock-set bouncer_idle=$b
+    cst_call admin GET /crowdsec/status
+    cst_j "bouncer connections: without any, the parent alone has never pulled" '.issues | map(.code) | index("bouncer_idle") != null' true
+    cst_mock --mock-set "bouncer_child=$b@172.19.0.7,Crowdsec-Bouncer-Traefik-Plugin,30" "bouncer_child=$b@127.0.0.1,Wget,39600"
+    cst_call admin GET /crowdsec/bouncers
+    cst_is "bouncer connections: the list" 200
+    cst_j "bouncer connections: the children are no rows of their own" '.count' 2 '[.bouncers[].name] | join(",")' "$b,test-bouncer"
+    cst_j "bouncer connections: the parent pulls through its newest connection" '.dcs_bouncer.status' active '.dcs_bouncer.type' Crowdsec-Bouncer-Traefik-Plugin '.dcs_bouncer.version' v1.4.4 \
+        '.dcs_bouncer.ip_address' 172.19.0.7 '.dcs_bouncer.last_pull != null' true '.dcs_bouncer.connections_active' 1 '.bouncers[0].dcs' true
+    cst_j "bouncer connections: newest first, each marked" '[.dcs_bouncer.connections[] | "\(.ip) \(.type) \(.active) \(.stale)"] | join(",")' \
+        "172.19.0.7 Crowdsec-Bouncer-Traefik-Plugin true false,127.0.0.1 Wget false false"
+    cst_call admin GET /crowdsec/status
+    cst_j "bouncer connections: the status counts the pulls of the children" '.issues | map(.code) | index("bouncer_idle")' null '.bouncer.last_pull != null' true \
+        '.bouncer.ip_address' 172.19.0.7 '.bouncer.connections | length' 2 '[.bouncers[].name] | map(select(contains("@"))) | length' 0 '.counts.bouncers' 2
+    # -- the plugin stops: the stray connection (11 h ago) is what is left; it says nothing about the plugin's type
+    cst_mock --mock-set "bouncer_child=-$b@172.19.0.7"
+    cst_call admin GET /crowdsec/bouncers
+    cst_j "bouncer connections: only an old connection: idle, not active" '.dcs_bouncer.status' idle '.dcs_bouncer.type' '' '.dcs_bouncer.connections_active' 0
+    # -- a stale-only set (more than a day) does not count as working
+    cst_mock --mock-set "bouncer_child=$b@127.0.0.1,Wget,90000"
+    cst_call admin GET /crowdsec/bouncers
+    cst_j "bouncer connections: a stale connection is no pull" '.dcs_bouncer.status' never '.dcs_bouncer.last_pull' null '.dcs_bouncer.connections[0].stale' true
+    cst_call admin GET /crowdsec/status
+    cst_j "bouncer connections: …so the status says it never pulled" '.issues | map(.code) | index("bouncer_idle") != null' true
+    # -- a child cannot be deleted on its own (CrowdSec refuses); deleting the parent takes its connections along
+    cst_mock --mock-set "bouncer_child=$b@172.19.0.7,Crowdsec-Bouncer-Traefik-Plugin,30"
+    check "bouncer connections: CrowdSec refuses to delete a child" 1 "$(cst_cs bouncers delete "$b@172.19.0.7" >/dev/null 2>&1; echo $?)"
+    cst_call admin DELETE "/crowdsec/bouncers/$b"
+    cst_is "bouncer connections: deleting the parent" 200
+    cst_call admin GET /crowdsec/bouncers
+    cst_j "bouncer connections: …its connections are gone with it" '[.bouncers[].name] | join(",")' test-bouncer
+}
+
 cst_services_community() {
     local v
     cst_world data traefik --traefik
@@ -6084,6 +6122,7 @@ cst_console_enroll() {
 cst_part_services() {
     echo "CrowdSec page: bouncers, machines, the container, its log, the community list"
     cst_services_bouncers
+    cst_bouncer_connections
     cst_services_register
     cst_services_service
     cst_services_logs

@@ -20,6 +20,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A 403 from the community service says what to do.** `GET /crowdsec/community` explains the refusal with the new
   button instead of a shell command, and answers `needs_register: true` (plus `last_register`, how the last attempt
   went) so the dashboard can flag it. A server was silently cut off from the community blocklist for a month this way.
+- **A bouncer that pulls through a container address shows as working.** CrowdSec 1.6.3+ files the pulls of a key used
+  from another address under an auto-created child `<name>@<ip>`; the parent keeps `last_pull` null and no type, so
+  the page said "Traefik has not asked the bouncer yet" while the plugin pulled every 30 seconds. The children are now
+  folded into their parent (`GET /crowdsec/bouncers`, `GET /crowdsec/status`): the parent carries `connections`
+  (newest first, `active` when pulled in the last two minutes, `stale` after a day or when never), its `last_pull` is
+  the newest pull that is not stale, its type, version and address those of the newest active connection, and the
+  children are no rows of their own (CrowdSec refuses to delete them by themselves anyway). "Never pulled" only shows
+  when neither the bouncer nor a recent connection ever pulled.
 
 ### Added
 
