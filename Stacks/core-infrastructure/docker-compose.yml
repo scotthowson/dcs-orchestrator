@@ -3,12 +3,22 @@ services:
     container_name: skeleton-redis
     image: redis:alpine
     restart: unless-stopped
+    # The password lives in the secrets store as DCS_REDIS_PASSWORD, created on
+    # first start by secrets_ensure_generated and injected only into the compose
+    # process. No secret means plain redis-server — exactly today's behaviour.
+    command:
+      - sh
+      - -c
+      - 'exec redis-server $${DCS_REDIS_PASSWORD:+--requirepass "$$DCS_REDIS_PASSWORD"}'
     environment:
       - TZ=${TZ:-UTC}
+      - DCS_REDIS_PASSWORD=${SECRETS_DCS_REDIS_PASSWORD:-}
     volumes:
       - ${APP_DATA_DIR:-./App-Data}/Redis:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        - CMD-SHELL
+        - 'redis-cli $${DCS_REDIS_PASSWORD:+-a "$$DCS_REDIS_PASSWORD" --no-auth-warning} ping | grep -q PONG'
       interval: 30s
       timeout: 5s
       retries: 3

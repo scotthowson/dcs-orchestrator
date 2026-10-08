@@ -28,8 +28,8 @@ CS_NOTIFY_FILE="$CROWDSEC_STATE_DIR/notify.json"
 CS_NOTIFY_STATUS="$CROWDSEC_STATE_DIR/notify-status.json"
 CS_BACKUP_DIR="$CROWDSEC_STATE_DIR/backups"
 CS_WEBHOOK_SECRET="CROWDSEC_DISCORD_WEBHOOK"
-# automatic bans may last up to a year; only a person can ban for ten
-CS_MAX_AUTO_SECONDS=31536000
+# automatic bans may last as long as a manual one: ten years (effectively permanent)
+CS_MAX_AUTO_SECONDS=315360000
 CS_CFG_ERR=""
 
 # a JSON object from a file, or the given default
@@ -113,7 +113,7 @@ _cs_profile_inspect() {
 # profiles.yaml: the settings, and the file they make
 # =============================================================================
 
-_CS_PROFILE_DEFAULTS='{"duration":"4h","range_duration":"4h","escalate":{"enabled":false,"max":"720h"},"overrides":[]}'
+_CS_PROFILE_DEFAULTS='{"duration":"4h","range_duration":"4h","escalate":{"enabled":false,"max":"720h"},"overrides":[],"appsec_ban":true}'
 _CS_NOTIFY_FILTER_DEFAULTS='{"enabled":true,"events":{"bans":true,"simulated":true,"detect_only":false},"filters":{"min_events":0,"only":[],"ignore":[]}}'
 
 # The settings the live file stands for: DCS's own header, or what the stock/shipped file says. $1 = _cs_profile_inspect JSON
@@ -145,13 +145,13 @@ _cs_profile_validate() {
     rd=$(_cs_norm_duration "$rd") || { CS_CFG_ERR="The range ban duration is not valid: use 30m, 4h, 7d or 2w"; return 1; }
     for v in "$d" "$rd"; do
         secs=$(_cs_duration_seconds "$v")
-        (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="Automatic bans can last at most a year (365d). Use a manual ban for longer."; return 1; }
+        (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="Automatic bans can last at most ten years (3650d). Use a manual ban for longer."; return 1; }
     done
     local esc_on esc_max
     esc_on=$(jq -r 'if .escalate.enabled == true then "true" else "false" end' <<< "$j")
     esc_max=$(_cs_norm_duration "$(jq -r '(.escalate.max // "720h") | tostring' <<< "$j")") || { CS_CFG_ERR="The longest repeat-offender ban is not valid: use 7d, 30d or 90d"; return 1; }
     secs=$(_cs_duration_seconds "$esc_max")
-    (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="The longest repeat-offender ban can be a year (365d) at most"; return 1; }
+    (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="The longest repeat-offender ban can be ten years (3650d) at most"; return 1; }
     n=$(jq '.overrides | length' <<< "$j")
     (( n <= 12 )) || { CS_CFG_ERR="At most 12 scenario overrides"; return 1; }
     local -a ovr=(); local -A seen=()
@@ -162,13 +162,15 @@ _cs_profile_validate() {
         seen[$pat]=1
         dur=$(_cs_norm_duration "$(jq -r ".overrides[$i].duration | tostring" <<< "$j")") || { CS_CFG_ERR="Override $(( i + 1 )) ($pat): the duration is not valid: use 30m, 4h, 7d or 2w"; return 1; }
         secs=$(_cs_duration_seconds "$dur")
-        (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="Override $(( i + 1 )) ($pat): automatic bans can last at most a year"; return 1; }
+        (( secs <= CS_MAX_AUTO_SECONDS )) || { CS_CFG_ERR="Override $(( i + 1 )) ($pat): automatic bans can last at most ten years"; return 1; }
         ovr+=("$(jq -nc --arg p "$pat" --arg d "$dur" '{pattern: $p, duration: $d}')")
     done
     if [[ "$esc_on" == true ]]; then
         (( $(_cs_duration_seconds "$esc_max") >= $(_cs_duration_seconds "$d") )) || { CS_CFG_ERR="The longest repeat-offender ban ($esc_max) is shorter than the default ban ($d)"; return 1; }
     fi
-    out=$( ( [[ ${#ovr[@]} -gt 0 ]] && printf '%s\n' "${ovr[@]}" || true ) | jq -sc --arg d "$d" --arg rd "$rd" --argjson eo "$esc_on" --arg em "$esc_max" '{duration: $d, range_duration: $rd, escalate: {enabled: $eo, max: $em}, overrides: .}')
+    local ab
+    ab=$(jq -r 'if .appsec_ban == false then "false" else "true" end' <<< "$j")
+    out=$( ( [[ ${#ovr[@]} -gt 0 ]] && printf '%s\n' "${ovr[@]}" || true ) | jq -sc --arg d "$d" --arg rd "$rd" --argjson eo "$esc_on" --arg em "$esc_max" --argjson ab "$ab" '{duration: $d, range_duration: $rd, escalate: {enabled: $eo, max: $em}, overrides: ., appsec_ban: $ab}')
     CS_OUT="$out"
 }
 
@@ -198,6 +200,10 @@ def emit($name; $cond; $dur; $expr; $notify; $on_success):
 | ($base_nf + (if $n.events.simulated == false then ["(Alert.Simulated == nil || !Alert.Simulated)"] else [] end) | join(" && ")) as $nf
 | ($base_nf | join(" && ")) as $nf_detect
 | ([ ($p.overrides // [])[] | . as $o | {name: ("dcs_override_" + (($p.overrides | map(.pattern) | index($o.pattern)) + 1 | tostring)), cond: ("Alert.Remediation == true && " + scen_match($o.pattern)), dur: $o.duration} ]
+  + (if $p.appsec_ban == true then
+       [ {name: "dcs_appsec_ip", cond: "Alert.Remediation == false && (Alert.Simulated == nil || !Alert.Simulated) && Alert.GetScope() == \"Ip\" && (Alert.GetScenario() startsWith \"crowdsecurity/vpatch\" || Alert.GetScenario() startsWith \"crowdsecurity/appsec\")", dur: $p.duration},
+         {name: "dcs_appsec_range", cond: "Alert.Remediation == false && (Alert.Simulated == nil || !Alert.Simulated) && Alert.GetScope() == \"Range\" && (Alert.GetScenario() startsWith \"crowdsecurity/vpatch\" || Alert.GetScenario() startsWith \"crowdsecurity/appsec\")", dur: $p.range_duration} ]
+     else [] end)
   + [ {name: "default_ip_remediation", cond: "Alert.Remediation == true && Alert.GetScope() == \"Ip\"", dur: $p.duration},
       {name: "default_range_remediation", cond: "Alert.Remediation == true && Alert.GetScope() == \"Range\"", dur: $p.range_duration} ]) as $groups
 | [ $groups[] | . as $g
@@ -845,7 +851,7 @@ _cs_settings_view() {
     jq -nc --argjson insp "$CS_INSPECT" --argjson live "$CS_LIVE_SETTINGS" --argjson saved "$saved" --argjson presets "$_CS_DURATION_PRESETS" --argjson defaults "$_CS_PROFILE_DEFAULTS" \
         --argjson drift "$drift" --arg raw "$raw" --arg manual "$(_cs_manual_default_duration)" --argjson backups "$(_cs_backups_json)" --argjson ret "$(_cs_retention_days)" '
         { mode: $insp.mode, editable: ($insp.mode != "custom"), custom: ($insp.mode == "custom"), profile: $live, manual_duration: $manual, defaults: $defaults, presets: $presets,
-          limits: {auto_max: "365d", manual_max: "10 years", overrides_max: 12},
+          limits: {auto_max: "3650d", manual_max: "10 years", overrides_max: 12},
           live: {file: "/etc/crowdsec/profiles.yaml", profiles: $insp.profiles, notified: $insp.notified, escalate: $insp.escalate, ip_duration: $insp.ip_duration, range_duration: $insp.range_duration},
           drift: $drift, backups: $backups, raw: (if $raw == "" then null else $raw end), retention_days: $ret,
           help: { duration: "How long CrowdSec bans an address it caught by itself. Bans you add by hand choose their own length.",

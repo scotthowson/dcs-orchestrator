@@ -6888,7 +6888,7 @@ cst_settings_read() {
     cst_call admin GET /crowdsec/settings
     cst_is "settings: the stock profile" 200
     cst_j "settings/stock" '.mode' stock '.editable' true '.custom' false '.profile.duration' 4h '.profile.range_duration' 4h '.profile.escalate.enabled' false '.profile.escalate.max' 720h \
-        '.profile.overrides | length' 0 '.manual_duration' 4h '.defaults.duration' 4h '.presets | join(",")' 30m,1h,4h,12h,24h,3d,7d,30d '.limits.auto_max' 365d '.limits.manual_max' '10 years' \
+        '.profile.overrides | length' 0 '.manual_duration' 4h '.defaults.duration' 4h '.presets | join(",")' 30m,1h,4h,12h,24h,3d,7d,30d '.limits.auto_max' 3650d '.limits.manual_max' '10 years' \
         '.limits.overrides_max' 12 '.live.file' /etc/crowdsec/profiles.yaml '.live.profiles | join(",")' default_ip_remediation,default_range_remediation '.live.notified' false '.live.escalate' false \
         '.live.ip_duration' 4h '.live.range_duration' 4h '.drift' false '.backups | length' 0 '.raw' null '.retention_days' 7
     cst_t "settings/stock: each option has a sentence of help" '.help | (.duration | length > 20) and (.escalate | length > 20) and (.overrides | length > 20)'
@@ -6940,7 +6940,7 @@ cst_settings_write() {
         '.applied.changed' true '.applied.backup | test("^profiles-[0-9]{8}T[0-9]{6}Z\\.yaml$")' true '.drift' false '.backups | length' 1 '.backups[0].kind' profiles
     check "settings/set: the file says DCS wrote it" "# Managed by DCS:" "$(sed -n 1p "$live" | cut -c1-17)"
     check "settings/set: …and carries the settings it stands for" "12h 24h" "$(sed -n 's/^# dcs-settings: //p' "$live" | jq -r '[.profile.duration, .profile.range_duration] | join(" ")')"
-    check "settings/set: the ban lengths are in the profiles" "12h 24h" "$(awk '/^name: default_ip_remediation/{n="ip"} /^name: default_range_remediation/{n="range"} /^    duration:/{print n, $2}' "$live" | sort | awk '{printf "%s%s", (NR>1?" ":""), $2}')"
+    check "settings/set: the ban lengths are in the profiles" "12h 24h" "$(awk '/^name: default_ip_remediation/{n="ip"} /^name: default_range_remediation/{n="range"} /^    duration:/{if(n!="")print n, $2}' "$live" | sort | awk '{printf "%s%s", (NR>1?" ":""), $2}')"
     check "settings/set: the old file is kept, byte for byte" "$orig" "$(cat "$CST/.data/crowdsec/backups/$(jq -r '.applied.backup' <<< "$CST_BODY")")"
     check "settings/set: the backup folder and the settings are private" "700 600" "$(stat -c %a "$CST/.data/crowdsec/backups") $(stat -c %a "$CST/.data/crowdsec/settings.json")"
     check "settings/set: CrowdSec was restarted, once" 1 "$(cst_argv_since "$mark" | grep -c 'restart CrowdSec')"
@@ -6960,17 +6960,17 @@ cst_settings_write() {
     cst_call admin PUT /crowdsec/settings '{"profile":{"escalate":{"enabled":true,"max":"30d"},"overrides":[{"pattern":"crowdsecurity/ssh*","duration":"24h"},{"pattern":"crowdsecurity/http-cve","duration":"7d"}]}}'
     cst_is "settings/set: repeat offenders and two overrides" 200
     cst_j "settings/set" '.profile.escalate.enabled' true '.profile.escalate.max' 720h '.profile.overrides | map("\(.pattern)=\(.duration)") | join(",")' 'crowdsecurity/ssh*=24h,crowdsecurity/http-cve=168h' \
-        '.live.escalate' true '.live.profiles | join(",")' dcs_override_1,dcs_override_2,default_ip_remediation,default_range_remediation '.backups | length' 2
-    check "settings/set: an override is a profile of its own, before the defaults" "dcs_override_1 dcs_override_2 default_ip_remediation default_range_remediation" "$(sed -n 's/^name: //p' "$live" | tr '\n' ' ' | sed 's/ $//')"
+        '.live.escalate' true '.live.profiles | join(",")' dcs_override_1,dcs_override_2,dcs_appsec_ip,dcs_appsec_range,default_ip_remediation,default_range_remediation '.backups | length' 2
+    check "settings/set: an override is a profile of its own, before the defaults" "dcs_override_1 dcs_override_2 dcs_appsec_ip dcs_appsec_range default_ip_remediation default_range_remediation" "$(sed -n 's/^name: //p' "$live" | tr '\n' ' ' | sed 's/ $//')"
     check "settings/set: a prefix and a name" "1 1" "$(grep -c 'startsWith "crowdsecurity/ssh"' "$live") $(grep -c '== "crowdsecurity/http-cve"' "$live")"
-    check "settings/set: every profile grows the ban with each earlier one" 4 "$(grep -c '^duration_expr: .Sprintf("%dh", min((GetDecisionsCount(Alert.GetValue()) + 1) \* [0-9]*, 720))' "$live")"
+    check "settings/set: every profile grows the ban with each earlier one" 6 "$(grep -c '^duration_expr: .Sprintf("%dh", min((GetDecisionsCount(Alert.GetValue()) + 1) \* [0-9]*, 720))' "$live")"
     cst_call admin PUT /crowdsec/settings '{"profile":{"escalate":{"enabled":false},"overrides":[]}}'
-    cst_j "settings/set: repeat offenders off and the overrides gone" '.profile.escalate.enabled' false '.profile.overrides | length' 0 '.live.escalate' false '.live.profiles | join(",")' default_ip_remediation,default_range_remediation
+    cst_j "settings/set: repeat offenders off and the overrides gone" '.profile.escalate.enabled' false '.profile.overrides | length' 0 '.live.escalate' false '.live.profiles | join(",")' dcs_appsec_ip,dcs_appsec_range,default_ip_remediation,default_range_remediation
     check "settings/set: …no more growing lengths" 0 "$(grep -c '^duration_expr' "$live")"
-    # -- twelve overrides and the longest automatic ban, a year
+    # -- twelve overrides and a long automatic ban (a year; ten is the cap)
     cst_call admin PUT /crowdsec/settings "$(jq -nc '{profile: {duration: "365d", overrides: [range(0; 12) | {pattern: "crowdsecurity/s\(.)", duration: "1h"}]}}')"
     cst_is "settings/set: twelve overrides and a year" 200
-    cst_j "settings/set: …twelve, and a year is 8760 hours" '.profile.overrides | length' 12 '.live.profiles | length' 14 '.profile.duration' 8760h
+    cst_j "settings/set: …twelve, and a year is 8760 hours" '.profile.overrides | length' 12 '.live.profiles | length' 16 '.profile.duration' 8760h
     cst_call admin PUT /crowdsec/settings "$(jq -nc '{profile: {overrides: [range(0; 13) | {pattern: "crowdsecurity/s\(.)", duration: "1h"}]}}')"
     cst_is "settings/set: thirteen overrides" 400
     # -- the length of a ban made by hand: kept in DCS, nothing to restart
@@ -7000,13 +7000,13 @@ cst_settings_invalid() {
     orig=$(cat "$live")
     mark=$(cst_argv_n)
     local -a bodies=(
-        '{"profile":{"duration":"nope"}}' '{"profile":{"duration":"30s"}}' '{"profile":{"duration":"366d"}}' '{"profile":{"duration":"11y"}}' '{"profile":{"duration":12}}' '{"profile":{"duration":"4h;id"}}'
-        '{"profile":{"range_duration":"x"}}' '{"profile":{"range_duration":"400d"}}'
-        '{"profile":{"escalate":{"enabled":true,"max":"x"}}}' '{"profile":{"escalate":{"enabled":true,"max":"366d"}}}' '{"profile":{"escalate":{"enabled":true,"max":"1h"},"duration":"4h"}}' '{"profile":{"escalate":"yes"}}' '{"profile":{"escalate":[]}}'
+        '{"profile":{"duration":"nope"}}' '{"profile":{"duration":"30s"}}' '{"profile":{"duration":"3651d"}}' '{"profile":{"duration":"11y"}}' '{"profile":{"duration":12}}' '{"profile":{"duration":"4h;id"}}'
+        '{"profile":{"range_duration":"x"}}' '{"profile":{"range_duration":"4000d"}}'
+        '{"profile":{"escalate":{"enabled":true,"max":"x"}}}' '{"profile":{"escalate":{"enabled":true,"max":"4000d"}}}' '{"profile":{"escalate":{"enabled":true,"max":"1h"},"duration":"4h"}}' '{"profile":{"escalate":"yes"}}' '{"profile":{"escalate":[]}}'
         '{"profile":{"overrides":[{"pattern":"","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"a b","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"crowdsecurity/x**","duration":"1h"}]}}'
         '{"profile":{"overrides":[{"pattern":"*","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"a\"b","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"a'"'"'b","duration":"1h"}]}}'
         '{"profile":{"overrides":[{"pattern":"a\\b","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"a$(id)","duration":"1h"}]}}' '{"profile":{"overrides":[{"pattern":"a;b","duration":"1h"}]}}'
-        '{"profile":{"overrides":[{"pattern":"a/b"}]}}' '{"profile":{"overrides":[{"pattern":"a/b","duration":"x"}]}}' '{"profile":{"overrides":[{"pattern":"a/b","duration":"400d"}]}}'
+        '{"profile":{"overrides":[{"pattern":"a/b"}]}}' '{"profile":{"overrides":[{"pattern":"a/b","duration":"x"}]}}' '{"profile":{"overrides":[{"pattern":"a/b","duration":"4000d"}]}}'
         '{"profile":{"overrides":[{"pattern":"a/b","duration":"1h"},{"pattern":"a/b","duration":"2h"}]}}' '{"profile":{"overrides":{"a":1}}}' '{"profile":{"overrides":[1]}}' '{"profile":{"overrides":"x"}}'
         '{"profile":[]}' '{"profile":"x"}' '{"profile":5}' '{"manual_duration":"nope"}' '{"manual_duration":"30s"}' '{"manual_duration":"3651d"}' '{"manual_duration":5}' 'nope' '[]' '"x"'
     )

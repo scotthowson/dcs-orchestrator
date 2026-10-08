@@ -83,6 +83,24 @@ secrets_missing() {
     done < <(secrets_references "$@")
 }
 
+# References the platform may create itself: internal service credentials the
+# operator never types (e.g. the core Redis password). Everything else stays an
+# operator gate — a user-supplied credential is never replaced by a random one.
+SECRETS_AUTO_GENERATED="DCS_REDIS_PASSWORD"
+
+# Create missing values for the auto-generated names FILE... references. Call
+# before secrets_missing so a stack's internal credentials provision themselves
+# on first start after an update, without operator input or .env edits.
+# Usage: secrets_ensure_generated FILE...
+secrets_ensure_generated() {
+    local name
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        case " $SECRETS_AUTO_GENERATED " in *" $name "*) ;; *) continue ;; esac
+        secrets_exists "$name" || secrets_set "$name" "$(openssl rand -hex 24)" || return 1
+    done < <(secrets_references "$@")
+}
+
 # =============================================================================
 # CRUD
 # =============================================================================

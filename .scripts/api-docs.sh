@@ -131,6 +131,7 @@ doc_path() {
 # Extract _api_route_allowed verbatim and evaluate it for the "user" role.
 route_allowed_src=$(sed -n '/^_api_route_allowed() {/,/^}/p' "$API")
 eval "$route_allowed_src"
+eval "$(sed -n '/^_api_bot_allowed() {/,/^}/p' "$API")"
 
 access_for() {
     local method="$1" pattern="$2" public="$3"
@@ -270,6 +271,37 @@ emit_json() {
     printf ']'
 }
 
+# ── 5. Role-policy tripwire ───────────────────────────────────────────
+# GET routes are reachable by the viewer and bot roles unless a deny rule in
+# _api_route_allowed / _api_bot_allowed says otherwise — allow-by-default
+# means a new secret- or system-revealing path quietly ships as a viewer
+# route. A sensitive-looking path that any non-admin role (or nobody at
+# all) can reach must be either denied in the policy or consciously
+# recorded in .config/route-policy-allowlist.txt (one "METHOD /pattern"
+# per line; # comments). Public non-GET routes always trip it: an
+# unauthenticated mutation is always a deliberate choice.
+TRIPWIRE_LIST="$BASE_DIR/.config/route-policy-allowlist.txt"
+TRIPWIRE_RE='/(env|secrets|files|export|terminal|snapshots?|backups?|audit|crontab|dns|recovery|join-tokens|feed|provision|tokens?|sessions?|invites|users|webhooks?|auth|exec|eval|shell|sudo|ssh|config|settings|envfile|password|history|logs|metrics)(/|$)'
+
+tripwire_findings() {
+    local method pattern public handler
+    while IFS=$'\t' read -r method pattern public handler; do
+        [[ -z "$method" ]] && continue
+        if [[ "$method" != "GET" ]]; then
+            # every public mutation is a deliberate choice and belongs in the file
+            [[ "$public" == "1" ]] || continue
+        else
+            [[ "$pattern" =~ $TRIPWIRE_RE ]] || continue
+            if [[ "$public" == "1" ]]; then :
+            elif AUTH_ROLE=user _api_route_allowed "$method" "${pattern//\*/x}"; then :
+            elif AUTH_ROLE=bot _api_route_allowed "$method" "${pattern//\*/x}" 2>/dev/null; then :
+            else continue; fi
+        fi
+        grep -qxF "$method $pattern" "$TRIPWIRE_LIST" 2>/dev/null && continue
+        printf '%s %s\n' "$method" "$pattern"
+    done < <(extract_routes)
+}
+
 # Rewrite the endpoint catalogue that GET / serves (embedded in handle_root)
 apply_root() {
     local json
@@ -300,15 +332,30 @@ case "${1:-}" in
         apply_root && echo "Updated the GET / endpoint catalogue in $API (${#rows[@]} endpoints)"
         ;;
     --check)
+        rc=0
         if [[ ! -f "$DOC" ]] || ! diff -q <(emit_markdown) "$DOC" >/dev/null; then
             echo "docs/API.md is out of date — run .scripts/api-docs.sh" >&2
-            exit 1
+            rc=1
         fi
         if ! root_is_current; then
             echo "The GET / endpoint catalogue is out of date — run .scripts/api-docs.sh" >&2
-            exit 1
+            rc=1
         fi
-        echo "docs/API.md and the GET / catalogue are up to date (${#rows[@]} endpoints)"
+        findings="$(tripwire_findings)"
+        if [[ -n "$findings" ]]; then
+            {
+                echo "Role-policy tripwire: sensitive-looking routes reachable without admin rights:"
+                printf '%s\n' "$findings" | sed 's/^/  /'
+                echo "Deny them in _api_route_allowed / _api_bot_allowed, or record the decision by adding"
+                echo "'METHOD /pattern' lines to .config/route-policy-allowlist.txt"
+            } >&2
+            rc=1
+        fi
+        [[ $rc -eq 0 ]] && echo "docs/API.md and the GET / catalogue are up to date (${#rows[@]} endpoints)"
+        exit $rc
+        ;;
+    --tripwire)
+        tripwire_findings
         ;;
     *)
         mkdir -p "$(dirname "$DOC")"

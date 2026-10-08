@@ -164,7 +164,11 @@ start_service_stack() {
 
     # Secrets referenced as ${SECRETS_NAME} are injected by compose_with_secrets
     # (from .lib/secrets.sh); a missing one is reported instead of starting the
-    # service with an empty value.
+    # service with an empty value. Names the platform generates itself
+    # (SECRETS_AUTO_GENERATED in secrets.sh) are created first.
+    if command -v secrets_ensure_generated >/dev/null 2>&1; then
+        secrets_ensure_generated "$compose_file" "$env_file" "$BASE_DIR/.env"
+    fi
     if command -v secrets_missing >/dev/null 2>&1; then
         local _missing
         _missing=$(secrets_missing "$compose_file" "$env_file" "$BASE_DIR/.env" | tr '\n' ' ')

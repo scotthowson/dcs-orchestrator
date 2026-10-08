@@ -29,7 +29,9 @@ open the web terminal. The security model therefore concentrates on three things
 - Passwords are hashed with PBKDF2-SHA256 (100,000 iterations, per-user salt) and compared in
   constant time; secrets are passed to the hashing helper through the environment, never argv.
 - Session tokens are 256-bit random values with a configurable expiry; a new login revokes older
-  sessions when `API_SINGLE_SESSION=true`. Optional TOTP (RFC 6238) two-factor login.
+  sessions when `API_SINGLE_SESSION=true`. At rest only a SHA-256 digest is kept — a leaked copy
+  of `tokens.json` or `terminal-sessions.json` cannot replay a session. Optional TOTP (RFC 6238)
+  two-factor login.
 - Registration is invite-only; invites expire and are single-use.
 - Login attempts are rate-limited per client address (`API_MAX_LOGIN_ATTEMPTS`,
   `API_LOCKOUT_DURATION`) and every request is rate-limited (`API_RATE_LIMIT` per

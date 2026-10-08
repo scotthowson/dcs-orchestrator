@@ -1,0 +1,72 @@
+# =============================================================================
+# Route-policy allowlist — consulted by .scripts/api-docs.sh --check (CI)
+# =============================================================================
+# GET routes are reachable by the viewer and bot roles unless
+# _api_route_allowed / _api_bot_allowed deny them: a new route ships as a
+# viewer route by default. The tripwire in api-docs.sh fails CI when a
+# sensitive-looking path (env, secrets, files, export, terminal, backups,
+# dns, recovery, tokens, sessions, webhooks, auth, config, settings, logs,
+# history, metrics, ...) is reachable without admin rights, or when a
+# public non-GET route exists.
+#
+# Lines below are the recorded decision: "METHOD /pattern", one per line.
+# To keep a new route off this file, deny it in the policy functions in
+# .scripts/api-server.sh instead. To keep it viewer-readable on purpose,
+# add its line here — the diff makes the choice reviewable.
+# =============================================================================
+
+# Bot: the automation role can read what a viewer cannot — the audit log and
+# the operational views an ops bot legitimately needs (asserted by smoke).
+GET /audit
+GET /backups
+GET /backups/config
+GET /backups/status
+GET /dns/zones
+GET /plugins/*/logs
+GET /snapshots
+GET /system/update/history
+
+# Public: no session token at all (the handlers do their own checks)
+GET /auth/verify
+POST /auth/login
+POST /auth/register
+POST /auth/setup
+POST /auth/totp/validate
+POST /fleet/join
+POST /fleet/relay
+POST /setup/restore
+
+# Viewer (and bot): read-only operational data and own-session/profile
+GET /automations/*/history
+GET /config
+GET /config/schema
+GET /containers/*/logs
+GET /containers/*/logs/live
+GET /crowdsec/decisions/export
+GET /crowdsec/logs
+GET /crowdsec/metrics
+GET /crowdsec/settings
+GET /dns/status
+GET /export/*
+GET /fleet/feed
+GET /health/score/history
+GET /logs
+GET /logs/archives
+GET /logs/live
+GET /logs/stats
+GET /metrics/history
+GET /metrics/summary
+GET /metrics/trends
+GET /notifications/history
+GET /rollback/*/snapshots
+GET /rollback/*/snapshots/*
+GET /schedules/*/history
+GET /settings/dashboard
+GET /settings/profile
+GET /stacks/*/compose/history
+GET /stacks/*/compose/history/*
+GET /stacks/*/logs
+GET /system/metrics
+GET /webhooks
+GET /feed/summary
+GET /feed/crowdsec

@@ -1,5 +1,27 @@
 # Decisions: 4 h bans for IPs and ranges; every decision also goes to the
 # http_default notification (Discord) when DCS configured one.
+# The AppSec component blocks a hostile request itself, so its alerts carry
+# Remediation == false — the dcs_appsec profiles ban those addresses too.
+name: dcs_appsec_ip
+filters:
+  - Alert.Remediation == false && (Alert.Simulated == nil || !Alert.Simulated) && Alert.GetScope() == "Ip" && (Alert.GetScenario() startsWith "crowdsecurity/vpatch" || Alert.GetScenario() startsWith "crowdsecurity/appsec")
+decisions:
+  - type: ban
+    duration: 4h
+notifications:
+  - http_default
+on_success: break
+---
+name: dcs_appsec_range
+filters:
+  - Alert.Remediation == false && (Alert.Simulated == nil || !Alert.Simulated) && Alert.GetScope() == "Range" && (Alert.GetScenario() startsWith "crowdsecurity/vpatch" || Alert.GetScenario() startsWith "crowdsecurity/appsec")
+decisions:
+  - type: ban
+    duration: 4h
+notifications:
+  - http_default
+on_success: break
+---
 name: default_ip_remediation
 filters:
   - Alert.Remediation == true && Alert.GetScope() == "Ip"

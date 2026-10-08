@@ -128,7 +128,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/stacks/{stack}/services` | user | Services of a stack with container state, health and image |
 | GET | `/stacks/{stack}/containers` | user | Containers of one stack |
 | GET | `/stacks/{stack}/logs` | user | Recent log lines of a stack |
-| GET | `/stacks/{stack}/files` | user | The files of a stack's folder (compose, .env, configuration; no data, logs, caches, certificates or edit backups), each base64: what a hub keeps of a VM's stack |
+| GET | `/stacks/{stack}/files` | admin | The files of a stack's folder (compose, .env, configuration; no data, logs, caches, certificates or edit backups), each base64: what a hub keeps of a VM's stack |
 | GET | `/stacks/{stack}/appdata` | user | Where a stack's App-Data is. A stack this server runs: its folder {placement: "local", path, exists}. A VM's stack on a hub: Stacks/<name>/VM-App-Data on the hub is a live view of the VM's App-Data (sshfs over the hub's ssh key), with whether it is mounted and why not {placement: "vm", state: mounted\|waiting\|unavailable\|held\|off, mounted, link, path, remote, access, reason, member, member_name} |
 | GET | `/stacks/{stack}/compose` | user | The stack's docker-compose.yml |
 | GET | `/stacks/{stack}/env` | admin | The stack's .env file |
@@ -396,7 +396,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/alerts/config` | user | Read alert thresholds |
+| GET | `/alerts/config` | admin | Read alert thresholds |
 | GET | `/notifications/rules` | user | NTFY notification rules |
 | GET | `/notifications/history` | user | Recently sent notifications |
 | GET | `/webhooks` | user | List webhooks |
@@ -454,7 +454,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | GET | `/terminal/history` | admin | Recent terminal commands from the audit log |
-| GET | `/terminal/web` | user | The web terminal (a real terminal on this server in a browser tab, behind Authelia): whether it is deployed and running, its address, whether its route is protected, what it needs, and its look (admin) |
+| GET | `/terminal/web` | admin | The web terminal (a real terminal on this server in a browser tab, behind Authelia): whether it is deployed and running, its address, whether its route is protected, what it needs, and its look (admin) |
 | POST | `/terminal/exec` | admin | Run a shell command on the host (terminal session required, 60 s limit) |
 | POST | `/terminal/auth` | admin | Authenticate with Linux credentials |
 | POST | `/terminal/auth/verify` | admin | Verify a terminal session token |
@@ -508,7 +508,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/fleet/members/{id}/terminal` | admin | Can the hub open a shell in this VM: its ssh key, the VM's address and a live test {available, member, member_name, vmid, host, user, reason} |
 | GET | `/fleet/members/{id}/folders` | user | The folders of the Proxmox host a VM of the fleet has (virtiofs): what Proxmox maps, what the VM is given, where the VM mounts it and which containers use it; whether the token may share folders (it needs the role PVEMappingAdmin on /mapping/dir) and the steps under way. ?op=1: the steps alone (for polling) |
 | GET | `/fleet/members/{id}` | user | One member, with a live check that it answers |
-| GET | `/feed/status` | user | The dashboard feed: on or off, and its two addresses (admin). The token itself is shown once, when it is made |
+| GET | `/feed/status` | admin | The dashboard feed: on or off, and its two addresses (admin). The token itself is shown once, when it is made |
 | GET | `/themes` | user | The themes stored on this server (without their CSS) and the one every dashboard follows (active, "" = the default look) |
 | GET | `/themes/{name}` | user | One stored theme, the whole document (palette and CSS) |
 | GET | `/recovery/*/download` | admin | Download a recovery bundle |

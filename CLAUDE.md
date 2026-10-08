@@ -70,7 +70,9 @@ Source order for anything that uses the logger: `.env` → `settings.cfg` → `d
 - **Roles are decided in one place**: `_api_route_allowed METHOD PATH`. Admins pass everything; the
   `user` role is a viewer (reads plus its own session/profile/2FA and validation endpoints).
   Add new mutating or secret-exposing routes as admin-only there; keep per-handler checks as
-  defence in depth.
+  defence in depth. `api-docs.sh --check` also runs the route-policy tripwire: a sensitive-looking
+  GET path that a non-admin can reach (or any public non-GET route) fails CI unless it is denied
+  in the policy or consciously recorded in `.config/route-policy-allowlist.txt`.
 - **`.env` is data.** `_api_load_env_file` parses `KEY=value` lines and skips
   `_API_ENV_RESERVED_KEYS`; never `source` it in the API. Writes go through
   `_api_validate_env_content` / `_api_validate_env_kv`.

@@ -1,0 +1,16 @@
+# DCS: Fedora / OpenSSH 10 logs authentication failures with the program name
+# "sshd-auth"; the hub's sshd-logs parser only knows "sshd" and "sshd-session",
+# so every failed login was silently unparsed and the ssh-* scenarios never saw
+# it. Rename the program so the stock parser matches.
+#
+# Deployed to parsers/s01-parse/dcs-sshd-auth.yaml: s01 files run in
+# filename order, so "dcs-" evaluates before "sshd-logs", and
+# "onsuccess: continue" lets the renamed event reach it in the same stage.
+# (s00-raw cannot be used: a successful syslog-logs node jumps straight to the
+# next stage, skipping anything after it.)
+onsuccess: continue
+name: dcs/sshd-auth
+filter: "evt.Parsed.program == \"sshd-auth\""
+statics:
+  - parsed: program
+    value: sshd

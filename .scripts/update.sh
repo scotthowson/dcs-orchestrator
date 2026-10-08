@@ -43,7 +43,7 @@ initiate_docker_update() {
 
     # Check required commands
     local cmd
-    for cmd in curl jq sudo; do
+    for cmd in curl jq sudo sha256sum; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             log_bold_nodate_error "Required command '$cmd' not found. Please install it first."
             return 1
@@ -70,9 +70,12 @@ initiate_docker_update() {
 
     local latest_version
     local download_url
+    local checksums_url
     latest_version=$(echo "$release_data" | jq -r '.tag_name' | sed 's/^v//')
     download_url=$(echo "$release_data" | jq -r --arg suffix "docker-compose-$arch_suffix" \
         '.assets[] | select(.name == $suffix) | .browser_download_url')
+    checksums_url=$(echo "$release_data" | jq -r \
+        '.assets[] | select(.name == "checksums.txt") | .browser_download_url')
 
     if [[ -z "$latest_version" || "$latest_version" == "null" ]]; then
         log_bold_nodate_error "Failed to parse latest version from GitHub API response."
@@ -108,24 +111,54 @@ initiate_docker_update() {
         fi
     fi
 
-    # Download and install
+    # Download to a private temp file first. A corrupt or tampered binary must
+    # never land at $install_location, so it is verified before it is installed.
+    local tmp_bin tmp_sums
+    tmp_bin=$(mktemp "${TMPDIR:-/tmp}/docker-compose.XXXXXX")
+    tmp_sums=$(mktemp "${TMPDIR:-/tmp}/compose-checksums.XXXXXX")
+
     log_bold_nodate_info "Downloading Docker Compose v$latest_version..."
-    if sudo curl -fL --progress-bar --connect-timeout 10 --max-time 300 \
-        "$download_url" -o "$install_location"; then
-        log_bold_nodate_success "Download completed successfully."
-    else
-        log_bold_nodate_error "Download failed. Restoring from backup if available..."
-        local latest_backup
-        latest_backup=$(ls -t "${install_location}.backup."* 2>/dev/null | head -1)
-        [[ -n "$latest_backup" ]] && sudo mv "$latest_backup" "$install_location" 2>/dev/null
+    if ! curl -fL --progress-bar --connect-timeout 10 --max-time 300 \
+        "$download_url" -o "$tmp_bin"; then
+        log_bold_nodate_error "Download failed."
+        rm -f "$tmp_bin" "$tmp_sums"
         return 1
     fi
 
-    # Set executable permissions
-    if ! sudo chmod +x "$install_location"; then
-        log_bold_nodate_error "Failed to set executable permissions."
+    # Verify the binary against the release's checksums.txt. No checksum asset
+    # means no install: an unverifiable binary is refused, not trusted.
+    if [[ -z "$checksums_url" || "$checksums_url" == "null" ]]; then
+        log_bold_nodate_error "Release v$latest_version has no checksums.txt; refusing to install an unverified binary."
+        rm -f "$tmp_bin" "$tmp_sums"
         return 1
     fi
+    if ! curl -fsSL --connect-timeout 10 --max-time 30 "$checksums_url" -o "$tmp_sums"; then
+        log_bold_nodate_error "Could not fetch release checksums; refusing to install an unverified binary."
+        rm -f "$tmp_bin" "$tmp_sums"
+        return 1
+    fi
+
+    local expected_checksum actual_checksum
+    expected_checksum=$(awk -v f="docker-compose-${arch_suffix}" '$NF == f {print $1}' "$tmp_sums")
+    actual_checksum=$(sha256sum "$tmp_bin" | awk '{print $1}')
+    rm -f "$tmp_sums"
+    if [[ -z "$expected_checksum" || "$expected_checksum" != "$actual_checksum" ]]; then
+        log_bold_nodate_error "SHA-256 mismatch for docker-compose-${arch_suffix} (expected ${expected_checksum:-not listed}, got $actual_checksum). Aborting."
+        rm -f "$tmp_bin"
+        return 1
+    fi
+    log_bold_nodate_success "SHA-256 checksum verified against the release manifest."
+
+    # Install the verified binary
+    if ! sudo install -m 0755 "$tmp_bin" "$install_location"; then
+        log_bold_nodate_error "Install failed. Restoring from backup if available..."
+        local latest_backup
+        latest_backup=$(ls -t "${install_location}.backup."* 2>/dev/null | head -1)
+        [[ -n "$latest_backup" ]] && sudo mv "$latest_backup" "$install_location" 2>/dev/null
+        rm -f "$tmp_bin"
+        return 1
+    fi
+    rm -f "$tmp_bin"
 
     # Verify installation
     local installed_version
