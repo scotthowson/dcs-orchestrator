@@ -88,20 +88,24 @@ check "CORS: GET /ping answers every origin with *"    '*' "$(_cors GET /ping ht
 check "CORS: …on the normal path too"                  '*' "$(_cors GET /ping https://ui.example.org DCS_NO_FAST_PING=1 | _acao)"
 check "CORS: GET /ping/ (a trailing slash) too"        '*' "$(_cors GET /ping/ https://ui.example.org DCS_NO_FAST_PING=1 | _acao)"
 check "CORS: the discovery answers send no credentials" 0 "$(_cors GET / https://ui.example.org | grep -ci '^Access-Control-Allow-Credentials')"
-check "CORS: a listed origin gets itself back"         https://ui.example.org "$(_cors GET /version https://ui.example.org API_CORS_ORIGINS='https://other.example, https://ui.example.org' | _acao)"
-check "CORS: …with Vary: Origin"                       1 "$(_cors GET /version https://ui.example.org API_CORS_ORIGINS=https://ui.example.org | grep -ci '^Vary: Origin')"
 check "CORS: an unlisted origin gets none"             '' "$(_cors GET /version https://ui.example.org | _acao)"
 check "CORS: …but Vary: Origin all the same"           1 "$(_cors GET /version https://ui.example.org | grep -ci '^Vary: Origin')"
 check "CORS: /setup/status keeps the allow-list"       '' "$(_cors GET /setup/status https://ui.example.org | _acao)"
 check "CORS: a POST to / is not a discovery answer"    '' "$(_cors POST / https://ui.example.org | _acao)"
 check "CORS: the flag cannot come from the environment" '' "$(_cors GET /version https://ui.example.org _API_CORS_PUBLIC=1 | _acao)"
-_pf=$(_cors OPTIONS /stacks https://ui.example.org API_CORS_ORIGINS=https://ui.example.org)
+# the allow-list as .env has it (the file wins over the environment, as on a real server)
+printf 'API_CORS_ORIGINS="https://other.example, https://ui.example.org"\n' >> "$WORK/.env"
+check "CORS: a listed origin gets itself back"         https://ui.example.org "$(_cors GET /version https://ui.example.org | _acao)"
+check "CORS: …with Vary: Origin"                       1 "$(_cors GET /version https://ui.example.org | grep -ci '^Vary: Origin')"
+check "CORS: …and * on the discovery answers"          '*' "$(_cors GET / https://ui.example.org | _acao)"
+_pf=$(_cors OPTIONS /stacks https://ui.example.org)
 check "preflight: a listed origin gets 204"            204 "$(head -1 <<< "$_pf" | awk '{print $2}')"
 check "preflight: …its exact origin"                   https://ui.example.org "$(_acao <<< "$_pf")"
 check "preflight: …Authorization and Content-Type"     yes "$(grep -i '^Access-Control-Allow-Headers:' <<< "$_pf" | grep -qi 'Authorization' && grep -i '^Access-Control-Allow-Headers:' <<< "$_pf" | grep -qi 'Content-Type' && echo yes || echo no)"
 check "preflight: …the methods"                        yes "$(grep -i '^Access-Control-Allow-Methods:' <<< "$_pf" | grep -q 'GET, POST, PUT, PATCH, DELETE, OPTIONS' && echo yes || echo no)"
 check "preflight: …Vary: Origin"                       1 "$(grep -ci '^Vary: Origin' <<< "$_pf")"
 check "preflight: …no body and no length"              0 "$(grep -ci '^Content-Length:' <<< "$_pf")"
+sed -i '/^API_CORS_ORIGINS="https:\/\/other.example/d' "$WORK/.env"
 _pf=$(_cors OPTIONS /stacks https://ui.example.org)
 check "preflight: an unlisted origin gets 204…"        204 "$(head -1 <<< "$_pf" | awk '{print $2}')"
 check "preflight: …and no origin"                      '' "$(_acao <<< "$_pf")"
