@@ -3,6 +3,53 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.38] - 2026-10-08
+
+### Security
+
+- **Session tokens are stored as digests, not the tokens themselves.** `tokens.json` and the terminal-session store now
+  keep the SHA-256 of each token; a copy of the file can no longer be replayed. Sessions issued before this release keep
+  working until they expire — a record that still holds a raw token is accepted and matched the same way, so nothing
+  signs anyone out.
+- **Authentication state is written under a lock.** The rate limiter and `users.json` read-modify-write went through
+  plain rewrites: two simultaneous requests could lose a failed-login increment or a user, and an interrupted write
+  read back as no record at all. All of it goes through the shared `_api_jq_update_file`/`_api_with_users_lock` paths
+  now — tmp file, `flock`, atomic rename — and `POST /auth/setup` holds the lock across the count-check and the insert,
+  so parallel setup requests create exactly one admin.
+- **A session token in the URL can no longer reach the cache.** `?token=` is removed from the query parameters as soon
+  as it authenticates, so `_api_cached` can never fold the credential into a cache file name or keep a per-token copy
+  of a response.
+- **The API listener has a process cap.** `socat`'s `fork` and `ncat -k` forked one handler per connection with no
+  bound; each one re-parses the whole script before the rate limiter runs. `API_MAX_CHILDREN` (default 64) now caps
+  them on the TCP and the TLS listen lines.
+- **`GET /webhooks` no longer hands webhook URLs to viewers.** A webhook URL is a write-capable secret; admins still
+  see it, other roles get the host and the last four characters. In the same pass the route policy caught up with what
+  the handlers already enforced: `GET /alerts/config`, `/terminal/web`, `/feed/status` and `/stacks/*/files` are admin
+  reads. A new tripwire in `api-docs.sh --check` fails the build when a sensitive-looking route resolves to `user` or
+  `bot` access without a recorded reason in `.config/route-policy-allowlist.txt`.
+- **The Docker Compose download is verified.** `update.sh` fetches the release's `checksums.txt` and checks the
+  binary's SHA-256 before installing it — a release with no checksum file is refused instead of trusted.
+- **Redis requires a password.** The core stack's Redis now sets `requirepass` from `DCS_REDIS_PASSWORD`, a compose
+  secret the secrets store generates on demand (`secrets_ensure_generated` creates it on start when it is referenced
+  and absent — existing installs gain the password on their next stack start, nothing to fill in). Redis stays on the
+  project-only network; this is defence in depth, not a new exposure being closed.
+
+### Changed
+
+- **CrowdSec bans can be permanent.** The automatic-ban ceiling `CS_MAX_AUTO_SECONDS` moves from one year to the ten
+  years a manual ban already allows (shown as `3650d`), so the CrowdSec page's ban-length settings can go to "permanent"
+  instead of silently clamping.
+- **AppSec/WAF alerts produce bans.** A vpatch or appsec alert that Traefik already blocked inline carries
+  `Remediation: false`, so the standard profile made no decision and the source stayed unbanned. The profile file now
+  includes `dcs_appsec_ip`/`dcs_appsec_range` (new `appsec_ban` setting, on by default) which ban non-simulated
+  `crowdsecurity/vpatch*`/`appsec*` alerts like any other detection.
+- **SSH brute-force detection covers Fedora / OpenSSH 10.** Those systems log authentication failures with the program
+  name `sshd-auth`, which the hub's `sshd-logs` parser does not match — every failed login went silently unparsed. A new
+  local parser `dcs/sshd-auth` (deployed by `_crowdsec_post_deploy`, kept for existing installs) rewrites the program
+  name in `s01-parse` before the stock parser runs, so `ssh-bf` and the other SSH scenarios see the lines again.
+- **Stale cache writers are cleaned up.** A client that disconnects mid-response used to orphan a `.inflight-*` file
+  forever; `_api_cache_clear` now sweeps the ones older than ten minutes and never touches a live one.
+
 ## [4.0.37] - 2026-10-06
 
 ### Fixed
