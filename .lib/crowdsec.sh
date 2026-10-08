@@ -2331,8 +2331,8 @@ handle_crowdsec_community_check() {
         fi
     } 9>"$CROWDSEC_CAPI_STATE.lock" )
     if [[ "$verdict" == wait* ]]; then
-        local wait at; read -r _ wait at <<< "$verdict"
-        _api_response 429 "$(jq -nc --argjson w "$wait" --arg at "$at" '{error: true, code: 429, reason: "too_soon", retry_after: $w, last_check: (if $at == "" then null else $at end),
+        local wsec at; read -r _ wsec at <<< "$verdict"
+        _api_response 429 "$(jq -nc --argjson w "$wsec" --arg at "$at" '{error: true, code: 429, reason: "too_soon", retry_after: $w, last_check: (if $at == "" then null else $at end),
             message: ("Checked less than 10 minutes ago. Each check is a login at the community service, which pauses engines that log in too often: try again in " + (if $w >= 60 then "\(($w + 59) / 60 | floor) min" else "\($w) s" end) + ".")}')"
         return
     fi
