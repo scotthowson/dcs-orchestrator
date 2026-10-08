@@ -1,7 +1,7 @@
 services:
   redis:
     container_name: skeleton-redis
-    image: redis:alpine
+    image: redis:8.10-alpine
     restart: unless-stopped
     # The password lives in the secrets store as DCS_REDIS_PASSWORD, created on
     # first start by secrets_ensure_generated and injected only into the compose
@@ -30,7 +30,7 @@ services:
     # setup.sh sets DCS_UI_APPARMOR=unconfined in this stack's .env on such hosts; Docker CE needs nothing
     security_opt:
       - "apparmor=${DCS_UI_APPARMOR:-docker-default}"
-    image: ghcr.io/scotthowson/dcs-orchestrator-ui:latest
+    image: ghcr.io/scotthowson/dcs-orchestrator-ui:4.0
     # To build locally instead of pulling from GHCR, uncomment below:
     # build:
     #   context: ../../Docker-Compose-Skeleton-UI

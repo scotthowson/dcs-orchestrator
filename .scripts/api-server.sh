@@ -10606,7 +10606,7 @@ _dcs_ui_compose_file() {
     return 1
 }
 
-# The dashboard image the core-infrastructure stack runs, as its compose file names it: a release says :latest, a release
+# The dashboard image the core-infrastructure stack runs, as its compose file names it: a release says its minor line (:4.0), a release
 # candidate pins its own tag (tests/lint.sh keeps the tag and VERSION in step), so the update check and the update follow the file.
 _dcs_ui_image() {
     local cf img=""
@@ -19459,7 +19459,7 @@ handle_template_deploy() {
             _hashed_pass=$(authelia crypto hash generate argon2 --password "$_admin_pass" 2>/dev/null | grep 'Digest:' | sed 's/Digest: //')
         fi
         if [[ -z "$_hashed_pass" ]]; then
-            _hashed_pass=$(docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password "$_admin_pass" 2>/dev/null | grep 'Digest:' | sed 's/Digest: //')
+            _hashed_pass=$(docker run --rm authelia/authelia:4.39 authelia crypto hash generate argon2 --password "$_admin_pass" 2>/dev/null | grep 'Digest:' | sed 's/Digest: //')
         fi
         if [[ -z "$_hashed_pass" ]]; then
             # No real Argon2id digest means no working admin login — refuse
@@ -19591,7 +19591,7 @@ AUTHELIA_CONFIG_EOF
 # =============================================================================
 # Add users here. Passwords must be hashed with Argon2id.
 # Generate hashes:
-#   docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'YOUR_PASSWORD'
+#   docker run --rm authelia/authelia:4.39 authelia crypto hash generate argon2 --password 'YOUR_PASSWORD'
 # =============================================================================
 
 users:

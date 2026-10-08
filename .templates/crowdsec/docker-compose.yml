@@ -1,7 +1,7 @@
 services:
   crowdsec:
     container_name: CrowdSec
-    image: crowdsecurity/crowdsec:latest
+    image: crowdsecurity/crowdsec:v1.8.1
     restart: unless-stopped
     environment:
       - TZ=${TZ:-UTC}

@@ -1,7 +1,7 @@
 services:
   discord-bot:
     container_name: DCS-Discord-Bot
-    image: ghcr.io/scotthowson/dcs-discord-bot:latest
+    image: ghcr.io/scotthowson/dcs-discord-bot:4.0
     restart: unless-stopped
     environment:
       - TZ=${TZ:-UTC}

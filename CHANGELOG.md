@@ -3,6 +3,21 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+
+- **The security core is pinned to a release line instead of `:latest`.** Traefik `traefik:v3.7` (was `v3`), Authelia
+  `authelia/authelia:4.39`, Authelia's Redis `redis:7.4-alpine`, the core stack's Redis `redis:8.10-alpine` (what
+  `redis:alpine` is today, so nothing goes back a version), the dashboard `ghcr.io/scotthowson/dcs-orchestrator-ui:4.0`
+  and the Discord bot `ghcr.io/scotthowson/dcs-discord-bot:4.0`. CrowdSec and the Docker socket proxy publish no minor tag:
+  `crowdsecurity/crowdsec:v1.8.1` and `tecnativa/docker-socket-proxy:v0.5.0`. Sablier stays on `1.6.1`; the API's Authelia
+  password hashing runs `authelia/authelia:4.39` too. A minor tag still moves with each patch release, so *Check Registry*
+  and the automatic image updates keep following the line; a new minor or major release is a deliberate change
+  (docs/OPERATIONS.md, "Pinned images"). Every tag was checked on its registry. `tests/lint.sh` now expects the
+  dashboard on the release's minor line (`4.0` for 4.0.x) instead of `:latest`. **The 190+ app templates are not
+  pinned** and keep `:latest`.
+
 ## [4.0.40] - 2026-10-09
 
 ### Fixed
