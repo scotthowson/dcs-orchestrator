@@ -3,6 +3,8 @@ services:
     container_name: skeleton-comms
     image: alpine:latest
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TZ=${TZ:-UTC}
     command: >

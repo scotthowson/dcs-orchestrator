@@ -3,6 +3,14 @@ services:
     container_name: DCS-Discord-Bot
     image: ghcr.io/scotthowson/dcs-discord-bot:4.0
     restart: unless-stopped
+    # Runs as node, needs no capability and writes nothing but /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       - TZ=${TZ:-UTC}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}

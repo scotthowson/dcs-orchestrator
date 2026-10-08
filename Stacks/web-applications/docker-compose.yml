@@ -3,6 +3,8 @@ services:
     container_name: skeleton-webapp
     image: nginx:alpine
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       - TZ=${TZ:-UTC}
     ports:

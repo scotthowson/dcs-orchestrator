@@ -2,6 +2,15 @@ services:
   docker-socket-proxy:
     container_name: Docker-Socket
     image: tecnativa/docker-socket-proxy:v0.5.0
+    # No capability: it reads a socket root owns and listens on 2375. HAProxy writes its config to /tmp and its pid to /run.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:

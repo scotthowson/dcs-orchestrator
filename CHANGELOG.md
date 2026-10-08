@@ -17,6 +17,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (docs/OPERATIONS.md, "Pinned images"). Every tag was checked on its registry. `tests/lint.sh` now expects the
   dashboard on the release's minor line (`4.0` for 4.0.x) instead of `:latest`. **The 190+ app templates are not
   pinned** and keep `:latest`.
+- **DCS's own containers run with no-new-privileges, no capabilities but the ones they need, and a read-only image
+  where it works.** Docker-Socket: none, read-only. Traefik: `NET_BIND_SERVICE` and `DAC_OVERRIDE` (App-Data belongs
+  to PUID and holds acme.json and the bouncer's middleware, 0600), read-only, plugins kept in
+  `App-Data/Traefik/plugins-storage`. CrowdSec: `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` (the notification
+  plugins run as nobody), not read-only (the hub updates the image's data files in place); `label:disable` stays for its
+  `/var/log` mount only, now explained. Authelia: `CHOWN`, `SETUID`, `SETGID`, not read-only (it writes
+  `/app/.healthcheck.env`). Both Redis: `CHOWN`, `SETUID`, `SETGID`, read-only. DCS-UI: `CHOWN`, `SETUID`, `SETGID`, not
+  read-only (its entrypoint writes nginx's config). Sablier: `DAC_OVERRIDE`, read-only. Discord bot: none, read-only. The
+  demo services of the shipped stacks get no-new-privileges. Each was started in a sandbox Docker with App-Data owned by
+  PUID, given back to PUID as a deploy does, restarted, and checked: healthy, and doing its job. Existing stacks keep the
+  compose they were deployed with; a redeploy of the template brings the hardening.
+- **Lint tripwire.** `tests/lint.sh` fails when a service of `Stacks/*/docker-compose.yml` or of the crowdsec, traefik and
+  authelia templates has no `no-new-privileges:true` (file and service named), and prints a warning count for the app
+  templates.
 
 ## [4.0.40] - 2026-10-09
 
