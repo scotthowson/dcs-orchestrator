@@ -34648,7 +34648,7 @@ handle_request() {
                 ;;
             /crowdsec/bouncers/*)
                 local _cs_bn="${path#/crowdsec/bouncers/}"
-                _crowdsec_lib; handle_crowdsec_bouncer_delete "$_cs_bn"
+                _crowdsec_lib; handle_crowdsec_bouncer_delete "$_cs_bn" "$request_body"
                 ;;
             /crowdsec/trust/*)
                 local _cs_ip="${path#/crowdsec/trust/}"

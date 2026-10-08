@@ -32,6 +32,8 @@ CROWDSEC_ALLOWLIST_MARK="Managed by DCS:"
 # CrowdSec's login at its Central API (inside the container), and what DCS remembers of the last time it registered again
 CROWDSEC_CAPI_CREDS="/etc/crowdsec/online_api_credentials.yaml"
 CROWDSEC_REGISTER_STATE="$CROWDSEC_STATE_DIR/capi-register.json"
+# the bouncer names DCS wrote into a Traefik crowdsec-bouncer middleware (read by the delete guard, _cs_bouncer_live_names)
+CROWDSEC_TRAEFIK_BOUNCERS="$CROWDSEC_STATE_DIR/traefik-bouncers.json"
 # the community logins DCS caused (checks, registrations, enrolments) and what the last check found: the status is derived without logging in
 CROWDSEC_CAPI_STATE="$CROWDSEC_STATE_DIR/capi-activity.json"
 
@@ -1713,19 +1715,51 @@ handle_crowdsec_bouncer_add() {
     _api_success "$(jq -nc --arg n "$name" --arg k "$key" '{success: true, name: $n, api_key: $k, shown_once: true, message: ("Bouncer " + $n + " registered. Copy its API key now: it is never shown again.")}')"
 }
 
+# The bouncers Traefik's crowdsec-bouncer middleware still uses, one name per line. CrowdSec never shows a key again, so the key in a
+# middleware file cannot be matched to a bouncer: the match is by name. While any routes file defines crowdsec-bouncer, that is DCS's own
+# bouncer and every name DCS recorded when it wrote the middleware (CROWDSEC_TRAEFIK_BOUNCERS).
+_cs_bouncer_live_names() {
+    local dir
+    dir=$(_find_traefik_routes_dir 2>/dev/null) || dir=""
+    [[ -n "$dir" && -d "$dir" ]] || return 0
+    [[ -n "$(_traefik_mw_files crowdsec-bouncer "$dir")" ]] || return 0
+    printf '%s\n' "$CROWDSEC_BOUNCER_NAME"
+    [[ -s "$CROWDSEC_TRAEFIK_BOUNCERS" ]] && jq -r '(.names // [])[] | strings' "$CROWDSEC_TRAEFIK_BOUNCERS" 2>/dev/null
+    return 0
+}
+
+# _cs_bouncer_record NAME — remember that NAME's key is in a Traefik middleware file (atomic; a failure only weakens the guard)
+_cs_bouncer_record() {
+    local tmp
+    mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null || return 0
+    tmp=$(mktemp "$CROWDSEC_STATE_DIR/.traefik-bouncers.XXXXXX" 2>/dev/null) || return 0
+    if jq -n --arg n "$1" --slurpfile cur <(cat "$CROWDSEC_TRAEFIK_BOUNCERS" 2>/dev/null || true) \
+        '{names: ((($cur[0] // {}).names // []) + [$n] | unique)}' > "$tmp" 2>/dev/null; then mv -f "$tmp" "$CROWDSEC_TRAEFIK_BOUNCERS"; else rm -f "$tmp"; fi
+    return 0
+}
+
+# A bouncer Traefik's crowdsec-bouncer middleware still uses is refused (409) unless ?force=true or {"force": true}: deleting it left Traefik
+# asking with a key CrowdSec no longer knew, and the plugin failing open. A connection CrowdSec filed under NAME@IP is CrowdSec's to keep
+# (it refuses; the answer is 409 with its reason).
 # DELETE /crowdsec/bouncers/{name} — Unregister a bouncer (its API key stops working at once)
 handle_crowdsec_bouncer_delete() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
-    local name="$1" out
-    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{1,62}$ ]] || { _api_error 400 "Invalid bouncer name"; return; }
+    local name="${1//%40/@}" body="${2:-}" out force=false
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{1,62}(@[0-9A-Fa-f.:]{2,45})?$ ]] || { _api_error 400 "Invalid bouncer name"; return; }
+    [[ "${QUERY_PARAMS[force]:-}" == true ]] && force=true
+    [[ "$body" == \{* && "$(jq -r '.force == true' <<< "$body" 2>/dev/null)" == true ]] && force=true
     _cs_target || return
+    if [[ "$name" != *@* && "$force" != true ]] && _cs_bouncer_live_names | grep -qxF -- "$name"; then
+        _api_error 409 "Traefik's crowdsec-bouncer middleware still uses this bouncer; register again from the Bouncers tab instead of deleting it"; return
+    fi
     if ! _cs_run out bouncers delete "$name"; then
         local e; e=$(_cs_errline)
-        if [[ "$e" == *"does not exist"* || "$e" == *"not found"* ]]; then _api_error 404 "No bouncer called $name"; else _api_error 502 "CrowdSec refused: $e"; fi
+        if [[ "$e" == *"auto-created"* ]]; then _api_error 409 "$e"
+        elif [[ "$e" == *"does not exist"* || "$e" == *"not found"* ]]; then _api_error 404 "No bouncer called $name"; else _api_error 502 "CrowdSec refused: $e"; fi
         return
     fi
     _cs_cache_clear
-    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_BOUNCER_DEL" "${AUTH_USERNAME:-}" "$name"
+    _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_BOUNCER_DEL" "${AUTH_USERNAME:-}" "$name$([[ "$force" == true ]] && printf ' (forced)')"
     _api_success "$(jq -nc --arg n "$name" --arg mine "$CROWDSEC_BOUNCER_NAME" '{success: true, name: $n, was_dcs_bouncer: ($n == $mine), message: ("Bouncer " + $n + " removed" + (if $n == $mine then ". Traefik no longer hears about bans until you register the Traefik bouncer again." else "" end))}')"
 }
 
@@ -1803,6 +1837,10 @@ _cs_bouncer_register() {
             echo "[dcs] the new key is in $rel, the copy Traefik uses (the previous file is kept beside it as $(basename "$f").$sfx)" >> "$log"
         done
     fi
+    # The delete below replaces the key the middleware holds (this function writes the new one into every file that defines it), so it is
+    # the guarded delete's "register again". When DCS's own file is the only one, its current key is kept to put the bouncer back if the
+    # add fails: Traefik must never be left holding a key CrowdSec no longer knows.
+    [[ -z "$oldkey" && -f "$mine" && "$(_cs_mw_key count "$mine")" == 1 ]] && oldkey=$(_cs_mw_key get "$mine" | head -n 1)
     docker exec "$container" cscli bouncers delete "$CROWDSEC_BOUNCER_NAME" >/dev/null 2>&1 || true
     if [[ -n "$newkey" ]]; then
         key=$(docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" --key "$newkey" -o raw 2>>"$log" | tail -1 | tr -d '\r\n ')
@@ -1815,7 +1853,13 @@ _cs_bouncer_register() {
     else
         key=$(docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" -o raw 2>>"$log" | tail -1 | tr -d '\r\n ')
     fi
-    if [[ ! "$key" =~ ^[A-Za-z0-9+/=_-]{20,}$ ]]; then echo "[dcs] could not register the Traefik bouncer (cscli gave no key)" >> "$log"; return 1; fi
+    if [[ ! "$key" =~ ^[A-Za-z0-9+/=_-]{20,}$ ]]; then
+        if [[ -n "$oldkey" && -z "$newkey" ]]; then
+            docker exec "$container" cscli bouncers add "$CROWDSEC_BOUNCER_NAME" --key "$oldkey" -o raw >/dev/null 2>&1 \
+                && echo "[dcs] could not register the Traefik bouncer (cscli gave no key): the previous key works again" >> "$log" && return 1
+        fi
+        echo "[dcs] could not register the Traefik bouncer (cscli gave no key)" >> "$log"; return 1
+    fi
     lan=$(grep -m1 '^TRAEFIK_TRUSTED_LAN=' "$target_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
     if [[ -z "$lan" ]]; then
         local ef; for ef in "$COMPOSE_DIR"/*/.env "$BASE_DIR/.env"; do
@@ -1832,6 +1876,7 @@ _cs_bouncer_register() {
     # what was set on the CrowdSec page (mode, timings, trusted networks) goes into the fresh file; the key stays the new one
     if [[ -s "$CROWDSEC_STATE_DIR/plugin.json" ]]; then _crowdsec_cfg_lib; _cs_plugin_apply_saved "$dir/$target_stack/crowdsec-bouncer.yml"; fi
     _traefik_chain_set crowdsec-bouncer add
+    _cs_bouncer_record "$CROWDSEC_BOUNCER_NAME"
     echo "[dcs] Traefik bouncer registered; crowdsec-bouncer added to traefik-chain" >> "$log"
     # An install whose traefik.yml predates the plugin list would drop every route in the chain: declare the plugin and restart Traefik once
     if ! _traefik_ensure_plugin crowdsec-bouncer-traefik-plugin "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin" "v1.4.4"; then

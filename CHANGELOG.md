@@ -31,6 +31,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Lint tripwire.** `tests/lint.sh` fails when a service of `Stacks/*/docker-compose.yml` or of the crowdsec, traefik and
   authelia templates has no `no-new-privileges:true` (file and service named), and prints a warning count for the app
   templates.
+- **A bouncer Traefik still uses is not deleted by accident.** `DELETE /crowdsec/bouncers/{name}` answers 409 *"Traefik's
+  crowdsec-bouncer middleware still uses this bouncer; register again from the Bouncers tab instead of deleting it"*
+  while a routes file defines `crowdsec-bouncer` and the name is DCS's bouncer or one DCS recorded for the middleware
+  (`.data/crowdsec/traefik-bouncers.json`, written when the bouncer is registered); `?force=true` or `{"force": true}`
+  deletes it anyway (audited as forced). The connections CrowdSec files under `name@ip` (now accepted in the path, also
+  as `%40`) answer 409 with CrowdSec's own reason. Registering again keeps the middleware's current key and puts the
+  bouncer back with it when CrowdSec gives no new key, so Traefik is never left holding a key CrowdSec no longer knows.
 
 ## [4.0.40] - 2026-10-09
 

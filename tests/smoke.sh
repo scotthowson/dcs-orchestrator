@@ -6224,11 +6224,47 @@ cst_console_enroll() {
     rm -f "$rates"
 }
 
+# The delete guard: a bouncer whose key Traefik's crowdsec-bouncer middleware holds is not deleted without force; NAME@IP is CrowdSec's
+cst_services_delete_guard() {
+    local child="dcs-traefik-bouncer@172.19.0.7" guard="Traefik's crowdsec-bouncer middleware still uses this bouncer; register again from the Bouncers tab instead of deleting it"
+    cst_world data traefik --traefik
+    cst_call admin POST /crowdsec/bouncers/register-traefik
+    cst_is "delete guard: the Traefik bouncer is registered (its key in the middleware)" 200
+    check "delete guard: …and its name recorded" dcs-traefik-bouncer "$(jq -r '.names | join(",")' "$CST/.data/crowdsec/traefik-bouncers.json" 2>/dev/null)"
+    cst_call admin DELETE /crowdsec/bouncers/dcs-traefik-bouncer
+    cst_is "delete guard: deleting the bouncer the middleware uses is refused" 409
+    cst_j "delete guard: …says to register again instead" '.message' "$guard"
+    check "delete guard: …and CrowdSec still has it" 1 "$(cst_cs bouncers list -o json | jq '[.[] | select(.name == "dcs-traefik-bouncer")] | length')"
+    cst_call admin DELETE /crowdsec/bouncers/dcs-traefik-bouncer '{"force": false}'
+    cst_is "delete guard: force false is no force" 409
+    cst_call admin DELETE /crowdsec/bouncers/test-bouncer
+    cst_is "delete guard: a bouncer no middleware uses still goes" 200
+    cst_call admin DELETE /crowdsec/bouncers/dcs-traefik-bouncer '{"force": true}'
+    cst_is "delete guard: {\"force\": true} deletes it" 200
+    cst_j "delete guard: …and says what that costs" '.was_dcs_bouncer' true
+    check "delete guard: the forced delete is audited as forced" 1 "$(grep -c '"action":"auth.crowdsec_bouncer_del".*dcs-traefik-bouncer (forced)' "$CST/.data/audit.jsonl")"
+    cst_call admin POST /crowdsec/bouncers/register-traefik
+    cst_call viewer DELETE '/crowdsec/bouncers/dcs-traefik-bouncer?force=true'
+    cst_is "delete guard: force does not make a viewer an admin" 403
+    cst_call admin DELETE '/crowdsec/bouncers/dcs-traefik-bouncer?force=true'
+    cst_is "delete guard: ?force=true deletes it too" 200
+    # -- the connections CrowdSec files under NAME@IP: CrowdSec refuses, and its reason is the answer
+    cst_call admin POST /crowdsec/bouncers/register-traefik
+    cst_mock --mock-set "bouncer_child=$child,Crowdsec-Bouncer-Traefik-Plugin,30"
+    cst_call admin DELETE "/crowdsec/bouncers/$child"
+    cst_is "delete guard: an auto-created NAME@IP is refused" 409
+    cst_t "delete guard: …with CrowdSec's own reason" '.message | test("auto-created")'
+    cst_call admin DELETE "/crowdsec/bouncers/${child/@/%40}" '{"force": true}'
+    cst_is "delete guard: …encoded, and forced, still CrowdSec's 409" 409
+    check "delete guard: …and the connection is still there" 1 "$(cst_cs bouncers list -o json | jq --arg c "$child" '[.[] | select(.name == $c)] | length')"
+}
+
 cst_part_services() {
     echo "CrowdSec page: bouncers, machines, the container, its log, the community list"
     cst_services_bouncers
     cst_bouncer_connections
     cst_services_register
+    cst_services_delete_guard
     cst_services_service
     cst_services_logs
     cst_services_community
