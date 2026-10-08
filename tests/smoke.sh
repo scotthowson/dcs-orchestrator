@@ -6353,7 +6353,7 @@ cst_plugin_status() {
     mw=$(cst_mwf); k=$(cst_mw_key "$mw"); cst_uncache
     cst_call admin GET /crowdsec/status
     cst_j "plugin/status: the middleware file as the template writes it" '.enforcement.plugin.mode' live '.enforcement.plugin.managed' false '.enforcement.plugin.key_present' true '.enforcement.plugin.loaded' true \
-        '.enforcement.plugin.settings.enabled' true '.enforcement.plugin.settings.log_level' INFO '.enforcement.plugin.settings.update_interval' 60 '.enforcement.plugin.settings.default_decision_seconds' 60 \
+        '.enforcement.plugin.settings.enabled' true '.enforcement.plugin.settings.log_level' INFO '.enforcement.plugin.settings.update_interval' 60 '.enforcement.plugin.settings.default_decision_seconds' 10 \
         '.enforcement.plugin.settings.http_timeout' 10 '.enforcement.plugin.settings.mode' live '.enforcement.plugin.settings.has_key' true \
         '.enforcement.plugin.settings.client_trusted_ips | join(",")' 10.1.0.0/24 '.enforcement.plugin.settings.forwarded_headers_trusted_ips | length' 23 \
         '.enforcement.plugin.settings.forwarded_headers_trusted_ips | last' 10.1.0.0/24 '.enforcement.middleware_present' true '.enforcement.in_chain' true
@@ -6462,10 +6462,10 @@ cst_plugin_get() {
     cst_call admin GET /crowdsec/plugin
     cst_is "plugin/get: registered" 200
     cst_j "plugin/get: the file and who manages it" '.available' true '.file | endswith("networking-security/crowdsec-bouncer.yml")' true '.managed' false '.plugin.managed' false '.plugin.key_present' true
-    cst_j "plugin/get: the settings the template wrote" '.settings.mode' live '.settings.update_interval' 60 '.settings.default_decision_seconds' 60 '.settings.http_timeout' 10 '.settings.remediation_status_code' 403 \
+    cst_j "plugin/get: the settings the template wrote" '.settings.mode' live '.settings.update_interval' 60 '.settings.default_decision_seconds' 10 '.settings.http_timeout' 10 '.settings.remediation_status_code' 403 \
         '.settings.log_level' INFO '.settings.trust_home' false '.settings.client_trusted_ips | length' 0 '.settings.forwarded_headers_trusted_ips | length' 22 '.settings.forwarded_headers_trusted_ips | index("10.1.0.0/24")' null \
         '.settings.forwarded_headers_trusted_ips | first' 173.245.48.0/20
-    cst_j "plugin/get: the defaults" '.defaults.mode' live '.defaults.update_interval' 60 '.defaults.default_decision_seconds' 60 '.defaults.http_timeout' 10 '.defaults.remediation_status_code' 403 \
+    cst_j "plugin/get: the defaults" '.defaults.mode' live '.defaults.update_interval' 60 '.defaults.default_decision_seconds' 10 '.defaults.http_timeout' 10 '.defaults.remediation_status_code' 403 \
         '.defaults.log_level' INFO '.defaults.trust_home' true '.defaults.client_trusted_ips | length' 0 '.defaults.forwarded_headers_trusted_ips | length' 22 \
         '(.defaults.forwarded_headers_trusted_ips | sort) == (.settings.forwarded_headers_trusted_ips | sort)' true
     cst_j "plugin/get: the limits" '.limits.update_interval | join("-")' 10-3600 '.limits.default_decision_seconds | join("-")' 10-3600 '.limits.http_timeout | join("-")' 1-60 \
@@ -6504,7 +6504,7 @@ cst_plugin_get() {
     # -- the file is not in the form DCS writes: the settings are read as far as they are found, and are not changed
     printf 'http:\n  middlewares:\n    crowdsec-bouncer:\n      plugin:\n        crowdsec-bouncer-traefik-plugin:\n          crowdsecMode: "stream"\n          updateIntervalSeconds: 30 # often\n          logLevel: DEBUG\n          crowdsecLapiKey: %s\n' "$k" > "$mw"
     cst_call admin GET /crowdsec/plugin
-    cst_j "plugin/get: a hand-written file: quotes and comments are understood" '.settings.mode' stream '.settings.update_interval' 30 '.settings.log_level' DEBUG '.settings.default_decision_seconds' 60 '.managed' false
+    cst_j "plugin/get: a hand-written file: quotes and comments are understood" '.settings.mode' stream '.settings.update_interval' 30 '.settings.log_level' DEBUG '.settings.default_decision_seconds' 10 '.managed' false
 }
 
 # ---- PUT /crowdsec/plugin: everything that is refused, and that nothing is written when it is -----------------------------------------
@@ -6638,7 +6638,7 @@ cst_plugin_apply() {
         '.settings.mode' live '.settings.trust_home' false
     check "plugin/save: the marker is the first line of the file" 1 "$(head -n 1 "$mw" | grep -c '^# dcs-plugin: {"v":1,"settings":{')"
     check "plugin/save: …and the only one" 1 "$(grep -c '^# dcs-plugin:' "$mw")"
-    check "plugin/save: …it holds what was saved" "live 60 60 10 403 INFO false" "$(head -n 1 "$mw" | sed 's/^# dcs-plugin: //' | jq -r '.settings | "\(.mode) \(.update_interval) \(.default_decision_seconds) \(.http_timeout) \(.remediation_status_code) \(.log_level) \(.trust_home)"')"
+    check "plugin/save: …it holds what was saved" "live 60 10 10 403 INFO false" "$(head -n 1 "$mw" | sed 's/^# dcs-plugin: //' | jq -r '.settings | "\(.mode) \(.update_interval) \(.default_decision_seconds) \(.http_timeout) \(.remediation_status_code) \(.log_level) \(.trust_home)"')"
     check "plugin/save: the key of the bouncer is the one it was" "$k0" "$(cst_mw_key "$mw")"
     check "plugin/save: …and so is the rest of the file" 'crowdsecAppsecEnabled: "false" crowdsecLapiHost: "CrowdSec:8080" crowdsecLapiScheme: http enabled: "true"' \
         "$(grep -E '^ +(enabled|crowdsecAppsecEnabled|crowdsecLapiHost|crowdsecLapiScheme):' "$mw" | sed 's/^ *//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
@@ -7423,6 +7423,9 @@ cst_part_settings() {
 # the shipped notifications-discord.yaml, domain lab.example.com). The message DCS renders itself for the same alert has to be this one.
 CST_GOLDEN='{"username":"CrowdSec","avatar_url":"https://raw.githubusercontent.com/scotthowson/dcs-orchestrator-ui/v2.0.0/brand/discord/crowdsec-avatar.png","allowed_mentions":{"parse":[]},"embeds":[{"title":"🛡️ Attack blocked","url":"https://app.crowdsec.net/cti/10.10.10.10","color":15942494,"description":"**10.10.10.10**\n1 hits → **ban** for 4h","fields":[{"name":"Scenario","value":"`test alert`","inline":true},{"name":"Scope","value":"Ip · cscli","inline":true},{"name":"Lookup","value":"[CrowdSec CTI](https://app.crowdsec.net/cti/10.10.10.10) · [AbuseIPDB](https://www.abuseipdb.com/check/10.10.10.10)","inline":true}],"footer":{"text":"CrowdSec · lab.example.com"}}]}'
 
+# …and for the grouped message DCS ships now (CrowdSec 1.8.1, `cscli notifications test`, the same domain)
+CST_GOLDEN_GROUPED='{"username":"CrowdSec","avatar_url":"https://raw.githubusercontent.com/scotthowson/dcs-orchestrator-ui/v2.0.0/brand/discord/crowdsec-avatar.png","allowed_mentions":{"parse":[]},"embeds":[{"title":"🛡️ 10.10.10.10","color":15942494,"description":"**one request** → **banned 4 hours**\nAttack blocked test alert ×1","fields":[{"name":"Lookup","value":"[CrowdSec CTI](https://app.crowdsec.net/cti/10.10.10.10) · [AbuseIPDB](https://www.abuseipdb.com/check/10.10.10.10)","inline":true}],"url":"https://app.crowdsec.net/cti/10.10.10.10","footer":{"text":"CrowdSec · lab.example.com"}}]}'
+
 # cst_pv PATCH — the preview of the message with PATCH (a JSON object) laid over the settings in force
 cst_pv() { cst_call admin POST /crowdsec/notifications/preview "{\"settings\":$1}"; }
 
@@ -7432,8 +7435,10 @@ cst_notify_read() {
     cst_is "notify: the settings" 200
     cst_j "notify/fresh" '(.defaults | .enabled = false) == .settings' true '.settings.enabled' false '.settings.webhook.mode' global '.webhook.configured' false '.webhook.masked' null \
         '.state.enabled' false '.state.wired' false '.state.plugin_active' false '.state.file' other '.state.profile_mode' stock '.state.drift' false '.state.working' false \
-        '.samples | join(",")' exploit,manual,probe,simulated,ssh '.limits.title' 200 '.limits.description' 1500 '.limits.footer' 200 '.limits.fields' 8 '.limits.group_threshold_max' 10 \
+        '.samples | join(",")' burst,crowd,exploit,manual,probe,simulated,ssh '.limits.title' 200 '.limits.description' 1500 '.limits.footer' 200 '.limits.fields' 8 '.limits.group_threshold_max' 100 \
         '.status.last_test' null '.status.last_apply' null '.status.delivery_errors | length' 0
+    cst_j "notify/fresh: grouped by address, 30 s, 50 alerts" '.settings.delivery | "\(.group_by) \(.group_wait) \(.group_threshold)"' 'address 30 50' '.state.layout_outdated' false \
+        '.digest.enabled' true '.digest.hour' 8 '.digest.default_hour' 8 '.digest.setting' CROWDSEC_DIGEST_HOUR '.digest.scheduled' null
     cst_t "notify/fresh: the placeholders are described and none repeats" '(.placeholders | length) > 25 and (.placeholders | map(.name) | (unique | length) == length) and (.placeholders | all(has("name") and has("group") and has("label") and has("example") and has("description")))'
     cst_t "notify/fresh: the default message uses placeholders that exist" '[.defaults.message | (.title, .description, .footer, .link, (.fields[] | .name, .value)) | scan("\\{([a-z_]+)\\}") | .[0]] - [.placeholders[].name] | length == 0'
     cst_call viewer GET /crowdsec/notifications
@@ -7499,8 +7504,8 @@ cst_notify_validation() {
         '{"filters":{"ignore":['"$(seq -f '"crowdsecurity/s%g"' -s, 1 21)"']}}|up to 20 names'
         '{"delivery":{"group_wait":0}}|1 to 600'
         '{"delivery":{"group_wait":601}}|1 to 600'
-        '{"delivery":{"group_threshold":0}}|1 to 10'
-        '{"delivery":{"group_threshold":11}}|1 to 10'
+        '{"delivery":{"group_threshold":0}}|1 to 100'
+        '{"delivery":{"group_threshold":101}}|1 to 100'
         '{"delivery":{"max_retry":-1}}|0 to 10'
         '{"delivery":{"max_retry":11}}|0 to 10'
         '{"delivery":{"timeout":0}}|1 to 60'
@@ -7529,6 +7534,8 @@ cst_notify_validation() {
         '{"message":{"fields":[{"name":"1","value":"v"},{"name":"2","value":"v"},{"name":"3","value":"v"},{"name":"4","value":"v"},{"name":"5","value":"v"},{"name":"6","value":"v"},{"name":"7","value":"v"},{"name":"8","value":"v"},{"name":"9","value":"v"}]}}|up to 8 fields'
         '{"message":{"fields":"x"}}|up to 8 fields'
         '{"message":{"fields":["x"]}}|Field 1 is malformed'
+        '{"delivery":{"group_by":"ip"}}|grouping must be address'
+        '{"delivery":{"group_by":7}}|grouping must be address'
     )
     for i in "${!cases[@]}"; do cst_q "pv$i" admin POST /crowdsec/notifications/preview "{\"settings\":${cases[$i]%%|*}}"; done
     # the limits themselves are fine
@@ -7537,7 +7544,8 @@ cst_notify_validation() {
                    '{"delivery":{"group_wait":600,"group_threshold":10,"max_retry":10,"timeout":60}}' '{"delivery":{"group_wait":1,"group_threshold":1,"max_retry":0,"timeout":1}}'
                    '{"message":{"title":"'"$(head -c 200 /dev/zero | tr '\0' t)"'"}}' '{"message":{"description":"'"$(head -c 1500 /dev/zero | tr '\0' d)"'"}}' '{"message":{"description":"line one\nline two"}}'
                    '{"message":{"fields":[{"name":"1","value":"v"},{"name":"2","value":"v"},{"name":"3","value":"v"},{"name":"4","value":"v"},{"name":"5","value":"v"},{"name":"6","value":"v"},{"name":"7","value":"v"},{"name":"8","value":"v"}]}}'
-                   '{"message":{"fields":[]}}' '{"message":{"title":"","description":"","fields":[{"name":"only","value":"a field"}]}}' '{"message":{"timestamp":true}}')
+                   '{"message":{"fields":[]}}' '{"message":{"title":"","description":"","fields":[{"name":"only","value":"a field"}]}}' '{"message":{"timestamp":true}}'
+                   '{"delivery":{"group_by":"alert","group_threshold":100}}')
     for i in "${!fine[@]}"; do cst_q "fine$i" admin POST /crowdsec/notifications/preview "{\"settings\":${fine[$i]}}"; done
     cst_q pvviewer viewer POST /crowdsec/notifications/preview '{}'
     cst_q pvnobody none POST /crowdsec/notifications/preview '{}'
@@ -7597,20 +7605,31 @@ cst_notify_validation() {
     cst_call admin POST /crowdsec/notifications/preview "$(jq -nc --arg d "$all" '{settings: {message: {description: $d}}}')"
     cst_j "notify/preview: every placeholder is filled in" '.valid' true '.payload.embeds[0].description | test("\\{[a-z_]+\\}") | not' true
     cst_j "notify/preview: the sample alert's values" '.payload.embeds[0].description | contains("89.248.165.10")' true '.payload.embeds[0].description | contains(":flag_nl:")' true \
+        '.payload.embeds[0].description | contains("13 attempts in 4s")' true '.payload.embeds[0].description | contains("Web probing http-probing ×13")' true '.payload.embeds[0].description | contains("🇳🇱")' true \
         '.payload.embeds[0].description | contains("app.example.com")' true '.payload.embeds[0].description | contains("/wp-login.php")' true
     cst_call admin POST /crowdsec/notifications/preview '{"settings":{"message":{"description":"{time}"}}}'
     cst_t "notify/preview: {time} is Discord's live time stamp" '.payload.embeds[0].description | test("^<t:[0-9]+:R>$")'
     # -- the sample alerts: the colour and the words follow the family of the scenario
-    for i in probe ssh exploit manual simulated; do cst_q "sm$i" admin POST /crowdsec/notifications/preview "{\"sample\":\"$i\"}"; done
+    for i in probe ssh exploit manual simulated burst crowd; do cst_q "sm$i" admin POST /crowdsec/notifications/preview "{\"sample\":\"$i\"}"; done
+    cst_q smburstalert admin POST /crowdsec/notifications/preview '{"sample":"burst","settings":{"delivery":{"group_by":"alert"}}}'
+    cst_q smburstold admin POST /crowdsec/notifications/preview "$(jq -nc '{sample: "probe", settings: {delivery: {group_by: "alert"}, message: {title: "🛡️ {label}", description: "**{ip}**{country_tag}{as_tag}\n{events} hits → **{decision}**{for_duration}{target_tag}", fields: [{name: "Scenario", value: "`{scenario_short}`", inline: true}, {name: "Scope", value: "{scope}{origin_tag}", inline: true}, {name: "Lookup", value: "[CrowdSec CTI]({cti_url}) · [AbuseIPDB]({abuseipdb_url})", inline: true}, {name: "First request", value: "{path_code}", inline: false}]}}}')"
     cst_q smalert admin POST /crowdsec/notifications/preview '{"alert_id":10}'
     cst_q smalert2 admin POST /crowdsec/notifications/preview '{"alert_id":8,"settings":{"embed":{"color_mode":"fixed","color":"#0000ff"}}}'
     cst_run
-    cst_use smprobe;     cst_j "notify/sample probe" '.valid' true '.sample' probe '.payload.embeds[0].color' 16098851 '.payload.embeds[0].title | endswith("Web probing")' true '.payload.embeds[0].fields | length' 4
-    cst_use smssh;       cst_j "notify/sample ssh" '.payload.embeds[0].color' 15942494 '.payload.embeds[0].fields | length' 3
-    cst_use smexploit;   cst_j "notify/sample exploit" '.payload.embeds[0].color' 10979578 '.payload.embeds[0].title | endswith("Exploit attempt")' true
-    cst_use smmanual;    cst_j "notify/sample manual" '.payload.embeds[0].title | endswith("Manual ban") or endswith("Attack blocked")' true
-    cst_use smsimulated; cst_j "notify/sample simulated" '.payload.embeds[0].description | contains("simulated ban")' true
-    cst_use smalert;     cst_j "notify/a real alert" '.sample' 'alert 10' '.alert.id' 10 '.payload.embeds[0].description | contains("89.248.165.10")' true '.payload.embeds[0].description | contains("13 hits")' true
+    cst_use smprobe;     cst_j "notify/sample probe" '.valid' true '.sample' probe '.alert.count' 1 '.payload.embeds | length' 1 '.payload.embeds[0].color' 16098851 '.payload.embeds[0].title' '🛡️ 89.248.165.10 · 🇳🇱 NL · IP Volume inc' \
+        '.payload.embeds[0].description' $'**13 attempts in 4s** → **banned 4 hours**\nWeb probing http-probing ×13\nAimed at **app.example.com**\nRequest `/wp-login.php`' '.payload.embeds[0].fields | map(.name) | join(",")' Lookup
+    cst_use smssh;       cst_j "notify/sample ssh" '.payload.embeds[0].color' 15942494 '.payload.embeds[0].description' $'**6 attempts in 19s** → **banned 4 hours**\nSSH brute force ssh-bf ×6'
+    cst_use smexploit;   cst_j "notify/sample exploit" '.payload.embeds[0].color' 10979578 '.payload.embeds[0].description | startswith("**one request** → **banned 4 hours**\nExploit attempt CVE-2017-9841 ×1")' true
+    cst_use smmanual;    cst_j "notify/sample manual" '.payload.embeds[0].title' '🛡️ 198.51.100.7' '.payload.embeds[0].description | contains("banned 24 hours")' true
+    cst_use smsimulated; cst_j "notify/sample simulated" '.payload.embeds[0].description | contains("would be banned 4 hours (simulation)")' true
+    # one scanner, 47 alerts in 7 s: ONE block that counts what it tried
+    cst_use smburst;     cst_j "notify/sample burst" '.alert.count' 47 '.payload.embeds | length' 1 '.payload.embeds[0].color' 10979578 '.payload.embeds[0].title' '🛡️ 194.26.135.7 · 🇷🇺 RU · Petersburg Internet Network ltd.' \
+        '.payload.embeds[0].description' $'**47 attempts in 7s** → **banned 4 hours**\nExploit attempt CVE-2025-29927 ×41 · Exploit attempt CVE-2024-4577 ×4 · Attack blocked appsec-vpatch ×2\nAimed at **cloud.example.com**\nFirst `/_next/static/chunks/main.js` · last `/.env`'
+    cst_use smcrowd;     cst_j "notify/sample crowd: one block per address" '.alert.count' 3 '.payload.embeds | length' 3 '[.payload.embeds[].color] | join(",")' 16098851,15942494,10979578
+    cst_use smburstalert; cst_j "notify/sample burst, one block per alert: nine and the rest" '.payload.embeds | length' 10 '.payload.embeds[9].title' '🛡️ 38 more alerts' \
+        '.payload.embeds[9].description | startswith("`194.26.135.7` 🇷🇺 RU · Exploit attempt · one request\n")' true '.payload.embeds[9].description | endswith("…")' true '.payload.embeds[0].description' $'**one request** → **banned 4 hours**\nExploit attempt CVE-2025-29927 ×1\nAimed at **cloud.example.com**\nRequest `/_next/static/chunks/main.js`'
+    cst_use smburstold;  cst_j "notify/the message of before, one block per alert: as it was" '.payload.embeds[0].title' '🛡️ Web probing' '.payload.embeds[0].description' $'**89.248.165.10** :flag_nl: NL · IP Volume inc\n13 hits → **ban** for 4h · aimed at **app.example.com**' '.payload.embeds[0].fields | length' 4
+    cst_use smalert;     cst_j "notify/a real alert" '.sample' 'alert 10' '.alert.id' 10 '.payload.embeds[0].title | contains("89.248.165.10")' true '.payload.embeds[0].description | contains("13 attempts")' true
     cst_use smalert2;    cst_j "notify/a real alert, a fixed colour" '.payload.embeds[0].color' 255
 }
 
@@ -7926,19 +7945,41 @@ STRINGS
 }
 
 cst_notify_golden() {
-    local out
+    local out f
+    out=$( (
+        set +u
+        export BASE_DIR="$CST" CROWDSEC_STATE_DIR="$CST/.data/crowdsec" COMPOSE_DIR="$CST/Stacks" TEMPLATES_DIR="$CST/.templates"
+        # shellcheck disable=SC1091
+        source "$CST/.lib/crowdsec.sh" >/dev/null 2>&1; source "$CST/.lib/crowdsec-config.sh" >/dev/null 2>&1
+        test_alert='{"id":0,"scenario":"test alert","message":"test alert","events_count":1,"machine_id":"","kind":"","simulated":false,"source":{"scope":"Ip","value":"10.10.10.10","ip":"10.10.10.10","range":"","cn":"","as_number":"","as_name":""},"decisions":[{"type":"ban","duration":"4h","origin":"cscli","simulated":false}],"events":[]}'
+        _cs_notify_validate "$_CS_NOTIFY_DEFAULTS" || exit 3
+        printf 'grouped %s\n' "$(CS_RENDER_DOMAIN=lab.example.com CS_RENDER_SERVER=srv CS_RENDER_NOW=1790000000 _cs_notify_render_payload "$CS_OUT" "$test_alert" | jq -cS .)"
+        # the message DCS shipped before, one block per alert: what CrowdSec made of it then
+        _cs_notify_validate "$(jq -c --argjson o "$_CS_NOTIFY_V1" '.message = $o.message | .delivery.group_by = "alert"' <<< "$_CS_NOTIFY_DEFAULTS")" || exit 3
+        printf 'legacy %s\n' "$(CS_RENDER_DOMAIN=lab.example.com CS_RENDER_SERVER=srv CS_RENDER_NOW=1790000000 _cs_notify_render_payload "$CS_OUT" "$test_alert" | jq -cS .)"
+        # batches CrowdSec rendered (tests/fixtures/crowdsec-discord): DCS's preview has to be the same message
+        for f in "$ROOT"/tests/fixtures/crowdsec-discord/*.json; do
+            _cs_notify_validate "$(jq -c --argjson d "$_CS_NOTIFY_DEFAULTS" '$d * .settings' "$f")" || { printf '%s invalid\n' "${f##*/}"; continue; }
+            if [[ "$(CS_RENDER_DOMAIN=lab.example.com CS_RENDER_SERVER=srv _cs_notify_render_payload "$CS_OUT" "$(jq -c .alerts "$f")" | jq -cS .)" == "$(jq -cS .payload "$f")" ]]; then printf '%s same\n' "${f##*/}"; else printf '%s differs\n' "${f##*/}"; fi
+        done
+    ) 2>/dev/null )
+    check "notify/golden: the default message, rendered by DCS, is the one CrowdSec makes of the shipped template (JSON keys in any order)" "$(jq -cS . <<< "$CST_GOLDEN_GROUPED")" "$(sed -n 's/^grouped //p' <<< "$out")"
+    check "notify/golden: the message of before, one block per alert, is still the one CrowdSec made of it" "$(jq -cS . <<< "$CST_GOLDEN")" "$(sed -n 's/^legacy //p' <<< "$out")"
+    for f in burst three twelve three-alertmode twelve-alertmode stress; do
+        check "notify/golden: the batch $f, as CrowdSec 1.8.1 rendered it" "$f.json same" "$(grep "^$f.json " <<< "$out")"
+    done
+    # the shipped notifications-discord.yaml is the default message: the template DCS writes for it, with the placeholders the deploy fills
     out=$( (
         set +u
         export BASE_DIR="$CST" CROWDSEC_STATE_DIR="$CST/.data/crowdsec" COMPOSE_DIR="$CST/Stacks" TEMPLATES_DIR="$CST/.templates"
         # shellcheck disable=SC1091
         source "$CST/.lib/crowdsec.sh" >/dev/null 2>&1; source "$CST/.lib/crowdsec-config.sh" >/dev/null 2>&1
         _cs_notify_validate "$_CS_NOTIFY_DEFAULTS" || exit 3
-        CS_RENDER_DOMAIN=lab.example.com CS_RENDER_SERVER=srv CS_RENDER_NOW=1790000000 \
-            _cs_notify_render_payload "$CS_OUT" '{"id":0,"scenario":"test alert","message":"test alert","events_count":1,"machine_id":"","kind":"","simulated":false,"source":{"scope":"Ip","value":"10.10.10.10","ip":"10.10.10.10","range":"","cn":"","as_number":"","as_name":""},"decisions":[{"type":"ban","duration":"4h","origin":"cscli","simulated":false}],"events":[]}' | jq -cS .
+        _cs_notify_go_template "$CS_OUT" __DOMAIN__ __SERVER__ | sed 's/^/  /'
     ) 2>/dev/null )
-    check "notify/golden: the default message, rendered by DCS, is the one the shipped template makes in CrowdSec (JSON keys in any order)" "$(jq -cS . <<< "$CST_GOLDEN")" "$out"
+    check "notify/golden: the shipped notifications-discord.yaml is the default message" "$(md5sum <<< "$out")" "$(sed -n '/^format: |$/,/^url:/p' "$ROOT/.templates/crowdsec/files/notifications-discord.yaml" | sed '1d;$d' | md5sum)"
+    check "notify/golden: …with the default delivery" "group_wait: 30s group_threshold: 50" "$(grep -E '^group_(wait|threshold):' "$ROOT/.templates/crowdsec/files/notifications-discord.yaml" | tr '\n' ' ' | sed 's/ $//')"
 }
-
 cst_part_notify() {
     echo "CrowdSec page: the Discord messages"
     cst_notify_read
@@ -7949,9 +7990,138 @@ cst_part_notify() {
     cst_notify_safety
     cst_notify_template
     cst_notify_golden
+    cst_notify_upgrade
+    cst_notify_digest
     cst_notify_redeploy
 }
 
+# settings and a file an older DCS wrote (one block per alert, 5 s / 10 alerts): an untouched message follows the new default, one someone wrote stays
+cst_notify_upgrade() {
+    local http nf v1
+    http=$(CST_LIVE notifications/http.yaml); nf="$CST/.data/crowdsec/notify.json"
+    cst_world data traefik --traefik
+    cst_call admin PUT /crowdsec/notifications "{\"webhook_url\":\"$CST_HOOK\",\"settings\":{\"enabled\":true}}"
+    cst_is "upgrade: a first save" 200
+    check "upgrade: the file says which layout it holds" 2 "$(sed -n 's/^# dcs-notify: //p' "$http" | jq -r .v)"
+    v1=$(jq -c '{v: 1, enabled, webhook, identity, embed, mention, events, filters, delivery: {group_wait: 5, group_threshold: 10, max_retry: 3, timeout: 10},
+                 message: {title: "🛡️ {label}", description: "**{ip}**{country_tag}{as_tag}\n{events} hits → **{decision}**{for_duration}{target_tag}", footer: "CrowdSec · {domain}{machine_tag}", link: "{cti_url}", timestamp: false,
+                           fields: [{name: "Scenario", value: "`{scenario_short}`", inline: true}, {name: "Scope", value: "{scope}{origin_tag}", inline: true},
+                                    {name: "Lookup", value: "[CrowdSec CTI]({cti_url}) · [AbuseIPDB]({abuseipdb_url})", inline: true}, {name: "First request", value: "{path_code}", inline: false}]}}' "$nf")
+    printf '%s\n' "$v1" > "$nf"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "upgrade: the shipped message of before becomes today's" '.settings.message == .defaults.message' true '.settings.delivery | "\(.group_by) \(.group_wait) \(.group_threshold) \(.max_retry)"' 'address 30 50 3' \
+        '.settings.webhook.mode' custom '.settings.enabled' true '.state.layout' 2 '.state.layout_outdated' false
+    sed -i 's/^# dcs-notify: {"v":2,/# dcs-notify: {"v":1,/' "$http"
+    cst_uncache
+    cst_call admin GET /crowdsec/notifications
+    cst_j "upgrade: a file of the old layout is pointed out" '.state.file' dcs '.state.layout' 1 '.state.layout_outdated' true
+    cst_call admin PUT /crowdsec/notifications '{"settings":{}}'
+    cst_is "upgrade: saving without a change writes the new layout" 200
+    cst_j "upgrade: …and the webhook stays" '.state.layout_outdated' false '.settings.webhook.mode' custom '.webhook.configured' true '.applied.changed' true
+    check "upgrade: …in the file" "2 30s 50" "$(sed -n 's/^# dcs-notify: //p' "$http" | jq -r .v) $(sed -n 's/^group_wait: //p' "$http") $(sed -n 's/^group_threshold: //p' "$http")"
+    check "upgrade: …with the same webhook" 1 "$(grep -cF "url: $CST_HOOK" "$http")"
+    # a message someone wrote, and a delivery someone chose, stay
+    printf '%s\n' "$(jq -c '.message.title = "Mine: {label}" | .delivery.group_wait = 12' <<< "$v1")" > "$nf"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "upgrade: a message someone wrote stays" '.settings.message.title' 'Mine: {label}' '.settings.message.fields | length' 4 '.settings.delivery | "\(.group_by) \(.group_wait) \(.group_threshold)"' 'address 12 10'
+    printf '%s\n' "$(jq -c '.delivery.group_threshold = 7' <<< "$v1")" > "$nf"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "upgrade: …and so does a delivery someone chose" '.settings.message == .defaults.message' true '.settings.delivery | "\(.group_wait) \(.group_threshold)"' '5 7'
+}
+
+# the daily summary: the hour, "send now", and the minute clock that sends it once a day
+cst_digest_tick() {
+    ( set --; export PATH="$CST/bin:$PATH" DOCKER_COMPOSE_CMD="docker compose" API_RATE_LIMIT=0; [[ -z "$CST_LOC" ]] || export LC_ALL="$CST_LOC"
+      unset DISCORD_WEBHOOK_URL CROWDSEC_DIGEST_HOUR
+      # shellcheck disable=SC1090
+      source "$CST_API" >/dev/null 2>&1
+      _crowdsec_digest_tick; wait ) >/dev/null 2>>"$CST/api-stderr.log"
+}
+cst_digest_state() { jq -r "$1" "$CST/.data/crowdsec/digest.json" 2>/dev/null; }
+cst_digest_age() { jq --arg d "${2:-2000-01-01}" --argjson back "${1:-0}" '.scheduled.date = $d | .scheduled.at -= $back' "$CST/.data/crowdsec/digest.json" > "$CST/digest.tmp" && mv -f "$CST/digest.tmp" "$CST/.data/crowdsec/digest.json"; }
+cst_notify_digest() {
+    local n0 i h
+    cst_world data traefik --traefik
+    : > "$CST/discord.log"; rm -f "$CST/discord.status"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "digest: on at 8 by default" '.digest.enabled' true '.digest.hour' 8 '.digest.sent_today' false '.digest.last' null
+    # -- the hour
+    cst_call admin PUT /crowdsec/notifications/digest '{"hour":7}'
+    cst_is "digest/hour: 7" 200
+    cst_j "digest/hour: 7" '.enabled' true '.hour' 7 '.success' true
+    check "digest/hour: …is in .env" "CROWDSEC_DIGEST_HOUR=7" "$(grep '^CROWDSEC_DIGEST_HOUR=' "$CST/.env")"
+    cst_call admin PUT /crowdsec/notifications/digest '{"hour":"off"}'
+    cst_j "digest/hour: off" '.enabled' false '.hour' null
+    check "digest/hour: …is in .env" "CROWDSEC_DIGEST_HOUR=off" "$(grep '^CROWDSEC_DIGEST_HOUR=' "$CST/.env")"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "digest/hour: …and in the settings" '.digest.enabled' false '.digest.next' null
+    cst_call admin PUT /crowdsec/notifications/digest '{"hour":0}'
+    cst_j "digest/hour: midnight" '.enabled' true '.hour' 0
+    for i in '{"hour":24}' '{"hour":-1}' '{"hour":"x"}' '{"hour":7.5}' '{"hour":"7; id"}' '{}' 'nope' '[]'; do
+        cst_q "dh$i" admin PUT /crowdsec/notifications/digest "$i"
+    done
+    cst_q dhviewer viewer PUT /crowdsec/notifications/digest '{"hour":5}'
+    cst_q dhnobody none PUT /crowdsec/notifications/digest '{"hour":5}'
+    cst_q dsviewer viewer POST /crowdsec/notifications/digest '{}'
+    cst_q dsnobody none POST /crowdsec/notifications/digest '{}'
+    cst_q dsnohook admin POST /crowdsec/notifications/digest '{}'
+    cst_run
+    for i in '{"hour":24}' '{"hour":-1}' '{"hour":"x"}' '{"hour":7.5}' '{"hour":"7; id"}' '{}' 'nope' '[]'; do cst_use "dh$i"; cst_is "digest/hour: $i is refused" 400; done
+    cst_use dhviewer; cst_is "digest/hour: a viewer may not" 403
+    cst_use dhnobody; cst_is "digest/hour: nobody may not" 401
+    cst_use dsviewer; cst_is "digest/send: a viewer may not" 403
+    cst_use dsnobody; cst_is "digest/send: nobody may not" 401
+    cst_use dsnohook; cst_is "digest/send: without a webhook" 400
+    check "digest/hour: the refused ones changed nothing" "CROWDSEC_DIGEST_HOUR=0" "$(grep '^CROWDSEC_DIGEST_HOUR=' "$CST/.env")"
+    check "digest: nothing reached Discord yet" 0 "$(cst_disc_n)"
+    # -- send now
+    cst_call admin PUT /crowdsec/notifications "{\"webhook_url\":\"$CST_HOOK\",\"settings\":{\"enabled\":true}}"
+    n0=$(cst_disc_n)
+    cst_call admin POST /crowdsec/notifications/digest '{}'
+    cst_is "digest/send: now" 200
+    cst_j "digest/send" '.success' true '.delivered' true '.http' 204 '.summary | has("attempts") and has("addresses") and has("top_addresses") and has("in_force")' true '.digest.last.kind' manual
+    check "digest/send: one message reached the webhook" "$((n0 + 1)) /api/webhooks/$CST_HOOK_ID/$CST_HOOK_TOKEN" "$(cst_disc_n) $(tail -n 1 "$CST/discord.log" | jq -r .path)"
+    check "digest/send: …one embed, yesterday on this server, nobody pinged" 'true 1 {"parse":[]}' "$(cst_disc_last | jq -c '(.embeds[0].title | startswith("📊 Yesterday on ")), (.embeds | length), .allowed_mentions' | tr '\n' ' ' | sed 's/ $//')"
+    check "digest/send: …with the bans" true "$(cst_disc_last | jq '[.embeds[0].fields[].name] | index("Bans") != null')"
+    check "digest/send: the token is not in the answer" 0 "$(grep -cF -- "$CST_HOOK_TOKEN" <<< "$CST_BODY")"
+    check "digest/send: a manual send is not the day's" null "$(cst_digest_state '.scheduled')"
+    # -- the minute clock: due from the hour on (0 here), once a day
+    n0=$(cst_disc_n)
+    cst_digest_tick
+    check "digest/clock: the day's summary goes out" "$((n0 + 1)) true $(date +%F)" "$(cst_disc_n) $(cst_digest_state '.scheduled.ok') $(cst_digest_state '.scheduled.date')"
+    cst_digest_tick; cst_digest_tick
+    check "digest/clock: …once" "$((n0 + 1))" "$(cst_disc_n)"
+    cst_call admin GET /crowdsec/notifications
+    cst_j "digest/clock: the page knows" '.digest.sent_today' true '.digest.next' tomorrow '.digest.scheduled.ok' true
+    cst_digest_age 0; cst_digest_tick
+    check "digest/clock: the next day, again" "$((n0 + 2))" "$(cst_disc_n)"
+    # Discord does not take it: tried again ten minutes later, three times at most
+    echo 500 > "$CST/discord.status"; cst_digest_age 0; cst_digest_tick
+    check "digest/clock: Discord refused" "$((n0 + 3)) false 1" "$(cst_disc_n) $(cst_digest_state '.scheduled.ok') $(cst_digest_state '.scheduled.tries')"
+    cst_digest_tick
+    check "digest/clock: …not again within ten minutes" "$((n0 + 3))" "$(cst_disc_n)"
+    cst_digest_age 700 "$(date +%F)"; cst_digest_tick
+    check "digest/clock: …again after them" "$((n0 + 4)) 2" "$(cst_disc_n) $(cst_digest_state '.scheduled.tries')"
+    cst_digest_age 700 "$(date +%F)"; cst_digest_tick; cst_digest_age 700 "$(date +%F)"; cst_digest_tick
+    check "digest/clock: …three times at most" "$((n0 + 5)) 3" "$(cst_disc_n) $(cst_digest_state '.scheduled.tries')"
+    rm -f "$CST/discord.status"
+    # not before the hour
+    h=$(( 10#$(date +%H) ))
+    if (( h < 23 )); then
+        cst_env CROWDSEC_DIGEST_HOUR $(( h + 1 )); cst_digest_age 0; cst_digest_tick
+        check "digest/clock: not before the hour" "$((n0 + 5))" "$(cst_disc_n)"
+    fi
+    cst_env CROWDSEC_DIGEST_HOUR off; cst_digest_age 0; cst_digest_tick
+    check "digest/clock: off is off" "$((n0 + 5))" "$(cst_disc_n)"
+    # the alerts are off: the day is noted, nothing is sent
+    cst_env CROWDSEC_DIGEST_HOUR 0
+    cst_call admin PUT /crowdsec/notifications '{"settings":{"enabled":false}}'
+    cst_digest_age 0; cst_digest_tick
+    check "digest/clock: with the alerts off nothing is sent" "$((n0 + 5)) true" "$(cst_disc_n) $(cst_digest_state '.scheduled.skipped')"
+    cst_digest_tick
+    check "digest/clock: …and the day is not tried again" "$((n0 + 5))" "$(cst_disc_n)"
+    cst_env CROWDSEC_DIGEST_HOUR 8
+}
 # the deploy of the crowdsec template puts its own profiles.yaml and Discord file into CrowdSec; when the page manages those files it leaves them alone
 cst_deploy() {   # cst_deploy 'VARIABLES' — the hook that runs after a template deploy, against the stand-in; its own log is $CST/deploy.log
     local vars="$1"
@@ -7969,7 +8139,7 @@ cst_notify_redeploy() {
     # -- a fresh install: the shipped profiles and Discord file go in, with the webhook and the domain
     cst_world data traefik --traefik
     cst_deploy "$vars"
-    check "redeploy/fresh: the shipped Discord file is put in, with the webhook and the domain" "1 1 0" "$(grep -cF -- "$CST_HOOK" "$http") $(grep -c 'lab.example.test' "$http") $(grep -c '__WEBHOOK__\|__DOMAIN__' "$http")"
+    check "redeploy/fresh: the shipped Discord file is put in, with the webhook, the domain and the server's name" "1 1 0 1" "$(grep -cF -- "$CST_HOOK" "$http") $(grep -c 'lab.example.test' "$http") $(grep -c '__WEBHOOK__\|__DOMAIN__\|__SERVER__' "$http") $(grep -c '$p_server := "[A-Za-z0-9 ._-]\+"' "$http")"
     check "redeploy/fresh: …and the shipped profiles, that send every decision to it" "yes" "$(grep -q 'http_default' "$live" && ! grep -q '^# Managed by DCS' "$live" && echo yes || echo no)"
     check "redeploy/fresh: it says so in its log" "yes" "$(grep -q 'alerts go to Discord' "$CST/deploy.log" && echo yes || echo no)"
     check "redeploy/fresh: the Traefik bouncer is registered" "yes" "$(grep -q 'bouncer registered' "$CST/deploy.log" && echo yes || echo no)"
@@ -8585,7 +8755,7 @@ EOF
         _cs_notify_validate "$_CS_NOTIFY_DEFAULTS" && tpl=$(_cs_notify_go_template "$CS_OUT" lab.example.com srv)
         n=0
         while IFS= read -r prefix; do
-            grep -qF "hasPrefix \"$prefix\" \$p_scenario" <<< "$tpl" || echo "the Go template has no branch for $prefix"
+            grep -qF "hasPrefix \"$prefix\" \$sc }}" <<< "$tpl" || echo "the Go template has no branch for $prefix"
             n=$(( n + 1 ))
         done < <(jq -nr "$_CS_JQ_LABELS"' label_table[] | .[0]')
         [[ "$n" -ge 15 ]] || echo "the table has only $n rows"

@@ -1787,7 +1787,7 @@ rotate:
 }
 
 
-# The files the DCS crowdsec template ships (profiles.yaml, and the Discord notification with @@WEBHOOK@@ / @@DOMAIN@@ to fill in)
+# The files the DCS crowdsec template ships (profiles.yaml, and the Discord notification with @@WEBHOOK@@ / @@DOMAIN@@ / @@SERVER@@ to fill in)
 DCS_PROFILES_YAML = r'''# Decisions: 4 h bans for IPs and ranges; every decision also goes to the
 # http_default notification (Discord) when DCS configured one.
 name: default_ip_remediation
@@ -1811,75 +1811,223 @@ notifications:
 on_success: break
 '''
 
-DCS_DISCORD_YAML = r'''# CrowdSec → Discord: one embed per alert, in the DCS style. Every ban says what
-# was blocked in plain words (the scenario family), where it came from (address,
-# flag, network), how hard it hit and for how long it is banned, and links the
-# address to the CrowdSec threat-intelligence page.
-# DCS fills the webhook and the footer's domain when the template is deployed
-# (POST /crowdsec/notifications re-applies it to a running CrowdSec).
+DCS_DISCORD_YAML = r'''# CrowdSec → Discord, in the DCS style: ONE message per batch (what arrives within 30 s, 50 alerts at most) with one
+# block per source address: where it came from (flag, network), how many attempts over how long, every attack it tried
+# with how often, the hosts and the first and last path it asked for, the ban, and links to CrowdSec CTI and AbuseIPDB.
+# DCS fills the webhook, the domain and the server name when the template is deployed. This is the message the CrowdSec
+# page ships with (tests/smoke.sh checks the two are the same): change it on the Discord tab, which takes the file over.
 type: http
 name: http_default
 log_level: info
-group_wait: 5s
-group_threshold: 10
+group_wait: 30s
+group_threshold: 50
 max_retry: 3
 timeout: 10s
 format: |
-  {{- /* Colours follow the dashboard: rose for break-ins, violet for exploits,
-         amber for injection and scanning, cyan for community signals */ -}}
+  {{- /* Managed by DCS: the CrowdSec page writes this file. Change the message on the Discord tab. */ -}}
+  {{- $p_domain := "@@DOMAIN@@" }}{{ $p_server := "@@SERVER@@" }}{{ $by_address := true }}
+  {{- /* 1. the batch, gathered: one group per address (or per alert) with its attempts per scenario, the hosts and paths
+         it asked for, the longest decision and the time from its first to its last request */ -}}
+  {{- $epoch := toDate "2006-01-02" "2000-01-01" }}
+  {{- $groups := dict }}{{ $order := list }}
+  {{- range $i, $alert := . }}
+    {{- $ip := "" }}{{ with $alert.Source }}{{ with .Value }}{{ $ip = (. | trim) }}{{ end }}{{ end }}
+    {{- $key := printf "#%d" $i }}{{ if and $by_address (ne $ip "") }}{{ $key = print "ip " $ip }}{{ end }}
+    {{- if not (hasKey $groups $key) }}
+      {{- $_ := set $groups $key (dict "first" $alert "alerts" 0 "events" 0 "n" 0 "rank" 0 "scen" (dict) "order" (list) "raw" (dict) "label" (dict) "targets" (list) "path0" "" "path1" "" "ua" "" "t0" 0 "t1" 0 "dsecs" -1 "dtype" "" "ddur" "" "dorigin" "" "dsim" "") }}
+      {{- $order = append $order $key }}
+    {{- end }}
+    {{- $g := get $groups $key }}
+    {{- $sc := "" }}{{ with $alert.Scenario }}{{ $sc = (. | trim | replace "@" "@​") }}{{ end }}
+    {{- $lb := "Attack blocked" }}{{ $rank := 2 }}
+    {{- if hasPrefix "crowdsecurity/ssh-slow-bf" $sc }}{{ $lb = "SSH slow brute force" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "crowdsecurity/ssh-cve" $sc }}{{ $lb = "SSH exploit attempt" }}{{ $rank = 4 }}
+    {{- else if hasPrefix "crowdsecurity/ssh" $sc }}{{ $lb = "SSH brute force" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "crowdsecurity/http-cve" $sc }}{{ $lb = "Exploit attempt" }}{{ $rank = 4 }}
+    {{- else if hasPrefix "crowdsecurity/CVE" $sc }}{{ $lb = "Exploit attempt" }}{{ $rank = 4 }}
+    {{- else if hasPrefix "crowdsecurity/http-sqli" $sc }}{{ $lb = "SQL injection probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-xss" $sc }}{{ $lb = "Cross-site scripting probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-path-traversal" $sc }}{{ $lb = "Path traversal probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-backdoors" $sc }}{{ $lb = "Backdoor probe" }}{{ $rank = 4 }}
+    {{- else if hasPrefix "crowdsecurity/http-admin-interface" $sc }}{{ $lb = "Admin panel probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-bad-user-agent" $sc }}{{ $lb = "Known bad scanner" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-probing" $sc }}{{ $lb = "Web probing" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-sensitive-files" $sc }}{{ $lb = "Sensitive file probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-crawl" $sc }}{{ $lb = "Aggressive crawler" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-generic-bf" $sc }}{{ $lb = "Web login brute force" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "crowdsecurity/http-open-proxy" $sc }}{{ $lb = "Open proxy probe" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-wordpress" $sc }}{{ $lb = "WordPress attack" }}{{ $rank = 1 }}
+    {{- else if hasPrefix "crowdsecurity/http-dos" $sc }}{{ $lb = "HTTP flood" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "crowdsecurity/nginx-req-limit" $sc }}{{ $lb = "Request flood" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "LePresidente/" $sc }}{{ $lb = "Application brute force" }}{{ $rank = 3 }}
+    {{- else if hasPrefix "crowdsecurity/traefik" $sc }}{{ $lb = "Traefik abuse" }}{{ $rank = 1 }}
+    {{- else if regexMatch "(?i)cve" $sc }}{{ $lb = "Exploit attempt" }}{{ $rank = 4 }}
+    {{- else if regexMatch "(?i)(^|[-_/])bf($|[-_])|brute" $sc }}{{ $lb = "Brute force" }}{{ $rank = 3 }}
+    {{- else if regexMatch "(?i)spam" $sc }}{{ $lb = "Spam" }}{{ $rank = 2 }}
+    {{- end }}
+    {{- $sid := trimPrefix "crowdsecurity/" $sc }}{{ $cve := regexFind "(?i)cve-[0-9]{4}-[0-9]+" $sc }}{{ if $cve }}{{ $sid = upper $cve }}{{ end }}
+    {{- $item := $lb }}{{ if $sid }}{{ $item = print $lb " " $sid }}{{ end }}
+    {{- $ev := 0 }}{{ with $alert.EventsCount }}{{ $ev = (. | int) }}{{ end }}
+    {{- $_ := set $g "alerts" (add1 (get $g "alerts")) }}{{ $_ := set $g "events" (add (get $g "events") $ev) }}{{ $_ := set $g "n" (add (get $g "n") (max $ev 1)) }}
+    {{- if gt $rank (get $g "rank") }}{{ $_ := set $g "rank" $rank }}{{ end }}
+    {{- $scn := get $g "scen" }}
+    {{- if not (hasKey $scn $item) }}{{ $_ := set $g "order" (append (get $g "order") $item) }}{{ $_ := set $scn $item 0 }}{{ $_ := set (get $g "raw") $item $sc }}{{ $_ := set (get $g "label") $item $lb }}{{ end }}
+    {{- $_ := set $scn $item (add (get $scn $item) (max $ev 1)) }}
+    {{- with $alert.StartAt }}{{ $t := (toDate "2006-01-02T15:04:05Z07:00" .).Unix }}{{ if and (gt $t 0) (or (eq (get $g "t0") 0) (lt $t (get $g "t0"))) }}{{ $_ := set $g "t0" $t }}{{ end }}{{ end }}
+    {{- with $alert.StopAt }}{{ $t := (toDate "2006-01-02T15:04:05Z07:00" .).Unix }}{{ if gt $t (get $g "t1") }}{{ $_ := set $g "t1" $t }}{{ end }}{{ end }}
+    {{- range $e := $alert.Events }}{{ range $m := $e.Meta }}{{ with $m.Key }}{{ $k := (. | trim) }}
+      {{- if eq $k "target_fqdn" }}{{ with $m.Value }}{{ $v := (. | trim | trunc 200 | replace "@" "@​") }}{{ if and $v (not (has $v (get $g "targets"))) }}{{ $_ := set $g "targets" (append (get $g "targets") $v) }}{{ end }}{{ end }}
+      {{- else if eq $k "http_path" }}{{ with $m.Value }}{{ $v := (. | trim | trunc 200 | replace "@" "@​") }}{{ if $v }}{{ if not (get $g "path0") }}{{ $_ := set $g "path0" $v }}{{ end }}{{ $_ := set $g "path1" $v }}{{ end }}{{ end }}
+      {{- else if and (eq $k "http_user_agent") (not (get $g "ua")) }}{{ with $m.Value }}{{ $_ := set $g "ua" (. | trim | trunc 200 | replace "@" "@​") }}{{ end }}
+      {{- end }}
+    {{- end }}{{ end }}{{ end }}
+    {{- range $d := $alert.Decisions }}
+      {{- $dd := "" }}{{ with $d.Duration }}{{ $dd = (. | trim) }}{{ end }}
+      {{- $secs := sub (dateModify $dd $epoch).Unix $epoch.Unix }}
+      {{- if gt $secs (get $g "dsecs") }}
+        {{- $_ := set $g "dsecs" $secs }}{{ $_ := set $g "ddur" $dd }}
+        {{- $t := "ban" }}{{ with $d.Type }}{{ $t = (. | trim) }}{{ end }}{{ $_ := set $g "dtype" $t }}
+        {{- $o := "" }}{{ with $d.Origin }}{{ $o = (. | trim) }}{{ end }}{{ $_ := set $g "dorigin" $o }}
+        {{- $s := "" }}{{ with $d.Simulated }}{{ $s = (ternary "1" "" .) }}{{ end }}{{ $_ := set $g "dsim" $s }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- /* 2. each group its scenarios, the most attempts first */ -}}
+  {{- range $key := $order }}{{ $g := get $groups $key }}
+    {{- $sorted := list }}{{ range $si, $it := get $g "order" }}{{ $sorted = append $sorted (printf "%09d|%04d|%s" (sub 999999999 (get (get $g "scen") $it)) $si $it) }}{{ end }}
+    {{- $_ := set $g "sorted" (sortAlpha $sorted) }}
+  {{- end }}
+  {{- /* 3. Discord takes 10 embeds: more addresses make 9 and a tenth that lists the rest. Its 6000 characters are shared out: every
+         embed gets the same budget, its title, footer and fields a share of it (cut by characters, never half of one), the description the rest */ -}}
+  {{- $shown := $order }}{{ $rest := list }}
+  {{- if gt (len $order) 10 }}{{ $shown = slice $order 0 9 }}{{ $rest = slice $order 9 }}{{ end }}
+  {{- $n_embeds := len $shown }}{{ if $rest }}{{ $n_embeds = add1 $n_embeds }}{{ end }}
+  {{- $budget := div 5400 $n_embeds }}
+  {{- $capT := min 256 (max 20 (div $budget 5)) }}{{ $capF := min 2048 (max 20 (div $budget 5)) }}
+  {{- $capFN := min 256 (max 10 (div $budget 5)) }}{{ $capFV := min 1024 (max 20 (div (mul $budget 2) 5)) }}
+  {{- $ri := dict "A" "🇦" "B" "🇧" "C" "🇨" "D" "🇩" "E" "🇪" "F" "🇫" "G" "🇬" "H" "🇭" "I" "🇮" "J" "🇯" "K" "🇰" "L" "🇱" "M" "🇲" "N" "🇳" "O" "🇴" "P" "🇵" "Q" "🇶" "R" "🇷" "S" "🇸" "T" "🇹" "U" "🇺" "V" "🇻" "W" "🇼" "X" "🇽" "Y" "🇾" "Z" "🇿" }}
+  {{- $units := dict "y" "year" "mo" "month" "d" "day" "h" "hour" "m" "minute" "s" "second" }}
   {
-    "username": "CrowdSec",
-    "avatar_url": "https://raw.githubusercontent.com/scotthowson/dcs-orchestrator-ui/v2.0.0/brand/discord/crowdsec-avatar.png",
+    "username": {{ "CrowdSec" | toJson }},
+    "avatar_url": {{ "https://raw.githubusercontent.com/scotthowson/dcs-orchestrator-ui/v2.0.0/brand/discord/crowdsec-avatar.png" | toJson }},
+    
     "allowed_mentions": {"parse": []},
     "embeds": [
-      {{- range $i, $alert := . }}
-      {{- $s := $alert.Scenario }}
-      {{- $label := "Attack blocked" }}{{ $color := 15942494 }}
-      {{- if hasPrefix "crowdsecurity/ssh" $s }}{{ $label = "SSH brute force" }}{{ $color = 15942494 }}
-      {{- else if hasPrefix "crowdsecurity/http-cve" $s }}{{ $label = "Exploit attempt" }}{{ $color = 10979578 }}
-      {{- else if hasPrefix "crowdsecurity/CVE" $s }}{{ $label = "Exploit attempt" }}{{ $color = 10979578 }}
-      {{- else if hasPrefix "crowdsecurity/http-sqli" $s }}{{ $label = "SQL injection probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-xss" $s }}{{ $label = "Cross-site scripting probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-path-traversal" $s }}{{ $label = "Path traversal probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-backdoors" $s }}{{ $label = "Backdoor probe" }}{{ $color = 10979578 }}
-      {{- else if hasPrefix "crowdsecurity/http-admin-interface" $s }}{{ $label = "Admin panel probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-bad-user-agent" $s }}{{ $label = "Known bad scanner" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-probing" $s }}{{ $label = "Web probing" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-sensitive-files" $s }}{{ $label = "Sensitive file probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-crawl" $s }}{{ $label = "Aggressive crawler" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-generic-bf" $s }}{{ $label = "Web login brute force" }}{{ $color = 15942494 }}
-      {{- else if hasPrefix "crowdsecurity/http-open-proxy" $s }}{{ $label = "Open proxy probe" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-wordpress" $s }}{{ $label = "WordPress attack" }}{{ $color = 16098851 }}
-      {{- else if hasPrefix "crowdsecurity/http-dos" $s }}{{ $label = "HTTP flood" }}{{ $color = 15942494 }}
-      {{- else if hasPrefix "crowdsecurity/nginx-req-limit" $s }}{{ $label = "Request flood" }}{{ $color = 15942494 }}
-      {{- else if hasPrefix "LePresidente/" $s }}{{ $label = "Application brute force" }}{{ $color = 15942494 }}
-      {{- else if hasPrefix "crowdsecurity/traefik" $s }}{{ $label = "Traefik abuse" }}{{ $color = 16098851 }}
-      {{- end }}
-      {{- $ip := $alert.Source.Value }}
-      {{- $target := "" }}{{ $path := "" }}
-      {{- range $e := $alert.Events }}{{ range $m := $e.Meta }}
-        {{- if and (eq $m.Key "target_fqdn") (eq $target "") }}{{ $target = $m.Value }}{{ end }}
-        {{- if and (eq $m.Key "http_path") (eq $path "") }}{{ $path = $m.Value }}{{ end }}
-      {{- end }}{{ end }}
-      {{- $dtype := "ban" }}{{ $dur := "" }}{{ $origin := "" }}
-      {{- /* decision fields are pointers: a string function (trim) dereferences them */ -}}
-      {{- if $alert.Decisions }}{{ $d := index $alert.Decisions 0 }}{{ $dtype = ($d.Type | trim) }}{{ $dur = ($d.Duration | trim) }}{{ $origin = ($d.Origin | trim) }}{{ end }}
+      {{- range $gi, $key := $shown }}
+      {{- $g := get $groups $key }}{{ $a := get $g "first" }}
+      {{- $p_ip := "" }}{{ with $a.Source }}{{ with .Value }}{{ $p_ip = (. | trim) }}{{ end }}{{ end }}
+      {{- $p_scope := "" }}{{ with $a.Source }}{{ with .Scope }}{{ $p_scope = (. | trim) }}{{ end }}{{ end }}
+      {{- $p_range := "" }}{{ with $a.Source }}{{ with .Range }}{{ $p_range = (. | trim) }}{{ end }}{{ end }}
+      {{- $p_country := "" }}{{ with $a.Source }}{{ with .Cn }}{{ $p_country = (. | trim) }}{{ end }}{{ end }}
+      {{- $p_as_number := "" }}{{ with $a.Source }}{{ with .AsNumber }}{{ $p_as_number = (. | trim) }}{{ end }}{{ end }}
+      {{- $p_as_name := "" }}{{ with $a.Source }}{{ with .AsName }}{{ $p_as_name = (. | trim | replace "@" "@​") }}{{ end }}{{ end }}
+      {{- $p_machine := "" }}{{ with $a.MachineID }}{{ $p_machine = (. | trim) }}{{ end }}
+      {{- $p_message := "" }}{{ with $a.Message }}{{ $p_message = (. | trim | replace "@" "@​") }}{{ end }}
+      {{- $p_alert_id := printf "%d" ($a.ID | int) }}
+      {{- $p_events := printf "%d" (get $g "events") }}{{ $p_alerts := printf "%d" (get $g "alerts") }}{{ $nn := get $g "n" }}
+      {{- $sorted := get $g "sorted" }}{{ $top := (splitn "|" 3 (first $sorted))._2 }}
+      {{- $p_scenario := print (get (get $g "raw") $top) }}{{ $p_label := print (get (get $g "label") $top) }}
+      {{- $p_scenario_short := trimPrefix "crowdsecurity/" $p_scenario }}
+      {{- $items := list }}{{ range $j, $s := $sorted }}{{ if lt $j 6 }}{{ $it := (splitn "|" 3 $s)._2 }}{{ $items = append $items (printf "%s ×%d" $it (get (get $g "scen") $it)) }}{{ end }}{{ end }}
+      {{- $p_scenarios := join " · " $items }}{{ if gt (len $sorted) 6 }}{{ $p_scenarios = printf "%s · +%d more" $p_scenarios (sub (len $sorted) 6) }}{{ end }}
+      {{- $sim := "" }}{{ with $a.Simulated }}{{ $sim = (ternary "1" "" .) }}{{ end }}{{ if get $g "dsim" }}{{ $sim = "1" }}{{ end }}
+      {{- $hasdec := ge (get $g "dsecs") 0 }}
+      {{- $dtype := "ban" }}{{ $p_duration := "" }}{{ $p_origin := "" }}
+      {{- if $hasdec }}{{ $dtype = print (get $g "dtype") }}{{ $p_duration = print (get $g "ddur") }}{{ $p_origin = print (get $g "dorigin") }}{{ end }}
+      {{- $color := 15942494 }}{{ $rk := get $g "rank" }}{{ if eq $rk 4 }}{{ $color = 10979578 }}{{ else if eq $rk 1 }}{{ $color = 16098851 }}{{ end }}
       {{- if eq $dtype "captcha" }}{{ $color = 2282478 }}{{ end }}
-      {{- if $i }},{{ end }}
+      {{- $human := "" }}{{ if $p_duration }}{{ $dr := durationRound $p_duration }}{{ if ne $dr "0s" }}{{ $num := regexFind "^[0-9]+" $dr }}{{ $human = print $num " " (get $units (trimPrefix $num $dr)) }}{{ if ne $num "1" }}{{ $human = print $human "s" }}{{ end }}{{ end }}{{ end }}
+      {{- $p_ban := "" }}
+      {{- if $hasdec }}
+        {{- if eq $dtype "ban" }}{{ $p_ban = "banned" }}{{ if $human }}{{ $p_ban = print "banned " $human }}{{ end }}{{ if $sim }}{{ $p_ban = print "would be " $p_ban " (simulation)" }}{{ end }}
+        {{- else }}{{ $p_ban = $dtype }}{{ if $human }}{{ $p_ban = print $dtype " for " $human }}{{ end }}{{ if $sim }}{{ $p_ban = print "simulated " $p_ban }}{{ end }}{{ end }}
+      {{- end }}
+      {{- $p_ban_tag := "" }}{{ if $p_ban }}{{ $p_ban_tag = print " → **" $p_ban "**" }}{{ end }}
+      {{- $p_span := "" }}{{ $t0 := get $g "t0" }}{{ $t1 := get $g "t1" }}
+      {{- if and (gt $t0 0) (ge $t1 $t0) }}{{ $s := sub $t1 $t0 }}
+        {{- if lt $s 1 }}{{ $p_span = "under a second" }}
+        {{- else if lt $s 60 }}{{ $p_span = printf "%ds" $s }}
+        {{- else if lt $s 3600 }}{{ $p_span = printf "%dm" (div $s 60) }}{{ if mod $s 60 }}{{ $p_span = printf "%s %ds" $p_span (mod $s 60) }}{{ end }}
+        {{- else if lt $s 86400 }}{{ $p_span = printf "%dh" (div $s 3600) }}{{ if div (mod $s 3600) 60 }}{{ $p_span = printf "%s %dm" $p_span (div (mod $s 3600) 60) }}{{ end }}
+        {{- else }}{{ $p_span = printf "%dd" (div $s 86400) }}{{ if div (mod $s 86400) 3600 }}{{ $p_span = printf "%s %dh" $p_span (div (mod $s 86400) 3600) }}{{ end }}{{ end }}
+      {{- end }}
+      {{- $p_attempts := "one request" }}{{ if ne $nn 1 }}{{ $p_attempts = printf "%d attempts" $nn }}{{ if $p_span }}{{ $p_attempts = printf "%s in %s" $p_attempts $p_span }}{{ end }}{{ end }}
+      {{- $tg := get $g "targets" }}{{ $p_target := "" }}{{ $p_targets := "" }}{{ $p_targets_line := "" }}
+      {{- if $tg }}{{ $p_target = print (first $tg) }}{{ $tl := list }}{{ $bl := list }}
+        {{- range $j, $t := $tg }}{{ if lt $j 3 }}{{ $tl = append $tl $t }}{{ $bl = append $bl (print "**" $t "**") }}{{ end }}{{ end }}
+        {{- $more := "" }}{{ if gt (len $tg) 3 }}{{ $more = printf " and %d more" (sub (len $tg) 3) }}{{ end }}
+        {{- $p_targets = print (join ", " $tl) $more }}{{ $p_targets_line = print "\nAimed at " (join ", " $bl) $more }}
+      {{- end }}
+      {{- $p_path := print (get $g "path0") }}{{ $p_last_path := print (get $g "path1") }}{{ $p_user_agent := print (get $g "ua") }}
+      {{- $p_path_code := "" }}{{ if $p_path }}{{ $p_path_code = print "`" (replace "`" "'" $p_path) "`" }}{{ end }}
+      {{- $p_last_path_code := "" }}{{ if $p_last_path }}{{ $p_last_path_code = print "`" (replace "`" "'" $p_last_path) "`" }}{{ end }}
+      {{- $p_requests_line := "" }}
+      {{- if $p_path }}{{ $c0 := $p_path }}{{ if gt (len (regexFindAll "(?s)." $c0 -1)) 100 }}{{ $c0 = print (regexFind "^(?s).{0,99}" $c0) "…" }}{{ end }}
+        {{- $c1 := $p_last_path }}{{ if gt (len (regexFindAll "(?s)." $c1 -1)) 100 }}{{ $c1 = print (regexFind "^(?s).{0,99}" $c1) "…" }}{{ end }}
+        {{- if eq $p_path $p_last_path }}{{ $p_requests_line = print "\nRequest `" (replace "`" "'" $c0) "`" }}
+        {{- else }}{{ $p_requests_line = print "\nFirst `" (replace "`" "'" $c0) "` · last `" (replace "`" "'" $c1) "`" }}{{ end }}
+      {{- end }}
+      {{- $p_decision := $dtype }}{{ if $sim }}{{ $p_decision = print "simulated " $dtype }}{{ end }}
+      {{- $p_sim_tag := "" }}{{ if $sim }}{{ $p_sim_tag = " (simulation)" }}{{ end }}
+      {{- $p_flag := "" }}{{ $p_country_tag := "" }}{{ $p_flag_emoji := "" }}{{ $p_source_tag := "" }}
+      {{- if eq (len $p_country) 2 }}{{ $p_flag = print ":flag_" (lower $p_country) ":" }}{{ $p_country_tag = print " " $p_flag " " $p_country }}{{ $uc := upper $p_country }}{{ $p_flag_emoji = print (get $ri (substr 0 1 $uc)) (get $ri (substr 1 2 $uc)) }}
+        {{- $p_source_tag = print " · " $p_country }}{{ if $p_flag_emoji }}{{ $p_source_tag = print " · " $p_flag_emoji " " $p_country }}{{ end }}{{ end }}
+      {{- if $p_as_name }}{{ $p_source_tag = print $p_source_tag " · " $p_as_name }}{{ end }}
+      {{- $p_as_tag := "" }}{{ if $p_as_name }}{{ $p_as_tag = print " · " $p_as_name }}{{ end }}
+      {{- $p_for_duration := "" }}{{ if $p_duration }}{{ $p_for_duration = print " for " $p_duration }}{{ end }}
+      {{- $p_target_tag := "" }}{{ if $p_target }}{{ $p_target_tag = print " · aimed at **" $p_target "**" }}{{ end }}
+      {{- $p_origin_tag := "" }}{{ if $p_origin }}{{ $p_origin_tag = print " · " $p_origin }}{{ end }}
+      {{- $p_machine_tag := "" }}{{ if $p_machine }}{{ $p_machine_tag = print " · " $p_machine }}{{ end }}
+      {{- $p_cti_url := print "https://app.crowdsec.net/cti/" $p_ip }}
+      {{- $p_abuseipdb_url := print "https://www.abuseipdb.com/check/" $p_ip }}
+      {{- $p_time := print "<t:" (now | unixEpoch) ":R>" }}
+      {{- $title := (print "🛡️ " $p_ip $p_source_tag) }}{{ if gt (len (regexFindAll "(?s)." $title -1)) $capT }}{{ $title = print (regexFind (print "^(?s)" (repeat (int (div (sub $capT 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capT 1) 1000))) $title) "…" }}{{ end }}
+      {{- $footer := (print "CrowdSec · " $p_domain $p_machine_tag) }}{{ if gt (len (regexFindAll "(?s)." $footer -1)) $capF }}{{ $footer = print (regexFind (print "^(?s)" (repeat (int (div (sub $capF 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capF 1) 1000))) $footer) "…" }}{{ end }}
+      {{- $link := $p_cti_url }}
+      {{- $used := add (len (regexFindAll "(?s)." $title -1)) (len (regexFindAll "(?s)." $footer -1)) }}
+      {{- $fn0 := "Lookup" }}{{ $fv0 := (print "[CrowdSec CTI](" $p_cti_url ") · [AbuseIPDB](" $p_abuseipdb_url ")") }}{{ $fon0 := and (ne (trim $fn0) "") (ne (trim $fv0) "") }}{{ if $fon0 }}{{ if gt (len (regexFindAll "(?s)." $fn0 -1)) $capFN }}{{ $fn0 = print (regexFind (print "^(?s)" (repeat (int (div (sub $capFN 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capFN 1) 1000))) $fn0) "…" }}{{ end }}{{ if gt (len (regexFindAll "(?s)." $fv0 -1)) $capFV }}{{ $fv0 = print (regexFind (print "^(?s)" (repeat (int (div (sub $capFV 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $capFV 1) 1000))) $fv0) "…" }}{{ end }}{{ $used = add $used (len (regexFindAll "(?s)." $fn0 -1)) (len (regexFindAll "(?s)." $fv0 -1)) }}{{ end }}
+      {{- $desc := (print "**" $p_attempts "**" $p_ban_tag "\n" $p_scenarios $p_targets_line $p_requests_line) }}
+      {{- $dmax := min 4096 (max 50 (sub $budget $used)) }}
+      {{- if gt (len (regexFindAll "(?s)." $desc -1)) $dmax }}{{ $desc = print (regexFind (print "^(?s)" (repeat (int (div (sub $dmax 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $dmax 1) 1000))) $desc) "…" }}{{ end }}
+      {{- if $gi }},{{ end }}
       {
-        "title": "🛡️ {{ $label }}",
-        "url": "https://app.crowdsec.net/cti/{{ $ip | js }}",
+        "title": {{ $title | toJson }},
         "color": {{ $color }},
-        "description": "**{{ $ip | js }}**{{ if eq (len $alert.Source.Cn) 2 }} :flag_{{ lower $alert.Source.Cn }}: {{ $alert.Source.Cn }}{{ end }}{{ if $alert.Source.AsName }} · {{ $alert.Source.AsName | js }}{{ end }}\n{{ $alert.EventsCount }} hits → **{{ $dtype }}**{{ if $dur }} for {{ $dur }}{{ end }}{{ if $target }} · aimed at **{{ $target | js }}**{{ end }}",
+        "description": {{ $desc | toJson }},
         "fields": [
-          {"name": "Scenario", "value": "`{{ $s | trimPrefix "crowdsecurity/" | js }}`", "inline": true},
-          {"name": "Scope",    "value": "{{ $alert.Source.Scope | js }}{{ if $origin }} · {{ $origin | js }}{{ end }}", "inline": true},
-          {"name": "Lookup",   "value": "[CrowdSec CTI](https://app.crowdsec.net/cti/{{ $ip | js }}) · [AbuseIPDB](https://www.abuseipdb.com/check/{{ $ip | js }})", "inline": true}
-          {{- if $path }},
-          {"name": "First request", "value": "`{{ $path | js | trunc 200 }}`", "inline": false}
-          {{- end }}
-        ],
-        "footer": {"text": "CrowdSec · @@DOMAIN@@{{ if $alert.MachineID }} · {{ $alert.MachineID | js }}{{ end }}"}
+          {{- $sep := "" }}
+          {{- if $fon0 }}{{ $sep }}
+          {"name": {{ $fn0 | toJson }}, "value": {{ $fv0 | toJson }}, "inline": true}{{ $sep = "," }}{{ end }}
+        ]
+        {{- if $link }},
+        "url": {{ $link | toJson }}
+        {{- end }}
+        {{- if $footer }},
+        "footer": {"text": {{ $footer | toJson }}}
+        {{- end }}
+        
+      }
+      {{- end }}
+      {{- if $rest }},
+      {{- $lines := list }}{{ $rrank := 0 }}
+      {{- range $key := $rest }}{{ $g := get $groups $key }}{{ $a := get $g "first" }}
+        {{- $ip := "" }}{{ with $a.Source }}{{ with .Value }}{{ $ip = (. | trim) }}{{ end }}{{ end }}
+        {{- $cn := "" }}{{ with $a.Source }}{{ with .Cn }}{{ $cn = (. | trim) }}{{ end }}{{ end }}
+        {{- $where := "" }}{{ if eq (len $cn) 2 }}{{ $uc := upper $cn }}{{ $fe := print (get $ri (substr 0 1 $uc)) (get $ri (substr 1 2 $uc)) }}{{ $where = print " " $cn }}{{ if $fe }}{{ $where = print " " $fe " " $cn }}{{ end }}{{ end }}
+        {{- $top := (splitn "|" 3 (first (get $g "sorted")))._2 }}{{ $nn := get $g "n" }}
+        {{- $att := "one request" }}{{ if ne $nn 1 }}{{ $att = printf "%d attempts" $nn }}{{ end }}
+        {{- if gt (get $g "rank") $rrank }}{{ $rrank = get $g "rank" }}{{ end }}
+        {{- $lines = append $lines (print "`" $ip "`" $where " · " (get (get $g "label") $top) " · " $att) }}
+      {{- end }}
+      {{- $rcolor := 15942494 }}{{ if eq $rrank 4 }}{{ $rcolor = 10979578 }}{{ else if eq $rrank 1 }}{{ $rcolor = 16098851 }}{{ end }}
+      {{- $rtitle := printf "🛡️ %d more %s" (len $rest) (ternary "addresses" "alerts" $by_address) }}
+      {{- $rdesc := join "\n" $lines }}{{ $dmax := min 4096 (max 50 (sub $budget (len (regexFindAll "(?s)." $rtitle -1)))) }}
+      {{- if gt (len (regexFindAll "(?s)." $rdesc -1)) $dmax }}{{ $rdesc = print (regexFind (print "^(?s)" (repeat (int (div (sub $dmax 1) 1000)) ".{0,1000}") (printf ".{0,%d}" (mod (sub $dmax 1) 1000))) $rdesc) "…" }}{{ end }}
+      {
+        "title": {{ $rtitle | toJson }},
+        "color": {{ $rcolor }},
+        "description": {{ $rdesc | toJson }}
+        
       }
       {{- end }}
     ]
@@ -2994,7 +3142,7 @@ def apply_discord(st, on):
     if on:
         fs.write('/etc/crowdsec/profiles.yaml', DCS_PROFILES_YAML)
         fs.write('/etc/crowdsec/notifications/http.yaml',
-                 DCS_DISCORD_YAML.replace('@@WEBHOOK@@', 'https://discord.com/api/webhooks/1234/lab').replace('@@DOMAIN@@', 'lab.example.com'))
+                 DCS_DISCORD_YAML.replace('@@WEBHOOK@@', 'https://discord.com/api/webhooks/1234/lab').replace('@@DOMAIN@@', 'lab.example.com').replace('@@SERVER@@', 'lab'))
     else:
         fs.write('/etc/crowdsec/profiles.yaml', STOCK_FILES['/etc/crowdsec/profiles.yaml'])
         fs.write('/etc/crowdsec/notifications/http.yaml', STOCK_FILES['/etc/crowdsec/notifications/http.yaml'])
