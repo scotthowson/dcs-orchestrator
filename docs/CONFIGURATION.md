@@ -69,7 +69,7 @@ the API restarts: `sudo systemctl restart dcs-api`, or `POST /system/restart`.
 | `API_INSECURE_NO_AUTH` | `false` | …unless you also set this. Do not. |
 | `API_TRUSTED_PROXIES` | `172.16.0.0/12` | Peers allowed to set `X-Forwarded-For`, so rate limits and the audit log see real clients. The default covers Docker's bridges; add Cloudflare's ranges when it fronts you. |
 | `API_IP_WHITELIST` | *(empty: all)* | Comma-separated CIDRs allowed to call the API |
-| `API_CORS_ORIGINS` | *(empty: localhost)* | Other origins a browser may call the API from |
+| `API_CORS_ORIGINS` | *(empty: localhost)* | Other dashboard addresses a browser may use this API from, comma-separated (`https://ui.example.com`): a web dashboard on another domain that adds this server must be listed here (the dashboard's Config → API server → *Dashboards allowed from other addresses*). The desktop app needs no entry. `GET /ping` and `GET /` answer every origin, so a dashboard that is not listed can still tell that the server answers and says why it cannot sign in |
 | `API_TLS_ENABLED` | `false` | Serve HTTPS directly, with `API_TLS_CERT` and `API_TLS_KEY` |
 | `API_BEHIND_TLS_PROXY` | `false` | The API sits behind Traefik or another TLS proxy (adds HSTS) |
 | `API_RATE_LIMIT`, `API_RATE_WINDOW` | `600`, `60` | Requests per client per window, in seconds (`0` turns it off) |

@@ -80,6 +80,33 @@ check "CORS preflight allows PUT"       yes "$(printf 'OPTIONS /routes/a/b HTTP/
 check "CORS preflight is cached"         yes "$(printf 'OPTIONS /status HTTP/1.1\r\nOrigin: http://localhost:3000\r\n\r\n' | env "${NOAUTH[@]}" "$API" --handle-request 2>/dev/null | grep -qi '^Access-Control-Max-Age: 600' && echo yes || echo no)"
 check "a plain answer has no max-age"   no "$(printf 'GET / HTTP/1.1\r\nOrigin: http://localhost:3000\r\n\r\n' | env "${NOAUTH[@]}" "$API" --handle-request 2>/dev/null | grep -qi '^Access-Control-Max-Age' && echo yes || echo no)"
 check "security headers present"        yes "$(request GET / '' "${NOAUTH[@]}" | grep -qi '^X-Content-Type-Options: nosniff' && echo yes || echo no)"
+# the discovery answers (GET /ping, GET /) are readable from any origin; everything else keeps the API_CORS_ORIGINS allow-list
+_cors() { local m="$1" p="$2" o="$3"; shift 3; printf '%s %s HTTP/1.1\r\nOrigin: %s\r\n\r\n' "$m" "$p" "$o" | env "${NOAUTH[@]}" "$@" "$API" --handle-request 2>/dev/null | tr -d '\r'; }
+_acao() { grep -i '^Access-Control-Allow-Origin:' | sed 's/^[^:]*: //'; }
+check "CORS: GET / answers every origin with *"        '*' "$(_cors GET / https://ui.example.org | _acao)"
+check "CORS: GET /ping answers every origin with *"    '*' "$(_cors GET /ping https://ui.example.org | _acao)"
+check "CORS: …on the normal path too"                  '*' "$(_cors GET /ping https://ui.example.org DCS_NO_FAST_PING=1 | _acao)"
+check "CORS: GET /ping/ (a trailing slash) too"        '*' "$(_cors GET /ping/ https://ui.example.org DCS_NO_FAST_PING=1 | _acao)"
+check "CORS: the discovery answers send no credentials" 0 "$(_cors GET / https://ui.example.org | grep -ci '^Access-Control-Allow-Credentials')"
+check "CORS: a listed origin gets itself back"         https://ui.example.org "$(_cors GET /version https://ui.example.org API_CORS_ORIGINS='https://other.example, https://ui.example.org' | _acao)"
+check "CORS: …with Vary: Origin"                       1 "$(_cors GET /version https://ui.example.org API_CORS_ORIGINS=https://ui.example.org | grep -ci '^Vary: Origin')"
+check "CORS: an unlisted origin gets none"             '' "$(_cors GET /version https://ui.example.org | _acao)"
+check "CORS: …but Vary: Origin all the same"           1 "$(_cors GET /version https://ui.example.org | grep -ci '^Vary: Origin')"
+check "CORS: /setup/status keeps the allow-list"       '' "$(_cors GET /setup/status https://ui.example.org | _acao)"
+check "CORS: a POST to / is not a discovery answer"    '' "$(_cors POST / https://ui.example.org | _acao)"
+check "CORS: the flag cannot come from the environment" '' "$(_cors GET /version https://ui.example.org _API_CORS_PUBLIC=1 | _acao)"
+_pf=$(_cors OPTIONS /stacks https://ui.example.org API_CORS_ORIGINS=https://ui.example.org)
+check "preflight: a listed origin gets 204"            204 "$(head -1 <<< "$_pf" | awk '{print $2}')"
+check "preflight: …its exact origin"                   https://ui.example.org "$(_acao <<< "$_pf")"
+check "preflight: …Authorization and Content-Type"     yes "$(grep -i '^Access-Control-Allow-Headers:' <<< "$_pf" | grep -qi 'Authorization' && grep -i '^Access-Control-Allow-Headers:' <<< "$_pf" | grep -qi 'Content-Type' && echo yes || echo no)"
+check "preflight: …the methods"                        yes "$(grep -i '^Access-Control-Allow-Methods:' <<< "$_pf" | grep -q 'GET, POST, PUT, PATCH, DELETE, OPTIONS' && echo yes || echo no)"
+check "preflight: …Vary: Origin"                       1 "$(grep -ci '^Vary: Origin' <<< "$_pf")"
+check "preflight: …no body and no length"              0 "$(grep -ci '^Content-Length:' <<< "$_pf")"
+_pf=$(_cors OPTIONS /stacks https://ui.example.org)
+check "preflight: an unlisted origin gets 204…"        204 "$(head -1 <<< "$_pf" | awk '{print $2}')"
+check "preflight: …and no origin"                      '' "$(_acao <<< "$_pf")"
+check "preflight: /ping answers every origin"          '*' "$(_cors OPTIONS /ping https://ui.example.org | _acao)"
+check "preflight: a local origin still allowed"        http://localhost:5173 "$(_cors OPTIONS /stacks http://localhost:5173 | _acao)"
 
 echo "Authentication policy"
 check "first-run: /version open"        200 "$(request GET /version '' "${AUTH[@]}" | status_of)"

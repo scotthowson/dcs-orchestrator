@@ -3,6 +3,21 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A web dashboard on another domain can tell a DCS server from a dead address.** The two discovery answers, `GET /ping`
+  and the catalogue `GET /` (both public), now carry `Access-Control-Allow-Origin: *` for every origin (no credentials
+  are involved), on the heartbeat's fast path and the normal path alike. A dashboard at `https://ui.example.com` that
+  added a friend's server used to say "No DCS API answered there" although the server answered: the browser hid the
+  answer because the server did not list that origin. Every other answer keeps the `API_CORS_ORIGINS` allow-list, so the
+  dashboard can now say exactly that: the server answers, but does not let this dashboard's address in.
+- **CORS preflights answer `204 No Content`** (was `200` with an empty JSON length) with the allowed methods,
+  `Access-Control-Allow-Headers: Content-Type, Authorization` and `Access-Control-Max-Age` for an allowed origin, and
+  without any CORS header for another one. Every answer that depends on the request's `Origin` carries `Vary: Origin`,
+  also when the origin is not allowed.
+
 ## [4.0.40] - 2026-10-09
 
 ### Fixed

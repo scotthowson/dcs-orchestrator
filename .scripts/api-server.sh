@@ -198,6 +198,7 @@ API_PBKDF2_ITERATIONS="${API_PBKDF2_ITERATIONS:-100000}"
 
 # CORS allowed origins (comma-separated, empty = localhost only)
 API_CORS_ORIGINS="${API_CORS_ORIGINS:-}"
+_API_CORS_PUBLIC=""  # set per request for the discovery answers (_api_cors_lines), never from the environment
 
 # Whether the API runs behind a TLS-terminating proxy (enables HSTS header)
 API_BEHIND_TLS_PROXY="${API_BEHIND_TLS_PROXY:-false}"
@@ -538,9 +539,22 @@ _primary_ip() { ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, 
 # The CORS response headers for this request's Origin (nothing for a request without one or from an origin that is not allowed).
 # The response writer and the response cache both use it: a cached answer must carry the CORS headers of the request it is
 # served to, not those of the request that filled the cache.
+# The two discovery answers (GET /ping and the catalogue GET /, both public, _API_CORS_PUBLIC) may be read from any origin
+# ("*", no credentials involved): a web dashboard on another domain can always tell that a DCS server lives at an address,
+# and then whether this server lets it in (every other answer keeps API_CORS_ORIGINS).
 _api_cors_lines() {
+    if [[ -n "${_API_CORS_PUBLIC:-}" ]]; then
+        printf "Access-Control-Allow-Origin: *\r\n"
+        printf "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+        printf "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        printf "Access-Control-Allow-Private-Network: true\r\n"
+        [[ "${method:-}" == "OPTIONS" ]] && printf "Access-Control-Max-Age: 600\r\n"
+        return 0
+    fi
     local cors_origin
     cors_origin=$(_api_cors_origin)
+    # the answer depends on the Origin: a cache between a browser and this server keeps one copy per origin
+    [[ -z "$cors_origin" && -n "${REQUEST_ORIGIN_HEADER:-}" ]] && printf "Vary: Origin\r\n"
     if [[ -n "$cors_origin" ]]; then
         printf "Access-Control-Allow-Origin: %s\r\n" "$cors_origin"
         printf "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
@@ -601,6 +615,7 @@ _api_response() {
     case "$status_code" in
         200) status_text="OK" ;;
         201) status_text="Created" ;;
+        204) status_text="No Content" ;;
         202) status_text="Accepted" ;;
         400) status_text="Bad Request" ;;
         401) status_text="Unauthorized" ;;
@@ -634,8 +649,11 @@ _api_response() {
 
     {
     printf "HTTP/1.1 %s %s\r\n" "$status_code" "$status_text"
-    printf "Content-Type: application/json; charset=utf-8\r\n"
-    printf "Content-Length: %d\r\n" "$content_length"
+    # a 204 (a CORS preflight) has neither a body nor a length
+    if [[ "$status_code" != 204 ]]; then
+        printf "Content-Type: application/json; charset=utf-8\r\n"
+        printf "Content-Length: %d\r\n" "$content_length"
+    fi
 
     # Dynamic CORS — only emit for whitelisted origins
     _api_cors_lines
@@ -713,7 +731,7 @@ if [[ "$HANDLE_REQUEST" == "true" && -z "${DCS_NO_FAST_PING:-}" && -z "$API_IP_W
                     REQUEST_ORIGIN_HEADER="${REQUEST_ORIGIN_HEADER//$'\r'/}"; REQUEST_ORIGIN_HEADER="${REQUEST_ORIGIN_HEADER//$'\n'/}"
                 fi
             done
-            REQUEST_METHOD=GET; REQUEST_PATH=/ping
+            REQUEST_METHOD=GET; REQUEST_PATH=/ping; _API_CORS_PUBLIC=1
             _api_success "{\"ok\": true, \"version\": \"$(_api_json_escape "$DCS_VERSION")\", \"api_version\": \"$API_VERSION\", \"time\": $(printf '%(%s)T' -1)}"
             exit 0
         fi
@@ -33252,9 +33270,13 @@ handle_request() {
         return
     fi
 
-    # Handle CORS preflight
+    # The discovery answers (the heartbeat and the catalogue) are readable from any origin (_api_cors_lines)
+    _API_CORS_PUBLIC=""
+    case "$method $path" in "GET /"|"GET /ping"|"OPTIONS /"|"OPTIONS /ping") _API_CORS_PUBLIC=1 ;; esac
+
+    # Handle CORS preflight: 204 with the allowed methods and headers for an allowed origin, nothing for another one
     if [[ "$method" == "OPTIONS" ]]; then
-        _api_response 200 ""
+        _api_response 204 ""
         return
     fi
 
