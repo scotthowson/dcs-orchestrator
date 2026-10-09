@@ -1092,18 +1092,20 @@ _api_read_auth_file() {
     fi
 }
 
-# Write a JSON auth file (exclusive flock + restricted permissions)
+# Write a JSON auth file (exclusive flock + restricted permissions): a temp file renamed over it, so a reader never sees
+# it half written and a full disk never leaves it empty; when the lock does not come, nothing is written (1)
 _api_write_auth_file() {
     local file="$API_AUTH_DIR/$1"
-    local content="$2"
+    local content="$2" tmp="$API_AUTH_DIR/$1.tmp.${BASHPID:-$$}"
     [[ -d "$API_AUTH_DIR" ]] || mkdir -p "$API_AUTH_DIR" 2>/dev/null
     if command -v flock >/dev/null 2>&1; then
-        (flock -w 2 200; printf '%s' "$content" > "$file" 2>/dev/null; chmod 600 "$file" 2>/dev/null) 200>"$file.lock"
+        (
+            flock -w 2 200 || { echo "$1 is locked: not written" >&2; exit 1; }
+            { (umask 077; printf '%s' "$content" > "$tmp") && chmod 600 "$tmp" && mv -f "$tmp" "$file"; } 2>/dev/null || { rm -f "$tmp"; exit 1; }
+        ) 200>"$file.lock"
     else
-        printf '%s' "$content" > "$file" 2>/dev/null
-        chmod 600 "$file" 2>/dev/null
+        { (umask 077; printf '%s' "$content" > "$tmp") && mv -f "$tmp" "$file"; } 2>/dev/null || { rm -f "$tmp"; return 1; }
     fi
-    return 0
 }
 
 # Get current epoch timestamp
@@ -1321,12 +1323,13 @@ _api_validate_token() {
     now=$(_api_now_epoch)
 
     # Stored tokens are digests; the raw form is still accepted so sessions
-    # issued before the change keep working until they expire
+    # issued before the change keep working until they expire. The temporary token of a
+    # sign-in waiting for its 2FA code is never a session: only POST /auth/totp/validate takes it
     local digest
     digest=$(_api_token_digest "$token")
     local record
     record=$(echo "$tokens" | jq -r --arg t "$digest" --arg raw "$token" --argjson n "$now" \
-        '.[] | select((.token == $t or .token == $raw) and .expires_at > $n)' 2>/dev/null)
+        '.[] | select((.token == $t or .token == $raw) and .expires_at > $n and .totp_pending != true)' 2>/dev/null)
     if [[ -n "$record" ]]; then
         AUTH_USERNAME=$(echo "$record" | jq -r '.username' 2>/dev/null)
         AUTH_ROLE=$(echo "$record" | jq -r '.role' 2>/dev/null)
@@ -1438,7 +1441,7 @@ _api_ip_in_list() {
     for entry in $list; do
         entry="${entry// /}"
         [[ -z "$entry" ]] && continue
-        [[ "$ip" == "$entry" ]] && return 0
+        [[ "${ip,,}" == "${entry,,}" ]] && return 0
         [[ "$entry" == */* ]] && _api_ip_in_cidr "$ip" "$entry" && return 0
     done
     return 1
@@ -1458,8 +1461,9 @@ _api_resolve_client_ip() {
         read -ra hops <<< "$REQUEST_XFF_HEADER"
         local i hop
         for (( i = ${#hops[@]} - 1; i >= 0; i-- )); do
-            hop="${hops[$i]//[[:space:]]/}"
-            [[ "$hop" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || break
+            hop="${hops[$i]//[[:space:]]/}"; hop="${hop,,}"
+            # IPv4, or IPv6 (an IPv6 hop used to end the walk: every IPv6 client then had the proxy's address and one lockout)
+            [[ "$hop" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || ( ${#hop} -le 45 && "$hop" == *:* && "$hop" =~ ^[0-9a-f:]+(:[0-9]{1,3}(\.[0-9]{1,3}){3})?$ ) ]] || break
             if _api_ip_in_list "$hop" "$API_TRUSTED_PROXIES"; then
                 continue
             fi
@@ -1489,21 +1493,25 @@ _api_rate_window() {
     local rate_file="$1" limit="$2" window="$3" now count=0 cutoff ts tmp_file
     now=$(date +%s); cutoff=$(( now - window ))
     [[ -d "$(dirname "$rate_file")" ]] || mkdir -p "$(dirname "$rate_file")" 2>/dev/null
-    if [[ -f "$rate_file" ]]; then
-        # Remove expired timestamps and count valid ones
-        tmp_file="${rate_file}.tmp"
-        while IFS= read -r ts; do
-            [[ "$ts" =~ ^[0-9]+$ ]] || continue
-            if (( ts > cutoff )); then
-                echo "$ts"
-                count=$(( count + 1 ))
-            fi
-        done < "$rate_file" > "$tmp_file" 2>/dev/null
-        mv -f "$tmp_file" "$rate_file" 2>/dev/null
-    fi
-    (( count >= limit )) && return 1
-    echo "$now" >> "$rate_file"
-    return 0
+    # one request at a time per window (FILE.lock): parallel ones each counted the same old lines and all passed
+    (
+        command -v flock >/dev/null 2>&1 && { flock -w 5 9 || exit 1; }
+        if [[ -f "$rate_file" ]]; then
+            # Remove expired timestamps and count valid ones
+            tmp_file="${rate_file}.tmp"
+            while IFS= read -r ts; do
+                [[ "$ts" =~ ^[0-9]+$ ]] || continue
+                if (( ts > cutoff )); then
+                    echo "$ts"
+                    count=$(( count + 1 ))
+                fi
+            done < "$rate_file" > "$tmp_file" 2>/dev/null
+            mv -f "$tmp_file" "$rate_file" 2>/dev/null
+        fi
+        (( count >= limit )) && exit 1
+        echo "$now" >> "$rate_file"
+        exit 0
+    ) 9>"$rate_file.lock"
 }
 
 # Check global rate limit for the connecting IP
@@ -2169,6 +2177,29 @@ _api_record_failed_login() {
         --argjson max "$max" \
         --argjson lock "$lock" \
         '(.[$ip].attempts // 0) + 1 as $a | .[$ip] = {"attempts": $a, "locked_until": (if $a >= $max then $now + $lock else 0 end), "last_attempt": $now}'
+}
+
+# _api_claim_login_attempt IP — a sign-in attempt from IP counts before its password is looked at, in one step under the
+# lock of rate_limits.json: 1 (nothing counted) while IP is locked out; otherwise the attempt is counted, the lockout starts
+# with the API_MAX_LOGIN_ATTEMPTS-th, and a success resets it (_api_reset_rate_limit). Counted after the check, parallel
+# wrong passwords all passed the check before the first of them was counted.
+_api_claim_login_attempt() {
+    local client_ip="${1:-unknown}" rate_file="$API_AUTH_DIR/rate_limits.json" now max lock
+    command -v jq >/dev/null 2>&1 || return 0
+    _api_state_file "$rate_file" '{}' object >/dev/null
+    now=$(_api_now_epoch)
+    max="$API_MAX_LOGIN_ATTEMPTS";   [[ "$max"  =~ ^[0-9]+$ ]] || max=5
+    lock="$API_LOCKOUT_DURATION";  [[ "$lock" =~ ^[0-9]+$ ]] || lock=900
+    (
+        flock -w 5 200 || exit 1
+        local out
+        out=$(jq --arg ip "$client_ip" --argjson now "$now" --argjson max "$max" --argjson lock "$lock" '
+            if (.[$ip].locked_until // 0) > $now then empty
+            else ((if (.[$ip].locked_until // 0) > 0 then 0 else (.[$ip].attempts // 0) end) + 1) as $a
+                | .[$ip] = {"attempts": $a, "locked_until": (if $a >= $max then $now + $lock else 0 end), "last_attempt": $now} end' "$rate_file" 2>/dev/null) || exit 1
+        [[ -n "$out" ]] || exit 1
+        printf '%s\n' "$out" > "$rate_file.tmp" && chmod 600 "$rate_file.tmp" 2>/dev/null && mv -f "$rate_file.tmp" "$rate_file"
+    ) 200>"$rate_file.lock"
 }
 
 # Rate limiting: reset after successful login
@@ -4680,13 +4711,19 @@ handle_auth_login() {
         return
     fi
 
+    # The attempt counts now, before any password is looked at (a success resets the count)
+    if ! _api_claim_login_attempt "$client_ip"; then
+        _api_audit_log "$client_ip" "LOCKOUT" "" "Rate limit lockout triggered"
+        _api_error 429 "Too many failed login attempts. Please try again later."
+        return
+    fi
+
     # Look up user
     if ! _api_user_exists "$username"; then
         # SECURITY: Perform a dummy hash to prevent username enumeration via timing.
         # Without this, nonexistent users return immediately while existing users
         # take ~100ms+ for PBKDF2, allowing attackers to discover valid usernames.
         _api_hash_password_v2 "0000000000000000000000000000000000000000" "dummy_password" >/dev/null 2>&1
-        _api_record_failed_login "$client_ip"
         _api_error 401 "Invalid username or password"
         return
     fi
@@ -4694,7 +4731,6 @@ handle_auth_login() {
     local user_record
     user_record=$(_api_get_user "$username")
     if [[ -z "$user_record" ]]; then
-        _api_record_failed_login "$client_ip"
         _api_error 401 "Invalid username or password"
         return
     fi
@@ -4714,7 +4750,6 @@ handle_auth_login() {
 
     # Verify password (dispatches to v1 or v2 based on hash_version)
     if ! _api_verify_password "$password" "$stored_hash" "$stored_salt" "$hash_version"; then
-        _api_record_failed_login "$client_ip"
         _api_audit_log "$client_ip" "LOGIN_FAIL" "$username" "Invalid password"
         _api_error 401 "Invalid username or password"
         return
