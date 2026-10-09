@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [4.0.42] - 2026-10-09
 
+### Fixed
+
+- **The core Redis no longer loops on the first restart after 4.0.41.** The hardened compose started it through `sh -c`, which skipped the image's switch to the redis user; running as root without `DAC_OVERRIDE` it could not read its own `dump.rdb` and restarted forever. The command now goes through the entrypoint again, and a lint check keeps it so.
+
 ### Security
 
 - **Two-factor sign-in could be skipped:** the temporary token given after the password step was accepted as a full session; it now works for `POST /auth/totp/validate` alone.
