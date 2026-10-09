@@ -4549,22 +4549,19 @@ handle_logs_archives() {
 
 # GET /events — Recent Docker events
 handle_events() {
-    local events_raw
-    events_raw=$(docker events --since '1h' --until "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --format '{{.Time}}|{{.Type}}|{{.Action}}|{{.Actor.Attributes.name}}' 2>/dev/null | tail -50)
-
-    local -a entries=()
+    # one JSON document per event: an action can hold anything (an exec event carries the whole command, a multi-line
+    # healthcheck script included), and a line format split on "|" turned such an event into broken JSON (a 500)
+    local events_raw od
+    events_raw=$(docker events --since '1h' --until "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --format '{{json .}}' 2>/dev/null | tail -50)
     # on_demand: Sablier starts the container on the first request (its stop is falling asleep, not a crash)
-    local _od; _od=" $(_sablier_names 2>/dev/null | tr '\n' ' ') "
-    while IFS='|' read -r timestamp type action name; do
-        [[ -z "$timestamp" ]] && continue
-        entries+=("{\"timestamp\": $timestamp, \"type\": \"$(_api_json_escape "$type")\", \"action\": \"$(_api_json_escape "$action")\", \"name\": \"$(_api_json_escape "$name")\", \"on_demand\": $([[ "$type" == container && -n "$name" && "$_od" == *" $name "* ]] && echo true || echo false)}")
-    done <<< "$events_raw"
-
-    local json
-    json=$(printf '%s,' "${entries[@]}")
-    json="[${json%,}]"
-
-    _api_success "{\"total\": ${#entries[@]}, \"events\": $json}"
+    od=$(_sablier_names 2>/dev/null | jq -Rsc 'split("\n") | map(select(length > 0))' 2>/dev/null); [[ "$od" == \[* ]] || od='[]'
+    _api_success "$(printf '%s\n' "$events_raw" | jq -Rsc --argjson od "$od" '
+        [ split("\n")[] | select(length > 0) | (try fromjson catch null) | select(type == "object")
+          | ((.time // ((.timeNano // 0) / 1000000000 | floor)) | if type == "number" then . else 0 end) as $t
+          | { timestamp: $t, type: (.Type // .type // "" | tostring), action: (.Action // .status // "" | tostring),
+              name: (.Actor.Attributes.name // "" | tostring) }
+          | .on_demand = (.type == "container" and .name != "" and (.name as $n | any($od[]; . == $n))) ]
+        | {total: length, events: .}')"
 }
 
 # =============================================================================
@@ -35074,8 +35071,11 @@ start_server() {
 
     local rc=0
     if (( ${API_WORKERS:-0} > 0 )); then
-        # a worker that died (killed, out of memory) is replaced while the front runs; the front's own end ends the loop
-        while kill -0 "$listener_pid" 2>/dev/null; do _api_workers_tend; sleep 2; done
+        # a worker that died (killed, out of memory) is replaced while the front runs; the front's own end ends the loop.
+        # The pause is a job waited for, not a foreground sleep: bash runs a trap only once its foreground child has ended,
+        # so a plain `sleep 2` held a restart (SIGUSR1) or a stop (SIGTERM) back for up to two seconds, during which the old
+        # listener still answered as if it had restarted (the shutdown ends this job with the others)
+        while kill -0 "$listener_pid" 2>/dev/null; do _api_workers_tend; sleep 2 & wait "$!" 2>/dev/null || true; done
     fi
     wait "$listener_pid" || rc=$?
     # The listener exited on its own (port in use, crash): tidy up and report

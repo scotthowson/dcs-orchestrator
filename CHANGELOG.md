@@ -76,6 +76,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deletes it anyway (audited as forced). The connections CrowdSec files under `name@ip` (now accepted in the path, also
   as `%40`) answer 409 with CrowdSec's own reason. Registering again keeps the middleware's current key and puts the
   bouncer back with it when CrowdSec gives no new key, so Traefik is never left holding a key CrowdSec no longer knows.
+- **A restart or stop of the API takes effect at once.** With the worker pool on (the default), the listener paused
+  between its worker checks with a foreground `sleep 2`, and bash runs a signal's handler only after its foreground
+  child ends: `POST /system/restart`, an update's restart (SIGUSR1) and `--stop` (SIGTERM) waited up to two seconds while
+  the old listener kept answering. The pause is now a background job that is waited for.
+- **Saving the Traefik bouncer plugin's settings works on Ubuntu 24.04.** Its awk program used `^[ \t]{10}(a|b)`, and
+  mawk 1.3.4 20240123 (Ubuntu 24.04's default awk) panics on an interval followed by a group ("REcompile() - panic"):
+  every save answered "could not build the new middleware file". The indent is spelled out now. CI did not see it
+  because the GitHub runner image has gawk as its awk.
+- **`GET /events` no longer answers 500 after a multi-line `docker exec`.** It split `docker events` lines on "|", and
+  an exec event carries the whole command (a multi-line healthcheck script, a `sh -c` with a pipe): the answer became
+  broken JSON, and the fleet's merged `/events?fleet=1` with it. Events are now read as JSON documents.
+- **Two smoke checks no longer depend on timing** (they failed on the slower ubuntu-24.04 CI runner): the restart test
+  waits until a new front holds the port instead of taking the old front's answer for the restarted API, and the
+  "paused" community check allows the two refusal lines of one refused send to fall in different seconds.
 
 ## [4.0.40] - 2026-10-09
 
