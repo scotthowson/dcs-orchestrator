@@ -608,6 +608,14 @@ _rlc() { : > "$WORK/routes-lookups"; _lib eval '_find_traefik_routes_dir() { ech
 mkdir -p "$WORK/Stacks/rl-a"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/rl-a/docker-compose.yml"
 _rl1=$(_rlc); mkdir -p "$WORK/Stacks/rl-b"; cp "$WORK/Stacks/rl-a/docker-compose.yml" "$WORK/Stacks/rl-b/"
 check "stack list: the routes lookup does not grow with the stacks" "$_rl1" "$(_rlc)"
+# a backup the machine rebooted under leaves its staging folder and half-written archive: tidied once no backup runs
+_BL="$WORK/bk-left"; mkdir -p "$_BL/.dcs-backup-staging-Docker-Compose-Backup-x/part" "$WORK/bk-run"; head -c 4096 /dev/zero > "$_BL/Docker-Compose-Backup-x.tar.gz.partial"; touch "$_BL/Docker-Compose-Backup-old.tar.gz"
+sleep 30 & _BLP=$!
+check "backup leftovers: kept while a backup runs" "yes yes" "$(_lib eval 'BACKUP_DEST_DIR="$BASE_DIR/bk-left"; BACKUP_PID_FILE="$BASE_DIR/bk-run/pid"; echo '"$_BLP"' > "$BACKUP_PID_FILE"; _backup_tidy_leftovers'; [[ -d "$_BL/.dcs-backup-staging-Docker-Compose-Backup-x" ]] && printf 'yes ' || printf 'no '; [[ -f "$_BL/Docker-Compose-Backup-x.tar.gz.partial" ]] && echo yes || echo no)"
+kill "$_BLP" 2>/dev/null; wait "$_BLP" 2>/dev/null
+printf '{"status":"running","filename":"Docker-Compose-Backup-x.tar.gz","percent":80}' > "$WORK/bk-run/status.json"
+check "backup leftovers: the status of a dead backup tidies them, the archives stay" "error|no no yes" "$(_lib eval 'BACKUP_DEST_DIR="$BASE_DIR/bk-left"; BACKUP_PID_FILE="$BASE_DIR/bk-run/pid"; BACKUP_RESTORE_PID_FILE="$BASE_DIR/bk-run/rpid"; BACKUP_STATUS_FILE="$BASE_DIR/bk-run/status.json"; handle_backup_status' | body_of | jq -r '.status' 2>/dev/null)|$([[ -d "$_BL/.dcs-backup-staging-Docker-Compose-Backup-x" ]] && printf 'yes ' || printf 'no ')$([[ -f "$_BL/Docker-Compose-Backup-x.tar.gz.partial" ]] && printf 'yes ' || printf 'no ')$([[ -f "$_BL/Docker-Compose-Backup-old.tar.gz" ]] && echo yes || echo no)"
+rm -rf "$_BL" "$WORK/bk-run"
 # a lock left by a fleet tick that a reboot cut off: the hub's fleet work (member checks, the VMs' App-Data mounts,
 # routes) waited until it was ten minutes old after every reboot
 _btime=$(awk '/^btime/{print $2}' /proc/stat)

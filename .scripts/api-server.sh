@@ -7318,6 +7318,18 @@ _restore_stop_reason() {
     local e; e=$(grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1 | tr -d '\r' | cut -c1-200)
     printf '%s' "${e:-they were still running after docker stop}"
 }
+# _backup_tidy_leftovers — what a backup that died without its own clean-up (the machine rebooted under it, a kill -9) left in
+# BACKUP_DEST_DIR: its staging folder and its half-written archive (gigabytes, kept for good and counted against the room
+# an upload or the next backup needs). Only while no backup or restore runs: they share the PID files with backup-server.sh.
+_backup_tidy_leftovers() {
+    local dest="${BACKUP_DEST_DIR%/}"
+    [[ -n "$dest" && -d "$dest" ]] || return 0
+    _backup_pid_alive "$BACKUP_PID_FILE" && return 0
+    _backup_pid_alive "$BACKUP_RESTORE_PID_FILE" && return 0
+    rm -rf -- "$dest"/.dcs-backup-staging-* 2>/dev/null
+    rm -f -- "$dest"/Docker-Compose-Backup-*.tar.gz.partial 2>/dev/null
+    return 0
+}
 # Containers a backup paused are written down first, so a cancelled backup (or one that died) never leaves them paused
 _backup_unpause_all() {
     local id
@@ -7728,6 +7740,7 @@ _backup_start() {
     [[ -n "${BACKUP_DEST_DIR:-}" ]] || { BK_ERROR="Backup not configured. Set BACKUP_DEST_DIR in .env"; BK_CODE=400; return 1; }
     if _backup_pid_alive "$BACKUP_PID_FILE"; then BK_ERROR="A backup is already running"; BK_CODE=409; return 1; fi
     if _backup_pid_alive "$BACKUP_RESTORE_PID_FILE"; then BK_ERROR="A restore is running"; BK_CODE=409; return 1; fi
+    _backup_tidy_leftovers
     BK_FILE="Docker-Compose-Backup-$(date '+%Y-%m-%d_%H%M%S')${only:+-$only}.tar.gz"
     BK_STARTED="$(date -Iseconds)"; BK_PID=0
     _backup_status running 0 prepare "Preparing backup..."
@@ -7787,6 +7800,7 @@ handle_backup_status() {
         # a backup or restore that died (the API restarted under it) is not running any more
         if [[ "$(jq -r '.status' <<< "$status_content")" =~ ^(running|restoring)$ ]] && ! _backup_pid_alive "$BACKUP_PID_FILE" && ! _backup_pid_alive "$BACKUP_RESTORE_PID_FILE"; then
             status_content=$(jq -c '. + {status: "error", error: "It stopped before it finished (the API restarted?)", stage: "error"}' <<< "$status_content")
+            _backup_tidy_leftovers
         fi
         _api_success "$status_content"
     else
@@ -34962,6 +34976,7 @@ start_server() {
     _selinux_relabel_code >/dev/null 2>&1 || true
     # A backup the API's last run did not finish (a restart under it) may have left a stack's containers paused
     _backup_pid_alive "$BACKUP_PID_FILE" || _backup_unpause_all >/dev/null 2>&1 || true
+    _backup_tidy_leftovers >/dev/null 2>&1 || true
     # The dashboard image's new name (docker-compose-skeleton-ui -> dcs-orchestrator-ui) in the dashboard's compose file
     _dcs_ui_image_migrate || echo "  Dashboard image: ${_DCS_UI_MIGRATE_FILE:-the compose file of DCS-UI} still names ${_DCS_UI_OLD_REPO}: ${_DCS_UI_MIGRATE_ERR:-could not rewrite it}"
 
