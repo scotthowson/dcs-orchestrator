@@ -1765,14 +1765,16 @@ _cs_plugin_render() {
         "          clientTrustedIPs:",
         ($cl[] | "            - " + .)' <<< "$s")
     marker="# dcs-plugin: $(jq -c '{v: 1, settings: .}' <<< "$s")"
+    # (the ten-column indent is spelled out: mawk 1.3.4 20240123, Ubuntu 24.04's awk, panics on an interval followed by a
+    # group, "^[ \t]{10}(a|b)", and every save of the plugin settings failed there)
     NEWKEYS="$keys" MARKER="$marker" awk '
-        BEGIN { skip = 0; placed = 0; inplug = 0; hdr = 0 }
+        BEGIN { skip = 0; placed = 0; inplug = 0; hdr = 0; i10 = "^[ \t][ \t][ \t][ \t][ \t][ \t][ \t][ \t][ \t][ \t]" }
         /^#[ \t]*dcs-plugin:[ \t]/ { next }
         !hdr { print ENVIRON["MARKER"]; hdr = 1 }
         /^[ \t]+plugin:[ \t]*$/ { inplug = 1; print; next }
         inplug && !placed && /^[ \t]{8}[A-Za-z0-9_.-]+:[ \t]*$/ { print; print ENVIRON["NEWKEYS"]; placed = 1; next }
-        placed && /^[ \t]{10}(crowdsecMode|updateIntervalSeconds|defaultDecisionSeconds|httpTimeoutSeconds|remediationStatusCode|logLevel):/ { skip = 0; next }
-        placed && /^[ \t]{10}(forwardedHeadersTrustedIPs|clientTrustedIPs):[ \t]*$/ { skip = 1; next }
+        placed && $0 ~ (i10 "(crowdsecMode|updateIntervalSeconds|defaultDecisionSeconds|httpTimeoutSeconds|remediationStatusCode|logLevel):") { skip = 0; next }
+        placed && $0 ~ (i10 "(forwardedHeadersTrustedIPs|clientTrustedIPs):[ \t]*$") { skip = 1; next }
         skip && /^[ \t]{12}-/ { next }
         { skip = 0; print }' "$f"
 }
