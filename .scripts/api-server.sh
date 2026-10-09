@@ -24136,10 +24136,6 @@ _fleet_load() {
     [[ "$j" == \{* ]] || j='{}'
     jq -c '{members: (.members // []), join_tokens: (.join_tokens // []), hub: (.hub // null)}' <<< "$j"
 }
-_fleet_save() {
-    mkdir -p "$(dirname "$FLEET_FILE")" 2>/dev/null
-    (umask 077; printf '%s\n' "$1" > "$FLEET_FILE.tmp") && mv -f "$FLEET_FILE.tmp" "$FLEET_FILE"
-}
 # _fleet_update [jq args…] FILTER — change fleet.json atomically (a lock, then a private
 # copy swapped in), so the watcher, a join and a provisioning job never overwrite each other
 _fleet_update() {
@@ -31037,7 +31033,7 @@ handle_rollback_restore() {
     [[ -f "$snap_dir/.env" ]] && cp "$snap_dir/.env" "$stack_dir/.env"
 
     # Pull the images recorded in the snapshot (entries are either plain
-    # references or {name, digest} objects written by .lib/rollback.sh)
+    # references or {name, digest} objects, as the snapshot library of 2.x wrote them)
     if [[ -f "$snap_dir/images.json" ]]; then
         local img
         while IFS= read -r img; do
@@ -31664,7 +31660,7 @@ handle_schedule_history() {
 
 HEALTH_SCORE_HISTORY_FILE="$BASE_DIR/.data/health-score-history.jsonl"
 
-# _health_uptime_score SECONDS — the uptime factor of the system score, in steps like the container score (.lib/health-score.sh): a day
+# _health_uptime_score SECONDS — the uptime factor of the system score, in steps: a day
 # of uptime is 100, an hour 90, ten minutes 75, less 50. (A linear ramp over seven days kept a healthy, freshly installed or rebooted
 # server at B or C for days.)
 _health_uptime_score() {

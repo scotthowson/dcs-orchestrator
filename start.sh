@@ -154,13 +154,8 @@ _source_optional "$BASE_DIR/.scripts/health-check.sh"        "health-check.sh"
 _source_optional "$BASE_DIR/.scripts/system-info.sh"         "system-info.sh"
 
 # v2.0 subsystem libraries
-_source_optional "$BASE_DIR/.lib/metrics.sh"                 "metrics.sh"
-_source_optional "$BASE_DIR/.lib/rollback.sh"                "rollback.sh"
 _source_optional "$BASE_DIR/.lib/secrets.sh"                 "secrets.sh"
-_source_optional "$BASE_DIR/.lib/scheduler.sh"               "scheduler.sh"
-_source_optional "$BASE_DIR/.lib/health-score.sh"            "health-score.sh"
 _source_optional "$BASE_DIR/.lib/plugins.sh"                 "plugins.sh"
-_source_optional "$BASE_DIR/.lib/sse.sh"                     "sse.sh"
 
 # =============================================================================
 # UTILITY FUNCTIONS

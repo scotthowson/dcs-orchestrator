@@ -302,15 +302,6 @@ _cs_wait_healthy() {
     return 1
 }
 
-# keep the newest N backups of one kind
-_cs_prune_backups() {
-    local kind="$1" keep="${2:-10}" f i=0
-    while IFS= read -r f; do
-        i=$(( i + 1 ))
-        (( i > keep )) && rm -f "$f"
-    done < <(ls -1t "$CS_BACKUP_DIR/$kind"-*.yaml 2>/dev/null)
-}
-
 # _cs_copy_in TEXT DEST MODE — write TEXT to DEST inside the container (docker cp of a private temp file)
 _cs_copy_in() {
     local text="$1" dest="$2" mode="$3" tmp rc

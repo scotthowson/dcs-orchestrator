@@ -19,7 +19,7 @@ Everything here is Bash 4+, Docker Compose v2 and `jq`. There is no build step.
 |---|---|
 | `setup.sh`, `start.sh`, `stop.sh`, `restart.sh`, `status.sh`, `compose.sh` | The entry points |
 | `.config/settings.cfg` | The default of every setting |
-| `.lib/` | Libraries the scripts source: logging, Docker helpers, secrets, metrics, the scheduler, health scores, plugins, rollback, setup checks |
+| `.lib/` | Libraries the scripts source: logging, Docker helpers, `.env` files, secrets, plugins, setup checks; the API loads the CrowdSec page and the chat on demand |
 | `.scripts/api-server.sh` | The REST API: the router `handle_request` and the `handle_*` handlers |
 | `.scripts/api-dispatch.sh` | The front `socat` runs per connection: reads the request and hands it to a worker of the pool |
 | `.scripts/api-docs.sh` | Generates `docs/API.md` and the `GET /` catalogue from the router |

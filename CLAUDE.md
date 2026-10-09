@@ -20,10 +20,10 @@ version is `API_VERSION` in `.scripts/api-server.sh`. `CHANGELOG.md` is kept per
 |------|------|
 | `setup.sh`, `start.sh`, `stop.sh`, `restart.sh`, `status.sh` | entry points (executable) |
 | `.config/settings.cfg`, `.config/palette.sh` | defaults for every setting, color detection |
-| `.lib/` | sourced libraries: `logger.sh`, `banner.sh`, `docker-utils.sh`, `helpers.sh`, `environment.sh`, `error_handling.sh`, `debugger.sh`, `metrics.sh`, `scheduler.sh`, `secrets.sh`, `sse.sh`, `health-score.sh`, `plugins.sh`, `rollback.sh` |
+| `.lib/` | sourced libraries: `logger.sh`, `banner.sh`, `docker-utils.sh`, `environment.sh`, `envfile.sh`, `secrets.sh`, `plugins.sh`, `setup-checks.sh`; the API loads `crowdsec.sh`, `crowdsec-config.sh` and `chat.sh` on demand |
 | `.scripts/api-server.sh` | the REST API (router `handle_request`, handlers `handle_*`) |
 | `.scripts/api-docs.sh` | generates `docs/API.md` and the `GET /` catalogue from the router |
-| `.scripts/run.sh`, `stop.sh`, `update.sh`, `update_all_stacks.sh`, `clean-up.sh`, `ntfy-status*.sh` | sourced by the entry points |
+| `.scripts/run.sh`, `stop.sh`, `update.sh`, `update_all_stacks.sh`, `clean-up.sh`, `ntfy-status.sh` | sourced by the entry points |
 | `.scripts/*.sh` (others) | standalone utilities with `--help` |
 | `Stacks/<category>/` | ten stacks, each `docker-compose.yml` + `.env` |
 | `.templates/<name>/` | 103 templates: `docker-compose.yml`, `template.json`, optional `config/` |

@@ -135,16 +135,6 @@ secrets_get() {
     openssl enc -d -aes-256-cbc -pbkdf2 -pass "file:${SECRETS_MASTER_KEY_FILE}" -in "$SECRETS_DIR/$name.enc" 2>/dev/null
 }
 
-# Names only, one per line, never values.
-secrets_list() {
-    local f
-    for f in "$SECRETS_DIR"/*.enc; do
-        [[ -f "$f" ]] || continue
-        f=$(basename "$f" .enc)
-        [[ "$f" =~ $SECRETS_NAME_RE ]] && echo "$f"
-    done | sort
-}
-
 # JSON array of {key, modified, size} — the API's list shape.
 secrets_list_json() {
     local f name mod size first=true out="["
@@ -283,27 +273,3 @@ compose_with_secrets() {
 _decrypt_secret() { secrets_get "$@"; }
 _secrets_env_exports() { secrets_env_exports "$@"; }
 _compose_with_secrets() { compose_with_secrets "$@"; }
-
-# =============================================================================
-# BUNDLES (encrypted export / import of the whole store, without the key)
-# =============================================================================
-
-# Usage: secrets_export_bundle OUTPUT.tar
-secrets_export_bundle() {
-    local out="$1"
-    [[ -n "$out" ]] || return 1
-    [[ -d "$SECRETS_DIR" ]] || { echo "No secrets to export" >&2; return 1; }
-    (cd "$SECRETS_DIR" && umask 077 && tar -cf "$out" --exclude='.master-key' --exclude='.gitignore' -- *.enc 2>/dev/null)
-}
-
-# Usage: secrets_import_bundle INPUT.tar  (only *.enc entries, no paths)
-secrets_import_bundle() {
-    local in="$1"
-    [[ -f "$in" ]] || { echo "Bundle not found: $in" >&2; return 1; }
-    if tar -tf "$in" 2>/dev/null | grep -vqE '^[A-Za-z_][A-Za-z0-9_]{0,63}\.enc$'; then
-        echo "Bundle contains entries that are not secrets; refusing" >&2
-        return 1
-    fi
-    secrets_init || return 1
-    (cd "$SECRETS_DIR" && umask 077 && tar -xf "$in" 2>/dev/null) && chmod 600 "$SECRETS_DIR"/*.enc 2>/dev/null
-}

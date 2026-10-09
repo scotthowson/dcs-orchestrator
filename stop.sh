@@ -136,7 +136,6 @@ source "$BASE_DIR/.scripts/stop.sh"
 # Optional libraries (graceful skip if missing)
 # _source_optional is provided by docker-utils.sh
 _source_optional "$BASE_DIR/.lib/banner.sh"                  "banner.sh"
-_source_optional "$BASE_DIR/.scripts/ntfy-status-stop.sh"    "ntfy-status-stop.sh"
 
 # =============================================================================
 # UTILITY FUNCTIONS
