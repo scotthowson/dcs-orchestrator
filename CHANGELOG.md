@@ -3,6 +3,32 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Push bans to Cloudflare.** A switch on the CrowdSec page's Bouncers tab, next to Traefik enforcement: the addresses CrowdSec bans
+  are refused at Cloudflare's edge, so a banned scanner no longer reaches Traefik through Cloudflare and no longer feeds CrowdSec new
+  detections. DCS registers a bouncer of its own in CrowdSec (`dcs-cloudflare-bouncer`), keeps one IP list per Cloudflare account
+  (`dcs_crowdsec_bans`) and one WAF custom rule per zone (action Block, the zone's first custom rule), and keeps them in step every 30 s
+  from CrowdSec's local API with the bouncer's key: only bans of IP addresses and networks, your own bans by default (the community
+  blocklist on request, after them), the newest first up to the capacity (10,000, the free plan's), never a private, protected or
+  allowlisted address. It pushes only when the bans changed, reads the list and the rules back every 5 minutes and repairs what was
+  changed at Cloudflare, keeps the last bans there while CrowdSec does not answer, and registers its bouncer again after a CrowdSec reset.
+  The token is a setting of its own (`CLOUDFLARE_BOUNCER_TOKEN`, never the DNS token), checked before anything is made (`GET
+  /user/tokens/verify`, the zones, the lists, the custom rules: the answer names the missing right — Account Filter Lists: Edit, Zone WAF:
+  Edit, Zone: Read — the domain without a zone, or the free plan's list or rule limit), kept encrypted in the secrets store and handed to
+  curl on its standard input only. The off switch stops the sync, deletes the bouncer and, when asked, the rule and the list at
+  Cloudflare (DCS's own only). The status shows the health, the addresses on Cloudflare's list (read back at most once a minute), the
+  zones, the last pull and sync and the error in plain words; `GET /crowdsec/status` carries a summary, the CrowdSec page an issue and the
+  dashboard's "Needs your attention" an item when the last good sync is older than 10 minutes. New routes: `GET /crowdsec/cloudflare`,
+  `POST /crowdsec/cloudflare/verify`, `…/enable`, `…/disable`, `…/sync`, `…/settings`; new settings `CLOUDFLARE_BOUNCER_ENABLED`,
+  `_TOKEN`, `_CAPACITY`, `_COMMUNITY`, `_DOMAINS`, `_INTERVAL`, `CROWDSEC_LAPI_URL`. Why not CrowdSec's own Cloudflare bouncer images, the
+  token's rights, the free plan's limits and how to turn it off cleanly: docs/CROWDSEC.md, "Push bans to Cloudflare".
+- The Bouncers tab no longer deletes `dcs-cloudflare-bouncer` while Push bans to Cloudflare is on (409; `force` still does).
+- `tests/mock-cloudflare-waf.py` (Cloudflare's Lists and Rulesets APIs and CrowdSec's local API, for the smoke test) and
+  `tests/cloudflare-bouncer-live.sh` (the same against a real CrowdSec, in a sandbox).
+
 ## [4.0.44] - 2026-10-09
 
 ### Fixed

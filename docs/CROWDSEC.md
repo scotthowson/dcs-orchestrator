@@ -307,6 +307,109 @@ bundle for a Traefik + SSH server (each with a sentence on what it does), search
   real login, at most once per 10 minutes. If registering is refused with 403 as well, it is the address that is refused; that usually clears by itself. Local detections,
   bans and alerts keep working throughout; only the shared blocklist is missing.
 
+### Push bans to Cloudflare
+
+When your sites are proxied by Cloudflare (the orange cloud), a scanner CrowdSec banned still reaches Cloudflare, Cloudflare still forwards
+it, and Traefik answers it 403: it keeps costing a request at your server and keeps feeding CrowdSec new detections. **Push bans to
+Cloudflare** (a switch on the Bouncers tab, next to Traefik enforcement) has Cloudflare refuse those addresses at its edge, before
+anything is forwarded. Traefik's bouncer stays where it is: it still guards the server for anything that does not come through
+Cloudflare.
+
+**What it makes at Cloudflare**, and nothing else:
+
+| What | Where | Name |
+| --- | --- | --- |
+| one IP list per account, holding the bans | Manage Account → Configurations → Lists | `dcs_crowdsec_bans` |
+| one WAF custom rule per zone, action **Block**, the zone's first custom rule | the zone → Security → WAF → Custom rules | *DCS Orchestrator: block CrowdSec bans* (`ip.src in $dcs_crowdsec_bans`, ref `dcs_crowdsec_bans`) |
+
+and in CrowdSec a bouncer, `dcs-cloudflare-bouncer`, whose key DCS keeps (`.data/crowdsec/cloudflare-bouncer.key`, 600). The zones are
+those of your domains (`PROXY_DOMAIN` and `PROXY_DOMAINS_EXTRA`; a domain below its zone, such as `lab.example.com`, protects
+`example.com`), or the ones `CLOUDFLARE_BOUNCER_DOMAINS` names. A blocked request shows in the zone's Security → Events under that rule.
+
+**How it stays in step.** Every 30 s (`CLOUDFLARE_BOUNCER_INTERVAL`) the API's background loop asks CrowdSec's local API, with the
+bouncer's own key, for the active bans (`GET /v1/decisions?type=ban&scopes=ip,range&origins=…`; CrowdSec records the pull, so the bouncer
+shows a last pull like any other). Only bans count (a CAPTCHA decision is not one), only addresses and networks (a country is not an
+address), only your own bans by default: CrowdSec's detections, the bans of this page and of an import, the console's (origins
+`crowdsec`, `cscli`, `cscli-import`, `console`). The list never holds a private address, this server's addresses, your home address or
+anything on the allowlist (the same guard as a ban from the page), nor a network wider than Cloudflare takes (IPv4 /8, IPv6 /12). The
+newest bans come first; past `CLOUDFLARE_BOUNCER_CAPACITY` (10,000) the oldest are left out and the status says how many. The list's
+items are replaced only when the bans changed (one call, followed until Cloudflare has stored them). Every 5 minutes DCS also reads the
+list and the rules back and repairs what was changed at Cloudflare: a rule that was deleted is made again (as the first custom rule), a
+rule switched off or turned into *Log* blocks again, a list emptied or deleted by hand is filled again. When CrowdSec does not answer,
+nothing is pushed: Cloudflare keeps refusing the addresses it holds. When CrowdSec no longer knows the bouncer's key (its database was
+reset), DCS registers the bouncer again by itself. The bouncer is not deleted from the Bouncers list while the switch is on (409: the
+switch is the way).
+
+**Why not CrowdSec's own Cloudflare bouncer.** `crowdsecurity/cloudflare-bouncer`, the one that kept an IP list, is archived and CrowdSec
+lists it as deprecated: it writes Cloudflare's Firewall Rules and Filters APIs, which Cloudflare stopped supporting on 2025-06-15. Its
+successor, `crowdsecurity/cloudflare-worker-bouncer`, puts a Cloudflare Worker in front of every request: on the free plan that is 100,000
+requests a day (1,000 a minute), its routes are created *fail closed* (a scanner that burns the quota takes your sites down with error
+1027) and Cloudflare has no API to change that. A list and a WAF rule cost no quota, add no latency and hold whatever the traffic, so DCS
+keeps them itself, with the current Lists and Rulesets APIs.
+
+**The token.** Its own setting, `CLOUDFLARE_BOUNCER_TOKEN`: the DNS token (`CF_DNS_API_TOKEN`) is never used for it. Make it at
+dash.cloudflare.com → My Profile → API Tokens → Create Token → *Custom token* (an account-owned token from Manage Account → API Tokens works
+too), with exactly these rights:
+
+| Group | Item | Level | For |
+| --- | --- | --- | --- |
+| Account | Account Filter Lists | Edit | the list of banned addresses |
+| Zone | Zone WAF | Edit | the custom rule that blocks the list |
+| Zone | Zone | Read | finding the zones of your domains |
+
+Account Resources: the account of your zones; Zone Resources: those zones (or all zones). Paste it into the switch's dialog: DCS checks
+it before anything is made (`GET /user/tokens/verify`, the zones, the account's lists, each zone's custom rules) and refuses with the
+exact right that is missing, the domain without a zone, or the free plan's limit that is reached, and nothing is changed. A token you
+already keep on the Secrets page under the name `CLOUDFLARE_BOUNCER_TOKEN` is used when the dialog's field is left empty (the dialog says
+*Using the secret CLOUDFLARE_BOUNCER_TOKEN*); a token pasted there replaces that secret. It is stored
+encrypted in the secrets store (`.secrets/CLOUDFLARE_BOUNCER_TOKEN.enc`, 600; the Secrets page lists it), goes to curl on its standard
+input (never on a command line) and is never logged or sent back. A value in the root `.env` (`CLOUDFLARE_BOUNCER_TOKEN=${SECRETS_X}` or
+the token itself) is read when no secret is stored.
+
+**The free plan.** An account's limits follow its highest plan:
+
+| Plan | Custom lists | Items over all lists | Custom rules per zone |
+| --- | --- | --- | --- |
+| Free | 1 | 10,000 | 5 |
+| Pro, Business | 10 | 10,000 | 20, 100 |
+| Enterprise | 1,000 | 500,000 | 1,000 |
+
+On a free account the list is the account's one custom list: if another list holds it, the switch says which and stops. Five custom rules
+in a zone already: the same. Your own bans are a few hundred addresses at most, far below 10,000. The community blocklist (the
+*community* option, `CLOUDFLARE_BOUNCER_COMMUNITY=true`) is tens of thousands of addresses: it is added after your own bans and cut at the
+capacity (the newest first), so it never pushes one of yours out.
+
+**Status.** The Bouncers tab shows the switch, its health (on and in step, starting, not in step for over 10 minutes, or the error in plain
+words: the token was rejected, a zone was not found, a right is missing, the list or rule quota was reached, the list is full, CrowdSec
+does not answer), how many addresses are on Cloudflare's list (read back from Cloudflare at most once a minute), the zones, the last pull
+and the last sync, and the bouncer's registration. *Sync now* runs one at once. When the switch is on and the last good sync is older than
+10 minutes, the CrowdSec page shows an issue and the dashboard's *Needs your attention* lists it.
+
+**Turning it off cleanly.** Switch it off on the Bouncers tab. The sync stops at once and the bouncer is deleted in CrowdSec. The dialog
+asks what to do at Cloudflare:
+
+* **Remove the list and the rule** (recommended): the custom rule is deleted from each zone, then the list (a list a rule still uses
+  cannot be deleted). Your own lists and rules are never touched: DCS finds its own by name and ref.
+* **Leave them**: they stay as they are, frozen with the last bans, which then never expire at Cloudflare. *Remove them from
+  Cloudflare* on the tab (or `POST /crowdsec/cloudflare/disable {"cleanup": true}`) does it later.
+
+The token stays stored, so turning it on again is one click; *Forget the token* (`"forget_token": true`) deletes it. By hand: delete the
+custom rule *DCS Orchestrator: block CrowdSec bans* in each zone, then the list `dcs_crowdsec_bans`, and the bouncer with
+`cscli bouncers delete dcs-cloudflare-bouncer`.
+
+| Setting (root `.env`) | Default | What |
+| --- | --- | --- |
+| `CLOUDFLARE_BOUNCER_ENABLED` | `false` | the switch (set by the page) |
+| `CLOUDFLARE_BOUNCER_TOKEN` | — | the token, kept as the secret of that name |
+| `CLOUDFLARE_BOUNCER_CAPACITY` | `10000` | at most this many addresses on the list (1–500000) |
+| `CLOUDFLARE_BOUNCER_COMMUNITY` | `false` | also the community blocklist, within the capacity |
+| `CLOUDFLARE_BOUNCER_DOMAINS` | all of this server's domains | the domains whose zones block the list, comma separated |
+| `CLOUDFLARE_BOUNCER_INTERVAL` | `30` | seconds between two syncs (10–3600) |
+| `CROWDSEC_LAPI_URL` | where Docker publishes CrowdSec's port 8080 | CrowdSec's local API, for a CrowdSec DCS did not deploy |
+
+`tests/smoke.sh` checks all of this against a stand-in of Cloudflare's API (`tests/mock-cloudflare-waf.py`); `tests/cloudflare-bouncer-live.sh`
+runs it against a real CrowdSec (in a sandbox: it refuses to run where a CrowdSec container exists).
+
 ## 10. Logs
 
 The tail of the CrowdSec container's log: level (all / warnings / errors), text filter, 100–500 lines, an option to include the noisy API request lines, auto-refresh, copy and download.
@@ -347,6 +450,7 @@ Viewers may `GET` and may draw the Discord preview (it only renders, it never se
 | `GET /crowdsec/metrics?window=24h\|7d\|30d` | timeline, countries, scenarios, sources, networks, map points |
 | `GET /crowdsec/allowlist` · `POST` · `DELETE /crowdsec/allowlist/{value}` | never-ban list |
 | `GET /crowdsec/bouncers` · `POST` · `DELETE …/{name}` · `POST …/register-traefik` · `GET /crowdsec/machines` | enforcement |
+| `GET /crowdsec/cloudflare` · `POST …/verify` · `…/enable` · `…/disable` · `…/sync` · `…/settings` | [push bans to Cloudflare](#push-bans-to-cloudflare): the status; check a token; on (`{token, capacity, community, domains}`); off (`{cleanup, forget_token}`); sync now; the settings |
 | `GET /crowdsec/settings` · `PUT` | ban profile |
 | `GET /crowdsec/plugin` · `PUT` · `POST /crowdsec/traefik/restart` | the Traefik bouncer plugin's settings, and a Traefik restart (it loads a declared plugin only as it starts) |
 | `GET /routes` | every route now says `crowdsec`: `protected`, `bypass` or `off` (CrowdSec is not set up on the proxy) |
@@ -371,3 +475,5 @@ Viewers may `GET` and may draw the Discord preview (it only renders, it never se
 | Discord stays silent | Discord tab: status card (*wired*, *plugin active*, *working*), **Send test message**, recent delivery errors; the webhook must be a `https://discord.com/api/webhooks/…` URL |
 | A settings change failed | the page says which step; the previous file is put back automatically, so CrowdSec is never left on a bad file |
 | CrowdSec restarts in a loop | Show the log: almost always a configuration error in a file that was edited by hand |
+| Banned scanners still reach Traefik through Cloudflare | Bouncers tab → [Push bans to Cloudflare](#push-bans-to-cloudflare); check the zone's Security → Events for *DCS Orchestrator: block CrowdSec bans* |
+| *Cloudflare is not getting the bans* | the Bouncers tab says why (a right of the token, the list or rule quota, CrowdSec not answering); *Sync now* tries at once. Cloudflare keeps refusing the addresses it already holds meanwhile |

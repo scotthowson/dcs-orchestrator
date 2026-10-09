@@ -856,12 +856,23 @@ handle_crowdsec_status() {
             if [[ "$v" == "$client" ]] || { [[ "$v" == */* ]] && _cs_covers "$v" "$client"; }; then banned=true; break; fi
         done < <(jq -r '(.decisions // [])[] | select(.simulated | not) | .value' <<< "$core")
     fi
-    local trusted state='{}'
+    local trusted state='{}' cfb='{"enabled": false}'
     trusted=$(_crowdsec_trusted_list | jq -R . | jq -sc .)
     [[ -f "$CROWDSEC_SYNC_STATE" ]] && state=$(cat "$CROWDSEC_SYNC_STATE" 2>/dev/null)
     [[ "$state" == \{* ]] || state='{}'
-    _api_success "$(jq -c --arg ip "$client" --argjson banned "$banned" --argjson trusted "$trusted" --argjson wl "$state" \
-        '. + {client_ip: $ip, client_banned: $banned, trusted: $trusted, whitelist: $wl, decision_count: ((.decisions // []) | length), message: (if .state == "not_deployed" then "CrowdSec is not running. Deploy it from the CrowdSec page to enable protection." else .title end)}' <<< "$core")"
+    # Push bans to Cloudflare, from its state file only (the dashboard's "Needs your attention" reads it; no call to Cloudflare here)
+    if [[ -s "$CROWDSEC_STATE_DIR/cloudflare.json" || "$(envfile_get "$BASE_DIR/.env" CLOUDFLARE_BOUNCER_ENABLED 2>/dev/null)" == true ]]; then
+        _crowdsec_cf_lib; cfb=$(_cfb_brief 2>/dev/null) || cfb=""
+        [[ "$cfb" == \{* ]] || cfb='{"enabled": false}'
+    fi
+    _api_success "$(jq -c --arg ip "$client" --argjson banned "$banned" --argjson trusted "$trusted" --argjson wl "$state" --argjson cfb "$cfb" \
+        '. + {client_ip: $ip, client_banned: $banned, trusted: $trusted, whitelist: $wl, decision_count: ((.decisions // []) | length), cloudflare: $cfb,
+              message: (if .state == "not_deployed" then "CrowdSec is not running. Deploy it from the CrowdSec page to enable protection." else .title end)}
+         | if $cfb.enabled and ($cfb.health == "stale" or $cfb.health == "error") then .issues = ((.issues // []) + [{code: "cloudflare_sync", severity: "warning",
+              title: (if $cfb.health == "error" then "Cloudflare is not getting the bans" else "The bans at Cloudflare are not up to date" end),
+              detail: ((if $cfb.health == "error" then ($cfb.error.message // "The last sync failed.") else "The last sync with Cloudflare succeeded more than 10 minutes ago." end)
+                + " Cloudflare keeps refusing the addresses it holds; new bans reach it once the sync works again."),
+              fix: {id: "open_bouncers", label: "Open Bouncers", kind: "ui", method: "", path: "", body: null, primary: false}}]) else . end' <<< "$core")"
 }
 
 # =============================================================================
@@ -1740,6 +1751,10 @@ handle_crowdsec_bouncer_delete() {
     _cs_target || return
     if [[ "$name" != *@* && "$force" != true ]] && _cs_bouncer_live_names | grep -qxF -- "$name"; then
         _api_error 409 "Traefik's crowdsec-bouncer middleware still uses this bouncer; register again from the Bouncers tab instead of deleting it"; return
+    fi
+    # the bouncer of Push bans to Cloudflare goes with its switch (the sync would only register it again)
+    if [[ "$name" == dcs-cloudflare-bouncer && "$force" != true && "$(envfile_get "$BASE_DIR/.env" CLOUDFLARE_BOUNCER_ENABLED 2>/dev/null)" == true ]]; then
+        _api_error 409 "Push bans to Cloudflare uses this bouncer: turn that switch off on the Bouncers tab instead of deleting it"; return
     fi
     if ! _cs_run out bouncers delete "$name"; then
         local e; e=$(_cs_errline)

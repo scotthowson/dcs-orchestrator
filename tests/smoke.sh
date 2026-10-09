@@ -4262,7 +4262,7 @@ fi   # (end of the sections SMOKE_ONLY=crowdsec skips)
 #
 #   SMOKE_ONLY=crowdsec tests/smoke.sh                       just this section (about a minute on 8 or more cores; the lanes below run side by side)
 #   SMOKE_ONLY=crowdsec SMOKE_CS_PARTS="status bans" tests/smoke.sh   only some of its parts: status allowlist alerts units bans settings notify services hub
-#                                                            security large plugin importbig mediaapps (see cst_main for the lane each one runs in)
+#                                                            security large plugin importbig mediaapps cloudflare (see cst_main for the lane each one runs in)
 #   SMOKE_CS_LANES=1     one lane, the parts in order, the output live (default: nine lanes at once, each one's output printed when all are done)
 #   SMOKE_CS_JOBS=N      how many requests of a batch are sent at once (default 4)
 #   SMOKE_JQ16=/path     a jq 1.6 to run the section's jq programs with (units part); without one that check is skipped
@@ -9223,6 +9223,393 @@ cst_units_jq() {
 
 # One lane = one install of its own (scripts, stand-in, fake Discord, accounts), run in the background; the lanes run side by side and their
 # reports are printed one after the other when they are all done. SMOKE_CS_LANES=1 runs everything in a single lane, in order, live.
+# ---- Push bans to Cloudflare: the token's checks, the list and the rule, the sync, the off switch -------------------------------------
+# Against tests/mock-cloudflare-waf.py (Cloudflare's Lists and Rulesets APIs, and CrowdSec's local API): the part's own curl rewrites
+# https://api.cloudflare.com/client/v4 and CrowdSec's published API (127.0.0.1:8070) to it and refuses everything else.
+
+CFB_TOK="cfbGOOD_token_0123456789abcdefghijKLMN"       # placeholders: never a real token
+CFB_PORT=""; RIP_CFB=""
+cfb_fake() { curl -s -m 10 "http://127.0.0.1:$CFB_PORT$1" "${@:2}"; }                                  # the stand-in itself (control and state)
+cfb_cfg() { cfb_fake /_mock/config -X POST -H 'Content-Type: application/json' -d "$1" >/dev/null; }
+cfb_dec() { cfb_fake /_mock/decisions -X POST -H 'Content-Type: application/json' -d "$1" >/dev/null; }
+cfb_st() { cfb_fake /_mock/state | jq -r "$1"; }
+cfb_items() { cfb_st '[.lists[][] | select(.name == "dcs_crowdsec_bans") | .items[].ip] | sort | join(" ")'; }
+cfb_rules() { cfb_st '[.rulesets[] | .rules[] | select(.ref == "dcs_crowdsec_bans") | "\(.action)|\(.enabled)|\(.expression)"] | join(" ")'; }
+cfb_calls() { cfb_st "[.calls[] | select(test(\"$1\"))] | length"; }
+cfb_src() { local -a c=("$@"); ( set --; export PATH="$CST/bin:$PATH"; source "$CST_API" >/dev/null 2>&1; set +e; "${c[@]}" ) 2>/dev/null; }     # (as the API's loops run: no errexit)
+cfb_tokenfree() {      # the token is nowhere but the encrypted secret: not on a command line, in a log, a state file or an answer
+    local where n
+    n=$(grep -rlF -- "$CFB_TOK" "$CST/argv.log" "$CST/curl-argv.log" "$CST/api-stderr.log" "$CST/.data" "$CST/logs" "$CST/.api-auth" "$CST/.env" "$CST/fake/calls.log" 2>/dev/null | wc -l | tr -d ' ')
+    check "cloudflare: the token is in no command line, log, state file or .env ($1)" 0 "$n"
+    where=$(grep -cF -- "$CFB_TOK" <<< "$CST_RAW")
+    check "cloudflare: …nor in the answer ($1)" 0 "$where"
+}
+
+cst_cloudflare_setup() {
+    local i
+    cst_world data traefik-cs --traefik
+    rm -f "$CST/cfb.port" "$CST/cfb-state.json"
+    python3 "$ROOT/tests/mock-cloudflare-waf.py" "$CST/cfb.port" "$CST/cfb-state.json" "$CST/fake/state.json" >/dev/null 2>&1 &
+    RIP_CFB=$!
+    for i in $(seq 1 100); do [[ -s "$CST/cfb.port" ]] && break; sleep 0.05; done
+    CFB_PORT=$(cat "$CST/cfb.port" 2>/dev/null)
+    cp "$CST/bin/curl" "$CST/bin/curl.discord"
+    # the part's curl: Cloudflare's API and CrowdSec's API go to the stand-in; anything else is refused without a connection
+    cat > "$CST/bin/curl" <<CURL
+#!/bin/bash
+printf '%s\n' "\$(printf '%q ' "\$@")" >> "$CST/curl-argv.log"
+args=(); cfg=""; url=""
+while (( \$# )); do
+    if [[ "\$1" == -K && "\${2:-}" == - ]]; then cfg=\$(cat); shift 2; continue; fi
+    case "\$1" in
+        https://api.cloudflare.com/client/v4*) url="http://127.0.0.1:$CFB_PORT/client/v4\${1#https://api.cloudflare.com/client/v4}" ;;
+        http://127.0.0.1:8070*) url="http://127.0.0.1:$CFB_PORT\${1#http://127.0.0.1:8070}" ;;
+        http://*|https://*) echo "curl: (7) refused by the test: \$1" >&2; exit 7 ;;
+        *) args+=("\$1") ;;
+    esac
+    shift
+done
+[[ -n "\$url" ]] || { echo "curl: (7) refused by the test" >&2; exit 7; }
+tmp=\$(mktemp); printf '%s\n' "\$cfg" > "\$tmp"
+"$(command -v curl)" -K "\$tmp" "\${args[@]}" "\$url"; rc=\$?; rm -f "\$tmp"; exit \$rc
+CURL
+    chmod +x "$CST/bin/curl"
+    cfb_cfg "$(jq -nc --arg t "$CFB_TOK" '{tokens: {($t): {kind: "user", rights: ["zones", "lists", "waf"]},
+        "cfbNOLISTS_0123456789abcdefghijklmn": {kind: "user", rights: ["zones", "waf"]},
+        "cfbNOWAF_0123456789abcdefghijklmnopq": {kind: "user", rights: ["zones", "lists"]},
+        "cfbNOZONE_0123456789abcdefghijklmnop": {kind: "user", rights: ["lists", "waf"]},
+        "cfbOFF_0123456789abcdefghijklmnopqrs": {kind: "user", status: "disabled", rights: ["zones", "lists", "waf"]},
+        "cfbACCT_0123456789abcdefghijklmnopqr": {kind: "account", account: "acc-lab", rights: ["zones", "lists", "waf"]}},
+      zones: [{id: "zone-example-test", name: "example.test", account: {id: "acc-lab", name: "Lab account"}, plan: "free"}]}')"
+    cfb_dec '[{"id": 101, "value": "198.51.100.7", "origin": "crowdsec", "scope": "Ip"},
+              {"id": 102, "value": "198.51.100.8", "origin": "cscli", "scope": "Ip"},
+              {"id": 103, "value": "192.0.2.0/24", "origin": "crowdsec", "scope": "Range"},
+              {"id": 104, "value": "10.0.0.5", "origin": "crowdsec", "scope": "Ip"},
+              {"id": 105, "value": "203.0.113.250", "origin": "cscli", "scope": "Ip"},
+              {"id": 106, "value": "2a01:4f8:1:2::3", "origin": "crowdsec", "scope": "Ip"},
+              {"id": 107, "value": "45.155.205.1", "origin": "CAPI", "scope": "Ip"},
+              {"id": 108, "value": "198.51.100.9", "origin": "crowdsec", "scope": "Ip", "type": "captcha"},
+              {"id": 109, "value": "DE", "origin": "cscli", "scope": "Country"}]'
+    [[ -n "$CFB_PORT" ]]
+}
+cst_cloudflare_teardown() {
+    [[ -n "$RIP_CFB" ]] && { kill "$RIP_CFB" 2>/dev/null; wait "$RIP_CFB" 2>/dev/null; RIP_CFB=""; }
+    [[ -f "$CST/bin/curl.discord" ]] && mv -f "$CST/bin/curl.discord" "$CST/bin/curl"
+    sed -i '/^CLOUDFLARE_BOUNCER_/d' "$CST/.env"
+}
+
+cst_cloudflare_off() {
+    cst_call admin GET /crowdsec/cloudflare
+    cst_is "cloudflare: the status while it is off" 200
+    cst_j "cloudflare/off" '.enabled' false '.health' off '.token.set' false '.token.setting' CLOUDFLARE_BOUNCER_TOKEN '.settings.capacity' 10000 '.settings.community' false \
+        '.settings.interval' 30 '.settings.domains | join(",")' lab.example.test '.bouncer.name' dcs-cloudflare-bouncer '.bouncer.registered' false '.cloudflare.list' dcs_crowdsec_bans \
+        '.limits.free.lists' 1 '.limits.free.items' 10000 '.limits.free.rules' 5 '.left_at_cloudflare' false '.settings.origins | join(",")' crowdsec,cscli,cscli-import,console
+    cst_j "cloudflare/off: the rights the token needs" '.permissions | map(.group + "/" + .item + "/" + .level) | join(",")' "Account/Account Filter Lists/Edit,Zone/Zone WAF/Edit,Zone/Zone/Read"
+    cst_call viewer GET /crowdsec/cloudflare
+    cst_is "cloudflare: a viewer may look" 200
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/off: the CrowdSec status says it is off" '.cloudflare.enabled' false
+    check "cloudflare/off: nothing asked Cloudflare" 0 "$(cfb_calls '^GET /client')"
+}
+
+cst_cloudflare_refusals() {
+    local t
+    cst_q en_viewer viewer POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}"
+    cst_q en_nobody none POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}"
+    cst_q ve_viewer viewer POST /crowdsec/cloudflare/verify '{}'
+    cst_q di_viewer viewer POST /crowdsec/cloudflare/disable '{"cleanup":true}'
+    cst_q sy_viewer viewer POST /crowdsec/cloudflare/sync ''
+    cst_q se_viewer viewer POST /crowdsec/cloudflare/settings '{"capacity":5}'
+    cst_q en_none admin POST /crowdsec/cloudflare/enable '{}'
+    cst_q en_short admin POST /crowdsec/cloudflare/enable '{"token":"abc"}'
+    cst_q en_quote admin POST /crowdsec/cloudflare/enable '{"token":"cfb\"x0123456789abcdefghijklmnopqrstu"}'
+    cst_q en_json admin POST /crowdsec/cloudflare/enable 'not json'
+    cst_q en_cap admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\",\"capacity\":0}"
+    cst_q en_dom admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\",\"domains\":[\"not a domain\"]}"
+    cst_q sy_off admin POST /crowdsec/cloudflare/sync ''
+    cst_run
+    for t in en_viewer ve_viewer di_viewer sy_viewer se_viewer; do cst_use "$t"; cst_is "cloudflare: $t is an admin's" 403; done
+    cst_use en_nobody; cst_is "cloudflare: nobody may turn it on" 401
+    cst_use en_none; cst_is "cloudflare: no token" 400; cst_j "cloudflare/no token" '.reason' token_missing
+    cst_t "cloudflare/no token: it says the DNS token is never used" '.message | test("never uses the DNS token")'
+    cst_use en_short; cst_is "cloudflare: a token that is no token" 400; cst_j "cloudflare/short token" '.reason' token_invalid
+    cst_use en_quote; cst_is "cloudflare: a token with a quote (it would break curl's config line)" 400; cst_j "cloudflare/quote" '.reason' token_invalid
+    cst_use en_json; cst_is "cloudflare: not JSON" 400
+    cst_use en_cap; cst_is "cloudflare: a capacity of 0" 400
+    cst_use en_dom; cst_is "cloudflare: a domain that is no domain" 400
+    cst_use sy_off; cst_is "cloudflare: sync while it is off" 409
+    check "cloudflare/refusals: Cloudflare was not asked" 0 "$(cfb_calls '^(GET|PUT|POST) /client')"
+    check "cloudflare/refusals: no setting was written" 0 "$(grep -c '^CLOUDFLARE_BOUNCER_\(ENABLED=true\|CAPACITY=0\)' "$CST/.env")"
+
+    # -- the token's rights: each missing right is named, nothing is made, nothing is kept
+    cst_call admin POST /crowdsec/cloudflare/enable '{"token":"cfbUNKNOWN_0123456789abcdefghijklmn"}'
+    cst_is "cloudflare: a token Cloudflare does not know" 400
+    cst_j "cloudflare/unknown token" '.reason' token_rejected
+    cst_call admin POST /crowdsec/cloudflare/enable '{"token":"cfbOFF_0123456789abcdefghijklmnopqrs"}'
+    cst_is "cloudflare: a disabled token" 400
+    cst_j "cloudflare/disabled token" '.reason' token_rejected
+    cst_t "cloudflare/disabled token: says it is disabled" '.message | test("disabled")'
+    cst_call admin POST /crowdsec/cloudflare/enable '{"token":"cfbNOLISTS_0123456789abcdefghijklmn"}'
+    cst_is "cloudflare: no right to the lists" 400
+    cst_j "cloudflare/no lists right" '.reason' missing_permissions '.missing | map(.item) | join(",")' "Account Filter Lists"
+    cst_t "cloudflare/no lists right: the message names the right" '.message | test("Account → Account Filter Lists → Edit")'
+    cst_call admin POST /crowdsec/cloudflare/enable '{"token":"cfbNOWAF_0123456789abcdefghijklmnopq"}'
+    cst_j "cloudflare/no WAF right" '.reason' missing_permissions '.missing | map(.item) | join(",")' "Zone WAF"
+    cst_t "cloudflare/no WAF right: the message names the right" '.message | test("Zone → Zone WAF → Edit")'
+    cst_call admin POST /crowdsec/cloudflare/enable '{"token":"cfbNOZONE_0123456789abcdefghijklmnop"}'
+    cst_j "cloudflare/no zone right" '.reason' missing_permissions '.missing | map(.item) | join(",")' "Zone"
+    cst_t "cloudflare/no zone right: the message names the right" '.message | test("Zone → Zone → Read")'
+    cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\",\"domains\":[\"elsewhere.test\"]}"
+    cst_is "cloudflare: a domain without a zone" 400
+    cst_j "cloudflare/no zone" '.reason' zone_not_found
+    cst_t "cloudflare/no zone: names the domain" '.message | test("elsewhere.test")'
+    check "cloudflare/no zone: the domains setting is put back" "" "$(grep '^CLOUDFLARE_BOUNCER_DOMAINS=' "$CST/.env" | cut -d= -f2- | tr -d '"')"
+    # the free plan: one custom list per account, five custom rules per zone
+    cfb_fake /client/v4/accounts/acc-lab/rules/lists -X POST -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' -d '{"name":"my_own_list","kind":"ip"}' >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}"
+    cst_is "cloudflare: the free plan's one list is taken" 400
+    cst_j "cloudflare/list quota" '.reason' list_quota
+    cst_t "cloudflare/list quota: names the list that holds it" '.message | test("my_own_list")'
+    cfb_fake /_mock/reset -X POST >/dev/null
+    cfb_fake /client/v4/zones/zone-example-test/rulesets/phases/http_request_firewall_custom/entrypoint -X PUT -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' \
+        -d '{"rules":[{"action":"block","expression":"ip.src eq 192.0.2.1"},{"action":"block","expression":"ip.src eq 192.0.2.2"},{"action":"block","expression":"ip.src eq 192.0.2.3"},{"action":"block","expression":"ip.src eq 192.0.2.4"},{"action":"block","expression":"ip.src eq 192.0.2.5"}]}' >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}"
+    cst_is "cloudflare: five custom rules already" 400
+    cst_j "cloudflare/rule quota" '.reason' rule_quota
+    check "cloudflare/refusals: no list was made" 0 "$(cfb_st '[.lists[][]] | length')"
+    cfb_fake /_mock/reset -X POST >/dev/null
+    check "cloudflare/refusals: no token was kept" 0 "$(cst_secrets_n 'CLOUDFLARE_BOUNCER_TOKEN.enc')"
+    check "cloudflare/refusals: no bouncer was registered" 0 "$(cst_cs bouncers list -o json | jq '[.[] | select(.name == "dcs-cloudflare-bouncer")] | length')"
+    check "cloudflare/refusals: it is not on" "" "$(grep '^CLOUDFLARE_BOUNCER_ENABLED=true' "$CST/.env")"
+    # -- verify alone changes nothing
+    cst_call admin POST /crowdsec/cloudflare/verify "{\"token\":\"$CFB_TOK\"}"
+    cst_is "cloudflare: verify a good token" 200
+    cst_j "cloudflare/verify" '.ok' true '.zones | map(.name) | join(",")' example.test '.zones[0].domain' lab.example.test '.zones[0].account' acc-lab '.token.kind' user
+    cst_call admin POST /crowdsec/cloudflare/verify '{"token":"cfbACCT_0123456789abcdefghijklmnopqr"}'
+    cst_is "cloudflare: an account-owned token is verified on its account" 200
+    cst_j "cloudflare/verify account token" '.token.kind' account
+    check "cloudflare/verify: nothing made, nothing kept" "0 0" "$(cfb_st '[.lists[][]] | length') $(cst_secrets_n 'CLOUDFLARE_BOUNCER_TOKEN.enc')"
+}
+
+cst_cloudflare_on() {
+    local mode
+    cfb_fake /_mock/reset -X POST >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}" SOCAT_PEERADDR=198.51.100.200
+    cst_is "cloudflare: turned on" 200
+    cst_j "cloudflare/on" '.success' true '.enabled' true '.synced' true '.zones | join(",")' example.test '.items' 4
+    check "cloudflare/on: the list holds this server's local bans (no private, protected, captcha, country or community entry)" \
+        "192.0.2.0/24 198.51.100.7 198.51.100.8 2a01:4f8:1:2::3" "$(cfb_items)"
+    check "cloudflare/on: the zone's rule blocks the list" "block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_rules)"
+    check "cloudflare/on: the list's description says DCS keeps it" true "$(cfb_st '[.lists[][] | select(.name == "dcs_crowdsec_bans") | .description | test("DCS")] | any')"
+    check "cloudflare/on: the bouncer is registered in CrowdSec" 1 "$(cst_cs bouncers list -o json | jq '[.[] | select(.name == "dcs-cloudflare-bouncer")] | length')"
+    check "cloudflare/on: the pull used the bouncer's own key" true "$(cfb_st '.lapi_pulls > 0')"
+    check "cloudflare/on: the token is kept as an encrypted secret" 1 "$(cst_secrets_n 'CLOUDFLARE_BOUNCER_TOKEN.enc')"
+    check "cloudflare/on: .env says it is on" true "$(grep '^CLOUDFLARE_BOUNCER_ENABLED=' "$CST/.env" | cut -d= -f2)"
+    mode="$(stat -c %a "$CST/.data/crowdsec/cloudflare-bouncer.key" 2>/dev/null) $(stat -c %a "$CST/.data/crowdsec/cloudflare.json" 2>/dev/null)"
+    check "cloudflare/on: the bouncer's key file and the state are 600" "600 600" "$mode"
+    check "cloudflare/on: every Cloudflare call carried this token" true "$(cfb_fake /_mock/state | jq --arg t "$CFB_TOK" '(.auth_seen | length) > 0 and ([.auth_seen[] | select(. != $t)] | length == 0)')"
+    check "cloudflare/on: it is audited" 1 "$(grep -c '"action":"auth.crowdsec_cloudflare_on"' "$CST/.data/audit.jsonl" 2>/dev/null)"
+    cfb_tokenfree "turned on"
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/status on" '.enabled' true '.health' ok '.token.set' true '.token.source' secret '.sync.items' 4 '.sync.skipped' 2 '.sync.dropped' 0 \
+        '.cloudflare.items' 4 '.cloudflare.zones[0].name' example.test '.cloudflare.accounts[0].id' acc-lab '.bouncer.registered' true '.error' null
+    cfb_tokenfree "status"
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/status on: in the CrowdSec status" '.cloudflare.enabled' true '.cloudflare.health' ok '.cloudflare.items' 4
+    cst_t "cloudflare/status on: no issue" '[.issues[] | select(.code == "cloudflare_sync")] | length == 0'
+    # a second enable is safe: the same list and rule, a fresh bouncer key
+    cst_call admin POST /crowdsec/cloudflare/enable '{}'
+    cst_is "cloudflare: turned on again with the stored token" 200
+    check "cloudflare/on again: still one list and one rule" "1 1" "$(cfb_st '[.lists[][]] | length') $(cfb_st '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans")] | length')"
+}
+
+cst_cloudflare_sync() {
+    local puts
+    # unchanged bans: nothing is pushed
+    puts=$(cfb_calls '^PUT /client/v4/accounts/acc-lab/rules/lists/.*/items')
+    cfb_src eval '_crowdsec_cf_lib; _cfb_sync'
+    check "cloudflare/sync: unchanged bans push nothing" "$puts" "$(cfb_calls '^PUT /client/v4/accounts/acc-lab/rules/lists/.*/items')"
+    # a ban lifted, a new one: pushed
+    cfb_dec '[{"id": 101, "value": "198.51.100.7", "origin": "crowdsec"}, {"id": 110, "value": "203.0.113.77", "origin": "cscli-import"}, {"id": 111, "value": "198.51.100.10", "origin": "console"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare: sync now" 200
+    check "cloudflare/sync: the list follows CrowdSec" "198.51.100.10 198.51.100.7 203.0.113.77" "$(cfb_items)"
+    cst_j "cloudflare/sync" '.sync.items' 3 '.health' ok
+    # capacity: the newest bans first
+    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 2}'
+    cst_is "cloudflare: capacity 2" 200
+    check "cloudflare/capacity: the two newest" "198.51.100.10 203.0.113.77" "$(cfb_items)"
+    cst_j "cloudflare/capacity" '.settings.capacity' 2 '.sync.dropped' 1
+    # the community blocklist: only when asked, local bans first
+    cfb_dec '[{"id": 101, "value": "198.51.100.7", "origin": "crowdsec"}, {"id": 900, "value": "45.155.205.1", "origin": "CAPI"}, {"id": 901, "value": "45.155.205.2", "origin": "lists"}]'
+    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 2, "community": true}'
+    check "cloudflare/community: local first, then the newest community entry" "198.51.100.7 45.155.205.2" "$(cfb_items)"
+    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 10000, "community": false}'
+    check "cloudflare/community off: local only" "198.51.100.7" "$(cfb_items)"
+    # an empty ban list empties the list (the rule stays)
+    cfb_dec '[]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/sync: no ban, an empty list" "" "$(cfb_items)"
+    check "cloudflare/sync: …and the rule stays" 1 "$(cfb_st '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans")] | length')"
+    cfb_dec '[{"id": 120, "value": "198.51.100.30", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/sync: bans again" "198.51.100.30" "$(cfb_items)"
+
+    # -- what was changed at Cloudflare is repaired: the rule deleted, the rule switched off, the list emptied by hand, the list deleted
+    local rs rid lid
+    rs=$(cfb_st '.rulesets["zone-example-test"].id'); rid=$(cfb_st '.rulesets["zone-example-test"].rules[] | select(.ref == "dcs_crowdsec_bans") | .id')
+    cfb_fake "/client/v4/zones/zone-example-test/rulesets/$rs/rules/$rid" -X DELETE -H "Authorization: Bearer $CFB_TOK" >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/repair: a deleted rule is made again" "block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_rules)"
+    cst_t "cloudflare/repair: …and the status says so" '.sync.repaired.what | join(" ") | test("rule")'
+    check "cloudflare/repair: …as the zone's first custom rule" dcs_crowdsec_bans "$(cfb_st '.rulesets["zone-example-test"].rules[0].ref')"
+    rid=$(cfb_st '.rulesets["zone-example-test"].rules[] | select(.ref == "dcs_crowdsec_bans") | .id')
+    cfb_fake "/client/v4/zones/zone-example-test/rulesets/$rs/rules/$rid" -X PATCH -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' -d '{"action":"log","expression":"ip.src in $dcs_crowdsec_bans","enabled":false}' >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/repair: a rule switched off or turned into log blocks again" "block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_rules)"
+    lid=$(cfb_st '.lists["acc-lab"][0].id')
+    cfb_fake "/client/v4/accounts/acc-lab/rules/lists/$lid/items" -X PUT -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' -d '[]' >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/repair: a list emptied by hand is filled again" "198.51.100.30" "$(cfb_items)"
+
+    # -- the background loop: nothing before the interval has passed, a sync after it
+    local pulls
+    pulls=$(cfb_st '.lapi_pulls')
+    touch "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_cloudflare_bouncer_tick; wait'
+    check "cloudflare/loop: nothing before the interval" "$pulls" "$(cfb_st '.lapi_pulls')"
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_cloudflare_bouncer_tick; wait'
+    check "cloudflare/loop: a pull once it has passed" "$((pulls + 1))" "$(cfb_st '.lapi_pulls')"
+    sed -i 's/^CLOUDFLARE_BOUNCER_ENABLED=.*/CLOUDFLARE_BOUNCER_ENABLED=false/' "$CST/.env"
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_cloudflare_bouncer_tick; wait'
+    check "cloudflare/loop: nothing at all while it is off" "$((pulls + 1))" "$(cfb_st '.lapi_pulls')"
+    sed -i 's/^CLOUDFLARE_BOUNCER_ENABLED=.*/CLOUDFLARE_BOUNCER_ENABLED=true/' "$CST/.env"
+    cfb_tokenfree "after the syncs"
+}
+
+cst_cloudflare_errors() {
+    # CrowdSec's API down: an error, and the list keeps the last bans
+    cfb_cfg '{"lapi_down": true}'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/lapi down: the sync answers" 200
+    cst_j "cloudflare/lapi down" '.health' error '.error.code' lapi_down
+    check "cloudflare/lapi down: the list keeps the last bans" "198.51.100.30" "$(cfb_items)"
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/lapi down: the CrowdSec status has the issue" '[.issues[] | select(.code == "cloudflare_sync")][0].fix.id' open_bouncers '.cloudflare.health' error
+    cfb_cfg '{"lapi_down": false}'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/lapi back" '.health' ok '.error' null
+    # the list's items quota (a list of another app holds most of it)
+    cfb_cfg '{"max_items": 1, "max_lists": 2}'
+    cfb_dec '[{"id": 130, "value": "198.51.100.31", "origin": "crowdsec"}, {"id": 131, "value": "198.51.100.32", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/list full: the sync answers" 200
+    cst_j "cloudflare/list full" '.health' error '.error.code' list_full
+    cst_t "cloudflare/list full: says how to fix it" '.error.message | test("CLOUDFLARE_BOUNCER_CAPACITY")'
+    cfb_cfg '{"max_items": 10000, "max_lists": 1}'
+    # a sync that last worked long ago is stale (Needs you reads it from /crowdsec/status)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    jq '.last_sync = 1000 | .error = null' "$CST/.data/crowdsec/cloudflare.json" > "$CST/cfb.tmp" && mv "$CST/cfb.tmp" "$CST/.data/crowdsec/cloudflare.json"
+    cst_uncache
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/stale" '.cloudflare.health' stale
+    cst_t "cloudflare/stale: an issue" '[.issues[] | select(.code == "cloudflare_sync")] | length == 1'
+    # the token deleted from the secrets store
+    mv "$CST/.secrets/CLOUDFLARE_BOUNCER_TOKEN.enc" "$CST/cfb-secret.away"
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/token gone" '.error.code' token_missing '.token.set' false
+    mv "$CST/cfb-secret.away" "$CST/.secrets/CLOUDFLARE_BOUNCER_TOKEN.enc"
+    # the Bouncers tab does not delete the bouncer while the switch is on (force does)
+    cst_call admin DELETE /crowdsec/bouncers/dcs-cloudflare-bouncer
+    cst_is "cloudflare: the bouncer is not deleted while the switch is on" 409
+    cst_t "cloudflare/delete guard: says where the switch is" '.message | test("turn that switch off")'
+    # the bouncer deleted behind DCS's back (a CrowdSec reset): its key no longer opens the API, and DCS registers it again by itself
+    cst_cs bouncers delete dcs-cloudflare-bouncer >/dev/null 2>&1
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/bouncer gone: registered again" '.error' null '.health' ok '.bouncer.registered' true
+    cst_t "cloudflare/bouncer gone: the status says so" '.sync.repaired.what | join(" ") | test("bouncer")'
+    # …unless CrowdSec refuses the new key as well
+    cfb_cfg '{"lapi_keys": [], "lapi_refuse_all": true}'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/key refused twice" '.error.code' lapi_key '.health' error
+    cst_t "cloudflare/key refused twice: says what to do" '.error.message | test("off and on again")'
+    cfb_cfg '{"lapi_refuse_all": false}'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/key accepted again" '.error' null
+}
+
+cst_cloudflare_offswitch() {
+    # off, keeping what is at Cloudflare
+    cst_call admin POST /crowdsec/cloudflare/enable '{}'
+    cst_is "cloudflare: on again (a fresh bouncer)" 200
+    cst_call admin POST /crowdsec/cloudflare/disable '{}'
+    cst_is "cloudflare: off" 200
+    cst_j "cloudflare/off, kept" '.enabled' false '.bouncer' deleted '.left_at_cloudflare' true '.cleanup' null
+    cst_t "cloudflare/off, kept: says the list stays frozen" '.message | test("stay at Cloudflare")'
+    check "cloudflare/off, kept: the bouncer is gone from CrowdSec" 0 "$(cst_cs bouncers list -o json | jq '[.[] | select(.name == "dcs-cloudflare-bouncer")] | length')"
+    check "cloudflare/off, kept: its key file too" no "$([[ -e "$CST/.data/crowdsec/cloudflare-bouncer.key" ]] && echo yes || echo no)"
+    check "cloudflare/off, kept: the list and the rule are still at Cloudflare" "1 1" "$(cfb_st '[.lists[][]] | length') $(cfb_st '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans")] | length')"
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/off, kept: the status" '.enabled' false '.health' off '.left_at_cloudflare' true '.error' null
+    local pulls; pulls=$(cfb_st '.lapi_pulls')
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_crowdsec_cf_lib; _cfb_tick'
+    check "cloudflare/off: the loop does nothing" "$pulls" "$(cfb_st '.lapi_pulls')"
+    # the clean-up afterwards (the confirm's second choice)
+    cst_call admin POST /crowdsec/cloudflare/disable '{"cleanup": true}'
+    cst_is "cloudflare: clean up" 200
+    cst_j "cloudflare/cleanup" '.success' true '.cleanup.ok' true '.left_at_cloudflare' false
+    cst_t "cloudflare/cleanup: names what was removed" '.cleanup.removed | join(",") | test("custom rule") and test("dcs_crowdsec_bans")'
+    check "cloudflare/cleanup: no list and no rule at Cloudflare" "0 0" "$(cfb_st '[.lists[][]] | length') $(cfb_st '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans")] | length')"
+    check "cloudflare/cleanup: the owner's own rules are not touched" 0 "$(cfb_st '[.rulesets[].rules[] | select(.ref != "dcs_crowdsec_bans")] | length')"
+    # on, then off with the clean-up at once, and the token forgotten
+    cfb_fake /client/v4/zones/zone-example-test/rulesets/phases/http_request_firewall_custom/entrypoint -X GET -H "Authorization: Bearer $CFB_TOK" >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/enable '{}'
+    cst_is "cloudflare: on once more" 200
+    cfb_fake "/client/v4/zones/zone-example-test/rulesets/$(cfb_st '.rulesets["zone-example-test"].id')/rules" -X POST -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' \
+        -d '{"action":"block","expression":"ip.src eq 192.0.2.99","ref":"owner_rule"}' >/dev/null
+    cst_call admin POST /crowdsec/cloudflare/disable '{"cleanup": true, "forget_token": true}'
+    cst_j "cloudflare/off with clean-up" '.success' true '.token_forgotten' true '.left_at_cloudflare' false
+    check "cloudflare/off with clean-up: the owner's rule stays" owner_rule "$(cfb_st '[.rulesets[].rules[].ref] | join(",")')"
+    check "cloudflare/off with clean-up: the token is gone" 0 "$(cst_secrets_n 'CLOUDFLARE_BOUNCER_TOKEN.enc')"
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/after: off, no token, nothing left" '.enabled' false '.token.set' false '.left_at_cloudflare' false
+    # the token parked on the Secrets page under CLOUDFLARE_BOUNCER_TOKEN: the switch uses it when the field is left empty
+    cst_call admin POST /secrets/CLOUDFLARE_BOUNCER_TOKEN "{\"value\":\"$CFB_TOK\"}"
+    cst_is "cloudflare/secret: the token stored on the Secrets page" 200
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/secret: the status names it" '.token.set' true '.token.source' secret '.token.setting' CLOUDFLARE_BOUNCER_TOKEN
+    cst_call admin POST /crowdsec/cloudflare/enable '{}'
+    cst_is "cloudflare/secret: turned on with the secret, nothing pasted" 200
+    check "cloudflare/secret: …every call carried it" true "$(cfb_fake /_mock/state | jq --arg t "$CFB_TOK" '[.auth_seen[] | select(. != $t)] | length == 0')"
+    check "cloudflare/secret: …and the list was made" "198.51.100.31 198.51.100.32" "$(cfb_items)"
+    # a different token pasted while the secret exists replaces it (an unknown one is refused, the secret stays)
+    cst_call admin POST /crowdsec/cloudflare/verify '{"token":"cfbUNKNOWN_0123456789abcdefghijklmn"}'
+    cst_is "cloudflare/secret: another token is checked on its own" 400
+    cst_call admin POST /crowdsec/cloudflare/verify '{}'
+    cst_is "cloudflare/secret: …the secret still works" 200
+    cst_call admin POST /crowdsec/cloudflare/disable '{"cleanup": true}'
+    cst_j "cloudflare/secret: off, clean, the secret kept" '.cleanup.ok' true '.token_forgotten' false
+    check "cloudflare/secret: the secret is still on the Secrets page" 1 "$(cst_secrets_n 'CLOUDFLARE_BOUNCER_TOKEN.enc')"
+    check "cloudflare: the off switch is audited" yes "$(grep -q '"action":"auth.crowdsec_cloudflare_off"' "$CST/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+    cfb_tokenfree "after the off switch"
+    check "cloudflare: no other host was asked" 0 "$(grep -c 'refused by the test' "$CST/api-stderr.log" 2>/dev/null || true)"
+}
+
+cst_part_cloudflare() {
+    echo "CrowdSec page: push bans to Cloudflare (token rights, the list and the rule, the sync, repairs, errors, the off switch)"
+    if ! cst_cloudflare_setup; then check "cloudflare: the Cloudflare stand-in starts" yes no; cst_cloudflare_teardown; return; fi
+    cst_cloudflare_off
+    cst_cloudflare_refusals
+    cst_cloudflare_on
+    cst_cloudflare_sync
+    cst_cloudflare_errors
+    cst_cloudflare_offswitch
+    cst_cloudflare_teardown
+}
+
 cst_lane_run() {
     local name="$1" part t0=$SECONDS
     shift
@@ -9243,8 +9630,8 @@ cst_main() {
     mkdir -p "$CST_ROOT"
     # the stand-in is a script of 7000 lines and every docker call of every request starts it: from its bytecode that costs a third
     python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' "$CST_MOCK" "$CST_ROOT/mock.pyc" 2>/dev/null && CST_MOCK_RUN="$CST_ROOT/mock.pyc"
-    local -a lanes=("a:status allowlist alerts units" "b:bans" "c:settings" "d:notify" "e:services hub" "f:security" "g:large mediaapps" "h:plugin" "i:importbig")
-    [[ "${SMOKE_CS_LANES:-}" != 1 ]] || lanes=("all:status bans alerts allowlist services hub settings notify security units large plugin importbig mediaapps")
+    local -a lanes=("a:status allowlist alerts units" "b:bans" "c:settings" "d:notify" "e:services hub" "f:security" "g:large mediaapps" "h:plugin" "i:importbig" "j:cloudflare")
+    [[ "${SMOKE_CS_LANES:-}" != 1 ]] || lanes=("all:status bans alerts allowlist services hub settings notify security units large plugin importbig mediaapps cloudflare")
     for lane in "${lanes[@]}"; do
         name="${lane%%:*}"; want=""
         for part in ${lane#*:}; do

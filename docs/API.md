@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `436` in total.
+Every endpoint below is `442` in total.
 
 ## Access levels
 
@@ -282,6 +282,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/crowdsec/settings` | user | The default ban length CrowdSec uses, repeat-offender escalation and per-scenario lengths; says whether DCS can edit the file safely |
 | GET | `/crowdsec/notifications` | user | The Discord alert settings in force (webhook masked), what is wired, the placeholders for the message, and the last test/delivery outcome |
 | GET | `/crowdsec/plugin` | user | The Traefik bouncer plugin's settings (mode, how often it asks, how long it remembers, timeout, the status a banned visitor sees, trusted networks), the defaults and the limits |
+| GET | `/crowdsec/cloudflare` | user | Push bans to Cloudflare: on or off, the token (set or not, never its value), the zones and the list, the last pull and sync, how many addresses Cloudflare holds (read from Cloudflare at most once a minute), the error in plain words, the rights the token needs |
 | POST | `/crowdsec/trust` | admin | Add an address to the whitelist (body {ip}; defaults to the home public address and the caller) |
 | POST | `/crowdsec/unban-me` | user | Unban the caller: its client address and the home public address |
 | POST | `/crowdsec/notifications` | admin | Send CrowdSec's alerts to Discord: {webhook?, test?}. Turns the alerts on with the message settings in force (the shipped message on a fresh install), stores a webhook you pass, restarts CrowdSec and optionally posts a test message. |
@@ -305,6 +306,11 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/crowdsec/hub/install` | admin | Install a collection, scenario or parser from the hub: {type: collections\|scenarios\|parsers, name}; CrowdSec reloads afterwards |
 | POST | `/crowdsec/hub/remove` | admin | Remove an installed collection, scenario or parser: {type: collections\|scenarios\|parsers, name}; CrowdSec reloads afterwards |
 | POST | `/crowdsec/simulation` | admin | {scenario, enabled}: make one scenario alert-only (enabled true) or ban again; {global: true, enabled} switches the whole engine |
+| POST | `/crowdsec/cloudflare/verify` | admin | Check a Cloudflare token without changing anything: {token?} (else the stored one). Answers the zones it found, the rights that are missing (400) and the free plan's limits it would hit |
+| POST | `/crowdsec/cloudflare/enable` | admin | Turn Push bans to Cloudflare on: {token? (kept as the secret CLOUDFLARE_BOUNCER_TOKEN), capacity?, community?, domains?}. Checks the token's rights first (400 with what is missing, nothing changed), registers the bouncer dcs-cloudflare-bouncer in CrowdSec, makes the list dcs_crowdsec_bans and the blocking custom rule in each zone, and pushes the bans once |
+| POST | `/crowdsec/cloudflare/disable` | admin | Turn Push bans to Cloudflare off: the background sync stops, the bouncer dcs-cloudflare-bouncer is deleted in CrowdSec; {cleanup: true} also deletes the custom rule of each zone and the list at Cloudflare (otherwise they stay, frozen, with the last bans), {forget_token: true} deletes the stored token. Safe to repeat (cleanup after an earlier off) |
+| POST | `/crowdsec/cloudflare/sync` | admin | Sync with Cloudflare now (pull the bans, push them when they changed, read the list and the rules back and repair them) and answer the status |
+| POST | `/crowdsec/cloudflare/settings` | admin | Change how many addresses go to Cloudflare and which: {capacity? (1-500000; the free plan holds 10000), community? (also the community blocklist, within the capacity), domains? (the domains whose zones are protected; [] = all of this server's)}; a sync follows when it is on |
 | PUT | `/crowdsec/settings` | admin | Change the ban profile: {profile: {duration, range_duration, escalate: {enabled, max}, overrides: [{pattern, duration}]}, manual_duration, take_over}; validates with CrowdSec, restarts it and rolls back on failure |
 | PUT | `/crowdsec/notifications` | admin | Save and apply the Discord alert settings: {settings: {…any part…}, webhook_url?: "https://discord.com/api/webhooks/…", clear_custom_webhook?: true}; the URL is stored as a secret and never sent back |
 | PUT | `/crowdsec/notifications/digest` | admin | When the daily summary goes out: {hour: 0-23} or {hour: "off"} (CROWDSEC_DIGEST_HOUR in .env, local time) |
