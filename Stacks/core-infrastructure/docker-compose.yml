@@ -18,10 +18,14 @@ services:
     # The password lives in the secrets store as DCS_REDIS_PASSWORD, created on
     # first start by secrets_ensure_generated and injected only into the compose
     # process. No secret means plain redis-server — exactly today's behaviour.
+    # The image's entrypoint runs again on redis-server: it gives /data to the redis
+    # user and drops to it. Started as plain `redis-server` from sh it stayed root,
+    # and root without DAC_OVERRIDE cannot read the dump.rdb (0600, redis) an older
+    # container wrote: a restart loop at the first start after the update.
     command:
       - sh
       - -c
-      - 'exec redis-server $${DCS_REDIS_PASSWORD:+--requirepass "$$DCS_REDIS_PASSWORD"}'
+      - 'exec docker-entrypoint.sh redis-server $${DCS_REDIS_PASSWORD:+--requirepass "$$DCS_REDIS_PASSWORD"}'
     environment:
       - TZ=${TZ:-UTC}
       - DCS_REDIS_PASSWORD=${SECRETS_DCS_REDIS_PASSWORD:-}

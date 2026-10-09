@@ -84,6 +84,12 @@ for f in .templates/*/docker-compose.yml; do
     nnp_warn=$(( nnp_warn + $(_nnp_missing "$f" | grep -c .) ))
 done
 (( nnp_warn == 0 )) || echo "  WARNING: $nnp_warn services of the app templates run without no-new-privileges:true (counted, not failed)"
+# a hardened Redis (no DAC_OVERRIDE) must start redis-server through the image's entrypoint, which gives /data to the redis
+# user and drops to it; started from a shell it stays root and cannot read a dump.rdb (0600, redis) an older container wrote
+for f in "${NNP_CORE[@]}"; do
+    [[ -f "$f" ]] || continue
+    grep -nE "^[^#]*exec redis-server" "$f" | while IFS= read -r l; do echo "  $f:${l%%:*}: redis-server is started from a shell, past the image's entrypoint (exec docker-entrypoint.sh redis-server …)"; done | grep . && rc=1
+done
 
 echo "VM images: one list everywhere"
 if [[ -f vm-images/images.json ]]; then
