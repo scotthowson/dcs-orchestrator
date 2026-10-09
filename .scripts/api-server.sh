@@ -2900,9 +2900,17 @@ handle_stacks() {
     [[ "$_cf" == \{* ]] || _cf='{}'
     _bt=$(jq -c . "$BASE_DIR/.data/backup-stack-times.json" 2>/dev/null) || _bt='{}'; [[ "$_bt" == \{* ]] || _bt='{}'
     _rdir=$(_find_traefik_routes_dir 2>/dev/null) || _rdir=""
+    # a hub lists the stacks its member VMs run next to its own; the hub's folder of such a stack (its copy) is not
+    # looked at, the VM's entry stands for it
+    local remote="" _rn=""
+    if _fleet_has_members; then
+        remote=$(_fleet_remote_stacks_json); [[ "$remote" == \[* ]] || remote='[]'
+        _rn=$(jq -r '.[].name' <<< "$remote" 2>/dev/null)
+    fi
 
     local -a entries=()
     for stack in "${stacks[@]}"; do
+        [[ -n "$_rn" ]] && grep -qxF -- "$stack" <<< "$_rn" && continue
         local st
         st=$(_api_stack_status "$stack")
         local status="${st%%:*}"
@@ -2935,9 +2943,7 @@ handle_stacks() {
     json=$(printf '%s,' "${entries[@]}")
     json="[${json%,}]"
 
-    # a hub lists the stacks its member VMs run next to its own
-    if _fleet_has_members; then
-        local remote; remote=$(_fleet_remote_stacks_json); [[ "$remote" == \[* ]] || remote='[]'
+    if [[ -n "$remote" ]]; then
         # a member's stack replaces the hub's entry of the same name (a leftover folder on the hub)
         json=$(jq -c --argjson r "$remote" '($r | map(.name)) as $rn | (map(select(.name as $n | ($rn | index($n)) == null) | . + {placement: "hub"})) + $r' <<< "$json")
         _api_success "$(jq -nc --argjson s "$json" '{total: ($s | length), stacks: $s, local: ([$s[] | select(.placement == "hub")] | length), remote: ([$s[] | select(.placement == "vm")] | length)}')"
