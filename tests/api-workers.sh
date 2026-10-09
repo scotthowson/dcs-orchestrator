@@ -125,6 +125,24 @@ curl -s -m 1 --limit-rate 20M -o /dev/null -X POST -T "$W/big.bin" -H "Authoriza
 sleep 1.5
 check "upload: one cut off half way leaves nothing, no process" "0 0" "$(find "$W/backups" -name '.upload-*' 2>/dev/null | wc -l) $(pgrep -fc -- "^head -c 157286400" 2>/dev/null || true)"
 rm -f "$W/big.bin"
+# two fronts that reach one worker in the same instant: both connections wait in its queue, the worker (socat, one
+# connection at a time) takes one and closes the queue, and the other was reset after it had sent its request. That
+# front used to end with an empty answer; it must wait its turn (a lock per worker) and still be answered.
+mkdir -p "$W/slowrun"
+python3 - "$W/slowrun/w1.sock" <<'PYW' &
+import os, socket, sys, time
+p = sys.argv[1]
+s = socket.socket(socket.AF_UNIX); s.bind(p); s.listen(32)
+time.sleep(1.0)
+c, _ = s.accept(); s.close(); os.unlink(p)
+c.recv(65536); c.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{"ok": true}\n'); c.close()
+PYW
+_SW=$!
+for i in $(seq 1 40); do [[ -S "$W/slowrun/w1.sock" ]] && break; sleep 0.05; done
+for f in 1 2; do (printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_DIR="$W/slowrun" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout 30 bash "$W/.scripts/api-dispatch.sh" > "$W/slowrun/front$f.out" 2>/dev/null) & done
+wait "$_SW" 2>/dev/null; sleep 0.2
+for i in $(seq 1 100); do [[ -s "$W/slowrun/front1.out" && -s "$W/slowrun/front2.out" ]] && break; sleep 0.1; done
+check "two fronts at one worker at once: both answered" "yes yes" "$(for f in 1 2; do grep -q '"ok": true' "$W/slowrun/front$f.out" && printf 'yes ' || printf 'no '; done | sed 's/ $//')"
 # every worker busy (no socket to connect to): the request is answered by a process of its own, not refused
 mkdir -p "$W/norun"
 check "no free worker: answered all the same"      yes "$(printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_DIR="$W/norun" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout 20 bash "$W/.scripts/api-dispatch.sh" 2>/dev/null | grep -q '"ok": true' && echo yes || echo no)"

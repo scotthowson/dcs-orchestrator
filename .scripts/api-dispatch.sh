@@ -24,7 +24,7 @@ peer="${SOCAT_PEERADDR:-${NCAT_REMOTE_ADDR:-}}"
 # the buffered request lives in the run directory (the API's own, mode 700): a name without starting a process for it
 tmp="$d/req-$$-$RANDOM$RANDOM"
 ( umask 077; : > "$tmp" ) 2>/dev/null || answer "503 Service Unavailable" "" "No room for the request"
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp" "$tmp.e"' EXIT
 # the request, buffered: the line and the headers (up to the blank line), then the body. socat's -T does nothing for a
 # program it runs in its own place (nofork): the patience is here: 10 s a line, 30 s for the whole head, 30 s for the body
 cl=0; n=0; req=""; hd=$(( EPOCHSECONDS + 30 ))
@@ -83,6 +83,11 @@ case "$path" in */stream) oneshot ;; esac
 # again), so the list is read on every round. A burst of dashboard polls is served by the pool one after the other (a
 # worker takes a request every few hundredths of a second); a second without a free worker is "all busy" (a budget of time,
 # not of rounds: twenty rounds over busy workers' sockets took four or five seconds)
+# One front talks to a worker at a time (a lock beside its socket): two fronts that connect in the same instant both land
+# in the worker's queue, socat takes one connection and closes the queue, and the other is reset after it sent its
+# request — an empty answer for a request nobody read. Under a burst on a small VM that was most of them.
+lk=""
+command -v flock >/dev/null 2>&1 && lk=yes
 start=$RANDOM; t_end="${EPOCHREALTIME/[.,]/}"; [[ -n "$t_end" ]] || t_end=$(date +%s%6N); t_end=$(( t_end + 1000000 ))
 while :; do
     t1="${EPOCHREALTIME/[.,]/}"; [[ -n "$t1" ]] || t1=$(date +%s%6N); (( t1 < t_end )) || break
@@ -90,11 +95,21 @@ while :; do
     for (( i = 0; i < nw; i++ )); do
         s="${socks[(start + i) % nw]}"
         [[ -S "$s" ]] || continue
+        if [[ -n "$lk" ]]; then
+            exec {lfd}>>"$s.lock" 2>/dev/null || continue
+            flock -n "$lfd" || { exec {lfd}>&-; continue; }
+        fi
         t0="${EPOCHREALTIME/[.,]/}"; [[ -n "$t0" ]] || t0=$(date +%s%6N)
         # -t: the request is sent at once (EOF on the file), then socat must wait for the answer; its default is half a second
-        socat -t 900 -T 900 STDIO "UNIX-CONNECT:$s" < "$tmp" 2>/dev/null && exit 0
-        # a refusal (the worker is busy, or between two connections) ends in a few milliseconds and nothing was exchanged: try the next;
-        # anything that took longer had the worker's attention and is not sent again (a POST must not run twice)
+        socat -t 900 -T 900 STDIO "UNIX-CONNECT:$s" < "$tmp" 2>"$tmp.e" && exit 0
+        [[ -n "$lk" ]] && exec {lfd}>&-
+        # refused at connect() (the worker is busy, or between two connections): nothing was exchanged, try the next one —
+        # however long the refusal took (on a loaded small VM starting socat alone can take longer than the rule below allows,
+        # and the request then ended with an empty answer)
+        err=""; read -r err < "$tmp.e" 2>/dev/null
+        [[ "$err" == *" E connect("* ]] && continue
+        # any other failure that took longer than a refusal had the worker's attention and is not sent again (a POST must
+        # not run twice)
         t1="${EPOCHREALTIME/[.,]/}"; [[ -n "$t1" ]] || t1=$(date +%s%6N)
         (( (t1 - t0) / 1000 < 150 )) || exit 0
     done
