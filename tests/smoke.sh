@@ -608,6 +608,13 @@ _rlc() { : > "$WORK/routes-lookups"; _lib eval '_find_traefik_routes_dir() { ech
 mkdir -p "$WORK/Stacks/rl-a"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/rl-a/docker-compose.yml"
 _rl1=$(_rlc); mkdir -p "$WORK/Stacks/rl-b"; cp "$WORK/Stacks/rl-a/docker-compose.yml" "$WORK/Stacks/rl-b/"
 check "stack list: the routes lookup does not grow with the stacks" "$_rl1" "$(_rlc)"
+# a restart a request asked for waits until that request wrote its answer (an update's answer is built after the restart is
+# scheduled: the restart used to kill it, and the dashboard got nothing for an update that had worked)
+sleep 2 & _RWP=$!
+_rw0=$(date +%s%N); _lib _api_restart_wait "$_RWP"; _rw1=$(date +%s%N)
+check "restart: waits for the request's answer, then a second" yes "$( (( (_rw1 - _rw0) / 1000000 >= 2900 )) && echo yes || echo "no ($(( (_rw1 - _rw0) / 1000000 )) ms)")"
+_rw0=$(date +%s%N); _lib _api_restart_wait; _rw1=$(date +%s%N)
+check "restart: without a request, a second" yes "$( (( (_rw1 - _rw0) / 1000000 < 2500 )) && echo yes || echo "no ($(( (_rw1 - _rw0) / 1000000 )) ms)")"
 # a backup the machine rebooted under leaves its staging folder and half-written archive: tidied once no backup runs
 _BL="$WORK/bk-left"; mkdir -p "$_BL/.dcs-backup-staging-Docker-Compose-Backup-x/part" "$WORK/bk-run"; head -c 4096 /dev/zero > "$_BL/Docker-Compose-Backup-x.tar.gz.partial"; touch "$_BL/Docker-Compose-Backup-old.tar.gz"
 sleep 30 & _BLP=$!

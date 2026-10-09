@@ -11573,6 +11573,7 @@ _recovery_restore_job() {
     local bundle="$1" pass="$2" restart="${3:-false}" remove="${4:-false}" jp
     RCV_JSON=""; RCV_ERROR=""
     rm -f "$RECOVERY_RESTORE_RESULT" "$RECOVERY_RESTORE_RESULT.tmp" 2>/dev/null
+    local _rq="$BASHPID"
     (
         # the connection this request came on may drop while the stacks are down: nothing of that reaches the restore
         trap '' HUP PIPE
@@ -11581,7 +11582,7 @@ _recovery_restore_job() {
         _recovery_restore "$bundle" "$pass" || ok=false
         [[ "$remove" == true ]] && rm -f -- "$bundle"
         UPD_RESTART_METHOD="" UPD_RESTART_ETA=0 UPD_RESTART_HINT=""
-        if [[ "$ok" == true && "$restart" == true ]]; then _api_restart_schedule; else read -r UPD_RESTART_METHOD _ <<< "$(_api_restart_method)"; fi
+        if [[ "$ok" == true && "$restart" == true ]]; then _api_restart_schedule after-answer "$_rq"; else read -r UPD_RESTART_METHOD _ <<< "$(_api_restart_method)"; fi
         umask 077
         jq -nc --argjson ok "$ok" --arg e "$RCV_ERROR" --arg f "${bundle##*/}" --argjson st "${RCV_STACKS:-0}" --argjson us "${RCV_USERS:-0}" \
             --argjson ad "$(_upd_json_list ${RCV_APPDATA})" --argjson w "${RCV_WARNINGS:-[]}" --argjson stop "${RCV_STOPPED:-[]}" --argjson start "${RCV_STARTED:-[]}" \
@@ -12111,17 +12112,33 @@ _api_relaunch_listener() {
 
 # Restart the listener once this response is on its way. Sets
 # UPD_RESTART_METHOD, UPD_RESTART_ETA (seconds) and UPD_RESTART_HINT.
+# _api_restart_wait [PID] — the pause before a scheduled restart: a second, and with PID (the request that asked for the
+# restart) until that request has written its answer and a second more for the front to pass it on, a minute at most.
+# The answer of an update is built after the restart is scheduled: on a small VM some releases behind, its release notes
+# alone took seconds to escape, the restart came first and killed the worker, and the dashboard got no answer at all
+# for an update that had worked.
+_api_restart_wait() {
+    local w="${1:-}" i
+    sleep 1
+    [[ "$w" =~ ^[0-9]+$ ]] || return 0
+    for (( i = 0; i < 300; i++ )); do kill -0 "$w" 2>/dev/null || break; sleep 0.2; done
+    sleep 1
+}
+# _api_restart_schedule [after-answer [PID]] — after-answer: called by a request handler that answers afterwards (the restart
+# waits for that answer; PID when the call comes from a job of the handler); without it (the unattended self-update) the
+# restart comes after a second
 _api_restart_schedule() {
-    local method pid sig
+    local method pid sig me=""
+    [[ "${1:-}" == after-answer ]] && me="${2:-$BASHPID}"
     read -r method pid sig <<< "$(_api_restart_method)"
     UPD_RESTART_METHOD="$method" UPD_RESTART_ETA=0 UPD_RESTART_HINT=""
     case "$method" in
         reexec)
-            ( sleep 1; kill "-${sig:-USR1}" "$pid" ) </dev/null >/dev/null 2>&1 &
+            ( _api_restart_wait "$me"; kill "-${sig:-USR1}" "$pid" ) </dev/null >/dev/null 2>&1 &
             disown
             UPD_RESTART_ETA=5 ;;
         systemd)
-            ( sleep 1; kill -KILL "$pid" ) </dev/null >/dev/null 2>&1 &
+            ( _api_restart_wait "$me"; kill -KILL "$pid" ) </dev/null >/dev/null 2>&1 &
             disown
             UPD_RESTART_ETA=15
             UPD_RESTART_HINT="An older listener is running: systemd brings the service back in about 10 seconds" ;;
@@ -12319,7 +12336,7 @@ handle_system_update_apply() {
 
     UPD_RESTART_METHOD="" UPD_RESTART_ETA=0 UPD_RESTART_HINT=""
     if [[ "$restart_after" == "true" ]]; then
-        _api_restart_schedule
+        _api_restart_schedule after-answer
     else
         local method pid
         read -r method pid _ <<< "$(_api_restart_method)"
@@ -12419,7 +12436,7 @@ handle_system_update_rollback() {
 
     UPD_RESTART_METHOD="" UPD_RESTART_ETA=0 UPD_RESTART_HINT=""
     if [[ "$restart_after" == "true" ]]; then
-        _api_restart_schedule
+        _api_restart_schedule after-answer
     else
         local method pid
         read -r method pid _ <<< "$(_api_restart_method)"
@@ -12446,7 +12463,7 @@ handle_system_update_rollback() {
 # POST /system/restart — Restart the API listener without root: it re-executes itself (older listeners under systemd are relaunched by the unit)
 handle_system_restart() {
     if ! _api_check_admin; then _api_error 403 "Admin access required"; return; fi
-    _api_restart_schedule
+    _api_restart_schedule after-answer
     _audit_log "API_RESTART" "method=$UPD_RESTART_METHOD"
     if [[ "$UPD_RESTART_METHOD" == "manual" ]]; then
         _api_success "{\"restarting\": false, \"method\": \"manual\", \"eta_seconds\": 0, \"hint\": \"$(_api_json_escape "$UPD_RESTART_HINT")\"}"
@@ -26586,7 +26603,7 @@ handle_fleet_self_update() {
         ( sleep 1; sudo -n systemd-run --quiet --collect --unit="dcs-unit-refresh-$(date +%s)" /bin/bash -c "DCS_UNATTENDED=true '$BASE_DIR/.scripts/install-service.sh' >/dev/null 2>&1; systemctl restart dcs-api.service" ) </dev/null >/dev/null 2>&1 &
         disown
     else
-        _api_restart_schedule
+        _api_restart_schedule after-answer
     fi
 }
 _FLEET_BUNDLE_TOKENS=""
