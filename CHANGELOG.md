@@ -3,6 +3,32 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+
+- **Two-factor sign-in could be skipped:** the temporary token given after the password step was accepted as a full session; it now works for `POST /auth/totp/validate` alone.
+- **A viewer or bot could reach a member's admin routes through the hub:** the hub now refuses (400) an inner path with `//`, a `.` or `..` part, a trailing `/`, `%2e`, `%2f`, `%5c` or a backslash before it checks the caller's role.
+- **`POST /compose/validate` showed `.env` values to viewers:** it is now admin-only, and validation (this route and `POST /stacks/{stack}/compose/validate`) never fills in `${VARS}` or reads `env_file:` into the answer (`--no-interpolate --no-env-resolution`, or an empty environment where compose lacks the second flag).
+- **A client could stall the API before signing in:** the front reads a body for 30 s at most, drops a head that takes more than 30 s, and refuses a `Content-Length` over `API_MAX_BODY_SIZE` (1 MB) with 413 before reading it (the setup wizard's restore keeps its 128 MB; uploads keep streaming); the one-process path drops a slow head the same way.
+- **The join-code bundle carried secrets:** it is now built from the files git tracks (the files of the install where it is no checkout), never a `.env` of any kind, stacks, accounts, data or compose history; a snapshot restore keeps the old root `.env` as `.data/.env.restored` (private) instead of `.env.restored`.
+- **The master key leaked into backups and leftovers:** a recovery restore keeps the configuration before it in `.data/pre-restore/config-<time>.tar.gz` (mode 600, without the master key, never in a backup; older `.snapshots/pre-restore-*` files are left out of backups too); a recovery bundle's staging folder is removed as soon as the process that made it is gone (killed included), and the hourly round removes staging, restore and upload leftovers older than 6 hours.
+- **Restoring a backup could write into any empty host folder its manifest named:** an App-Data part is restored only to the path where the stack keeps its App-Data on this machine, and a restore never leaves a setuid or setgid file behind.
+- **IPv6 clients behind a trusted proxy shared one lockout:** an IPv6 `X-Forwarded-For` address is now the client's address, and address lists match IPv6 exactly (case-insensitive).
+- **Parallel sign-ins beat the lockout and rate limits:** a sign-in attempt is counted under a lock before its password is checked (a success resets the count), and every rate window counts under a lock.
+
+### Fixed
+
+- Concurrent `.env` saves (settings, the raw editor, keys written by the API) could lose one another or empty the file: they now go one at a time through one writer (lock, temp file, checked rename, mode kept).
+- Restoring a volume no longer empties it when its safety copy could not be made: that volume is skipped with a warning; a restore checks first that the copies of the volumes fit.
+- Backup retention no longer deletes complete backups to keep incomplete ones: the two are counted apart, newest first by the time in the file name.
+- Auth files (accounts, sessions, invites) are written to a temp file and renamed, and not at all when their lock does not come.
+- The updater could delete the rollback tag it had just made: backup tags are now ordered by name, not by the date of the commit they point at.
+- A manual update or rollback now waits for the unattended update (409 while it runs), and each update keeps its copies in a folder of its own.
+- A full restore no longer overwrites `VERSION` with the archive's.
+- The request log and both audit logs no longer grow forever: the hourly round keeps their last `API_LOG_MAX_LINES` (50000) lines.
+- A busy worker pool sends a request to a process of its own after 1 s (was up to 4-5 s); an install path too long for the workers' sockets runs without the pool (with a warning) instead of spinning, and a worker pauses when its socket cannot be bound.
+
 ## [4.0.41] - 2026-10-09
 
 ### Fixed
