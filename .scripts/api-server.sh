@@ -15032,8 +15032,9 @@ handle_snapshot_restore() {
     # SECURITY: Do NOT restore root .env — it could contain API_AUTH_ENABLED=false
     # or API_BIND=0.0.0.0 which would compromise security. Admin must manually
     # reconfigure these settings after restore.
+    # (it is kept for the admin, private, in .data: never next to the code, which the join-code bundle carries)
     if [[ -f "$tmpdir/root.env" ]]; then
-        cp "$tmpdir/root.env" "$BASE_DIR/.env.restored" 2>/dev/null
+        (umask 077; mkdir -p "$BASE_DIR/.data" && cp "$tmpdir/root.env" "$BASE_DIR/.data/.env.restored") 2>/dev/null
     fi
 
     # Restore stacks (with compose security scanning); rejected stacks are
@@ -30139,11 +30140,27 @@ handle_fleet_bundle() {
         [[ "$purpose" == "bundle" && -n "$(_fleet_member "$(jq -r '.member // ""' <<< "$entry")")" ]] || { _api_error 403 "That code does not open the bundle"; return; }
     fi
     tmp=$(mktemp "${TMPDIR:-/tmp}/dcs-bundle-XXXXXX.tgz") || { _api_error 500 "no temp file"; return; }
-    if ! tar -C "$BASE_DIR" -czf "$tmp" --exclude='./.git' --exclude='./.data' --exclude='./.api-auth' --exclude='./.secrets' --exclude='./logs' --exclude='./Stacks' \
-            --exclude='./App-Data' --exclude='./node_modules' --exclude='./.env' --exclude='./.env.bak' --exclude='./.env.backup*' --exclude='./*.log' --exclude='./.plugins/*/data' \
-            --exclude='./scratchpad' --exclude='./.snapshots' --exclude='./backups' . 2>/dev/null; then
-        rm -f "$tmp"; _api_error 500 "Could not pack the bundle"; return
+    # the files of the code, by name: what git tracks (an install that is no git checkout: its files), never a .env of any
+    # kind, the stacks, the accounts, the data or the history of a compose file — a list of what to leave out let every new
+    # file in (a restore's .env.restored, .compose-history)
+    local list f top
+    list=$(mktemp "${TMPDIR:-/tmp}/dcs-bundle-list-XXXXXX") || { rm -f "$tmp"; _api_error 500 "no temp file"; return; }
+    top=$(git -C "$BASE_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+    {
+        if [[ -n "$top" && "$(cd "$top" && pwd -P)" == "$(cd "$BASE_DIR" && pwd -P)" ]]; then git -C "$BASE_DIR" ls-files -z 2>/dev/null
+        else (cd "$BASE_DIR" && find . -type f -print0 2>/dev/null | sed -z 's|^\./||'); fi
+    } | while IFS= read -r -d '' f; do
+        case "$f" in
+            .git/*|.data/*|.api-auth/*|.secrets/*|logs/*|Stacks/*|App-Data/*|node_modules/*|scratchpad/*|.snapshots/*|backups/*|.compose-history/*|*/.compose-history/*) continue ;;
+            .env.example) ;;
+            .env|.env.*|*.log|.plugins/*/data/*) continue ;;
+        esac
+        [[ -f "$BASE_DIR/$f" ]] && printf './%s\0' "$f"
+    done > "$list"
+    if ! tar -C "$BASE_DIR" -czf "$tmp" --null --no-recursion -T "$list" 2>/dev/null; then
+        rm -f "$tmp" "$list"; _api_error 500 "Could not pack the bundle"; return
     fi
+    rm -f "$list"
     size=$(stat -c '%s' "$tmp" 2>/dev/null || echo 0)
     printf 'HTTP/1.1 200 OK\r\n'
     printf 'Content-Type: application/gzip\r\n'
