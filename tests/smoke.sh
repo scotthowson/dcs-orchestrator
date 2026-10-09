@@ -608,6 +608,16 @@ _rlc() { : > "$WORK/routes-lookups"; _lib eval '_find_traefik_routes_dir() { ech
 mkdir -p "$WORK/Stacks/rl-a"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/rl-a/docker-compose.yml"
 _rl1=$(_rlc); mkdir -p "$WORK/Stacks/rl-b"; cp "$WORK/Stacks/rl-a/docker-compose.yml" "$WORK/Stacks/rl-b/"
 check "stack list: the routes lookup does not grow with the stacks" "$_rl1" "$(_rlc)"
+# a lock left by a fleet tick that a reboot cut off: the hub's fleet work (member checks, the VMs' App-Data mounts,
+# routes) waited until it was ten minutes old after every reboot
+_btime=$(awk '/^btime/{print $2}' /proc/stat)
+mkdir -p "$WORK/stale-lock"; touch -d "@$(( _btime - 60 ))" "$WORK/stale-lock"
+check "fleet lock: one from before the boot is abandoned" yes "$(_lib _lock_before_boot "$WORK/stale-lock" && echo yes || echo no)"
+check "fleet loop: a tick runs past it at once" ran "$(_lib eval 'FLEET_LOOP_LOCK="$BASE_DIR/stale-lock"; _fleet_has_members() { return 0; }; _fleet_watch() { echo ran > "$BASE_DIR/tick.out"; }
+    _fleet_relay_tokens_push() { :; }; _fleet_domain_push() { :; }; _fleet_routes_write_local() { :; }; _fleet_routes_push_members() { :; }; _fleet_loop_tick; wait'; cat "$WORK/tick.out" 2>/dev/null)"
+mkdir -p "$WORK/stale-lock"; touch "$WORK/stale-lock"
+check "fleet lock: one taken since the boot is not" no "$(_lib _lock_before_boot "$WORK/stale-lock" && echo yes || echo no)"
+rm -rf "$WORK/stale-lock" "$WORK/tick.out"
 # an on-demand container started some other way is announced to Sablier so it falls asleep; an announcement Sablier did
 # not take (its server not listening yet, right after a boot) is tried again on the next loop instead of being taken as done
 _sbt() { _lib eval 'SABLIER_TRACK_FILE="$BASE_DIR/sab-tracked.json"; _sablier_names() { echo od-app; }; _sablier_blocks_for() { :; }; timeout() { shift; "$@"; }

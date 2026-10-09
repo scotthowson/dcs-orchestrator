@@ -25816,6 +25816,13 @@ _fleet_routes_push_members() {
 # subshell of its own, so the metrics loop never waits on a member that stalls; one tick at a time (a mkdir lock, taken over
 # when abandoned for ten minutes). Each part still waits for its own children (_fleet_wait_children) inside the tick.
 FLEET_LOOP_LOCK="${FLEET_LOOP_LOCK:-$BASE_DIR/.data/fleet-loop.lock}"
+# _lock_before_boot PATH — a lock (a directory) made before this machine started: whatever held it died with the reboot
+_lock_before_boot() {
+    local bt="" k v m
+    while read -r k v; do [[ "$k" == btime ]] && { bt="$v"; break; }; done < /proc/stat 2>/dev/null
+    m=$(stat -c %Y "$1" 2>/dev/null) || return 1
+    [[ "$bt" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ ]] && (( m < bt ))
+}
 _fleet_loop_tick() {
     if ! _fleet_has_members; then
         _fleet_routes_remove_local
@@ -25826,7 +25833,9 @@ _fleet_loop_tick() {
     local age
     if [[ -d "$FLEET_LOOP_LOCK" ]]; then
         age=$(( $(date +%s) - $(stat -c %Y "$FLEET_LOOP_LOCK" 2>/dev/null || echo 0) ))
-        (( age < 600 )) && return 0
+        # a tick cut off by a reboot left its lock: after the reboot the hub watched nothing (no member checks, no VM
+        # App-Data mounts, no routes) until the lock was ten minutes old
+        (( age < 600 )) && ! _lock_before_boot "$FLEET_LOOP_LOCK" && return 0
         rm -rf "$FLEET_LOOP_LOCK" 2>/dev/null
     fi
     mkdir -p "$(dirname "$FLEET_LOOP_LOCK")" 2>/dev/null
@@ -27840,7 +27849,7 @@ _fleet_appdata_lock() {
     mkdir -p "$FLEET_APPDATA_STATE_DIR" 2>/dev/null || return 1
     mkdir "$l" 2>/dev/null && return 0
     age=$(( $(date +%s) - $(stat -c %Y "$l" 2>/dev/null || echo 0) ))
-    (( age > 180 )) || return 1
+    (( age > 180 )) || _lock_before_boot "$l" || return 1
     rmdir "${l:?}" 2>/dev/null || true
     mkdir "$l" 2>/dev/null
 }
