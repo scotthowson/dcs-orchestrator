@@ -33131,7 +33131,13 @@ handle_sse_stream() {
     # away (the next printf fails, or SIGPIPE ends the handler).
     local events_pid="" chat_pid="" _chat_on="" _sp_ids="" id
     local -a _sp_pids=()
-    _sse_cleanup() { kill "${events_pid:-}" "${chat_pid:-}" "${_sp_pids[@]}" 2>/dev/null; exit 0; }
+    # this handler's own PID, taken here: inside a command started with & (below) $BASHPID is that command's own PID, and
+    # `tail --pid` / the VM forwarders then watched themselves and outlived the client for good
+    local _me="$BASHPID"
+    # the helpers go when the stream ends. The loop below ends on a failed write and calls this itself, while the PIDs are
+    # still in scope: socat starts the handler with SIGPIPE ignored, so the PIPE trap never fires, and the EXIT trap runs
+    # after this function returned (its locals gone)
+    _sse_cleanup() { local _p; for _p in "${events_pid:-}" "${chat_pid:-}" "${_sp_pids[@]}"; do [[ -n "$_p" ]] && kill "$_p" 2>/dev/null; done; exit 0; }
     trap '_sse_cleanup' EXIT PIPE TERM INT
     # a hub: one VM's docker events instead of its own (?member=id), or its own plus every VM's (?fleet=1)
     if _fleet_has_members; then
@@ -33156,7 +33162,7 @@ handle_sse_stream() {
     _chat_lib
     if _chat_stream_wanted; then
         _chat_on=1; _chat_touch
-        tail -n0 -F --pid="$BASHPID" "$CHAT_DIR/live.jsonl" 2>/dev/null > >(while IFS= read -r chat_line; do
+        tail -n0 -F --pid="$_me" "$CHAT_DIR/live.jsonl" 2>/dev/null > >(while IFS= read -r chat_line; do
             [[ "$chat_line" == \{* ]] || continue
             printf 'event: chat\ndata: %s\n\n' "$chat_line" 2>/dev/null || exit 0
         done) &
@@ -33165,7 +33171,7 @@ handle_sse_stream() {
     for id in $_sp_ids; do
         [[ "$id" =~ ^[a-z0-9-]{1,40}$ ]] || continue
         # one VM asked for: its own load and container counts too, not the hub's
-        _fleet_stream_member "$id" "$([[ -n "${QUERY_PARAMS[member]:-}" ]] && echo true || echo false)" "$BASHPID" &
+        _fleet_stream_member "$id" "$([[ -n "${QUERY_PARAMS[member]:-}" ]] && echo true || echo false)" "$_me" &
         _sp_pids+=("$!")
     done
 
@@ -33217,6 +33223,7 @@ handle_sse_stream() {
         iteration=$((iteration + 1))
         sleep 5
     done
+    _sse_cleanup
 }
 
 # =============================================================================

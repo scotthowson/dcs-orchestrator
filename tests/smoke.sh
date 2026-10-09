@@ -9373,6 +9373,15 @@ check "chat: …which still gets its metrics"      yes "$(grep -q '^event: metri
 check "chat: an open stream keeps its person online" yes "$(ch_req "$CHA" GET /chat/presence | body_of | jq -r 'if any(.online[]; .user == "austin") then "yes" else "no" end')"
 sleep 1
 check "chat: a closed stream leaves no reader behind" 0 "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl" | wc -l)"
+# …also when the dashboard goes away as it does for real: socat starts the handler with SIGPIPE ignored, so the stream
+# ends on a failed write (no signal, no timeout); the reader of the room and its tail went on for good (tail watched
+# its own PID), one pair per closed dashboard
+( trap '' PIPE; { printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHU"; sleep 20; } | env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request 2>/dev/null | head -c 64 >/dev/null ) &
+_sse_gone=$!
+for _ in $(seq 1 30); do [[ -n "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl")" ]] && break; sleep 0.2; done
+for _ in $(seq 1 60); do [[ -z "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl")" ]] && break; sleep 0.25; done
+check "chat: a dashboard that left (failed write) leaves no reader behind" 0 "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl" | wc -l)"
+pkill -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl" 2>/dev/null; kill "$_sse_gone" 2>/dev/null; wait "$_sse_gone" 2>/dev/null
 
 # the off switch
 check "chat: a bad value for the switch is refused" 400 "$(ch_req "$CHA" POST /config '{"CHAT_ENABLED":"maybe"}' | status_of)"
