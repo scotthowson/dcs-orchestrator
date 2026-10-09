@@ -73,6 +73,7 @@ Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.
 | Write a stack `.env` key | `_envfile_set FILE KEY VALUE [bash\|compose]` (quoted, in place) | `api-server.sh` | — |
 | Quote a value for `.env` | `envfile_quote VALUE [bash\|compose]` | `.lib/envfile.sh` | — |
 | Now, as ISO 8601 UTC | `_api_now_iso`; epoch seconds are plain `date +%s` | `api-server.sh` | 52 inline `date -u '+%Y-%m-%dT%H:%M:%SZ'`, the wrapper `_api_now_epoch` |
+| Is version A at or after B | `_version_ge A B` (`sort -V`) | `api-server.sh` | 2 inline `sort -V \| tail` comparisons (kernel, Docker engine), the unused `_cs_version_ge` |
 | Is a container running | `_container_running NAME` | `api-server.sh` | 12 inline `docker inspect -f '{{.State.Running}}'` tests |
 | A container's label | `_container_label NAME LABEL` | `api-server.sh` | 13 inline compose-label inspects |
 | Run cscli in CrowdSec | `_cs_run OUTVAR ARGS…` (stdout into OUTVAR, stderr into `CS_ERR`, 25 s); `_cs_pipe OUTVAR TEXT ARGS…` (the same with TEXT on stdin, `docker exec -i`, 60 s) | `.lib/crowdsec.sh` | — |

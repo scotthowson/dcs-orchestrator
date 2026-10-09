@@ -9,7 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Internal consolidation, no behaviour change.** Where the server had several helpers, or inline copies, for one job,
   it now has one: reading a `.env` key (`envfile_get`), a key over every stack's `.env` (`_stack_envs_first`), writing a
-  root `.env` key (`_api_env_write`, which `POST /config` copied), the ISO time now (`_api_now_iso`), whether a container
+  root `.env` key (`_api_env_write`, which `POST /config` copied), the ISO time now (`_api_now_iso`), comparing versions (`_version_ge`), whether a container
   runs (`_container_running`) and its labels (`_container_label`), the accounts and sessions locks
   (`_api_with_auth_lock`), starting a detached job (`_api_job_launch`), the update history (`_update_history_add`), the
   `.env` editor's parser, the Traefik stack's routes folder (`_traefik_stack_routes_dir`), the network connect/disconnect and schedule delete/toggle handlers, the compose backup of a
@@ -33,9 +33,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `plugins_list`, `plugins_get`, `plugins_install`, `plugins_remove`, `plugins_enable`, `plugins_disable`,
     `plugins_run_hook`, `plugins_list_templates`, `plugins_validate` (`start.sh` uses `plugins_init` and `plugins_scan`;
     the API manages plugins itself).
-  - `secrets_list`, `secrets_export_bundle`, `secrets_import_bundle`, `_fleet_save`, `_cs_prune_backups`,
-    `_mt_human_size`, `_sm_print`, `_sm_get_stack_containers`, and `ntfy-status.sh`'s `get_container_memory_usage`,
-    `get_container_cpu_usage` and `check_resource_usage`.
+  - `secrets_list`, `secrets_export_bundle`, `secrets_import_bundle`, `_fleet_save`, `_fleet_member_public`,
+    `_cs_prune_backups`, `_cs_version_ge`, `_mt_human_size`, `_sm_print`, `_sm_get_stack_containers`, and
+    `ntfy-status.sh`'s `get_container_memory_usage`, `get_container_cpu_usage` and `check_resource_usage`.
+
 ## [4.0.42] - 2026-10-09
 
 ### Security

@@ -423,8 +423,6 @@ _cs_version_number() {
     return 0
 }
 _cs_version_full() { _cs_cache_get version 3600 2>/dev/null || true; }
-# _cs_version_ge A B — dotted versions, numeric
-_cs_version_ge() { [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" == "$2" ]]; }
 
 # =============================================================================
 # jq building blocks shared by the readers

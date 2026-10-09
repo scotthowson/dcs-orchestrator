@@ -1108,6 +1108,9 @@ _api_write_auth_file() {
     fi
 }
 
+# _version_ge A B — true when version A sorts at or after B (sort -V: 1.10 after 1.9, 6.8.0-45 after 6.8.0-9)
+_version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n 1)" == "$1" ]]; }
+
 # _api_now_iso — the time now, UTC, as 2026-10-08T21:30:00Z: every ISO timestamp the API writes (the time as epoch seconds is
 # plain `date +%s`)
 _api_now_iso() {
@@ -13125,7 +13128,7 @@ _os_reboot_state() {
             flav=$(sed -E 's/^[0-9]+(\.[0-9]+)*(-[0-9]+)?//' <<< "$kr")
             newest=$(for out in "$boot"/vmlinuz-*; do [[ -e "$out" ]] && printf '%s\n' "${out##*/vmlinuz-}"; done \
                 | awk -v s="$flav" '{ v = substr($0, 1, length($0) - length(s)) } substr($0, length(v) + 1) == s && v ~ /^[0-9]+(\.[0-9]+)*(-[0-9]+)?$/' | sort -V | tail -n 1)
-            if [[ -n "$newest" && -n "$kr" && "$newest" != "$kr" && "$(printf '%s\n%s\n' "$kr" "$newest" | sort -V | tail -n 1)" == "$newest" ]]; then
+            if [[ -n "$newest" && -n "$kr" && "$newest" != "$kr" ]] && _version_ge "$newest" "$kr"; then
                 R_REQUIRED=true; R_REASON="Linux $newest is installed, $kr is running"; R_PKGS="linux-image-$newest"; return 0
             fi
             # no sign either way is only an answer where one of them could have shown up
@@ -24783,7 +24786,7 @@ _docker_engine_json() {
     pm=$(_detect_pkg_manager 2>/dev/null || echo unknown)
     src=$(_docker_engine_source)
     cand=$(_docker_engine_candidate); [[ -f "$BASE_DIR/.data/docker-engine-candidate.json" ]] || checking=true
-    if [[ -n "$ver" && -n "$cand" && "$cand" != "$ver" && "$(printf '%s\n%s\n' "$ver" "$cand" | sort -V | tail -1)" == "$cand" ]]; then upgradable=true; fi
+    if [[ -n "$ver" && -n "$cand" && "$cand" != "$ver" ]] && _version_ge "$cand" "$ver"; then upgradable=true; fi
     { [[ "$(id -u)" -eq 0 ]] || sudo -n true 2>/dev/null; } && sudo_ready=true
     major="${ver%%.*}"; [[ "$major" =~ ^[0-9]+$ ]] || major=0
     if [[ "$src" == "docker.io" ]] && (( major < 27 )) && docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q apparmor && [[ -f /sys/module/apparmor/parameters/enabled ]]; then apparmor=true; fi
@@ -25825,8 +25828,6 @@ _fleet_loop_tick() {
     ) </dev/null >/dev/null 2>&1 &
     return 0
 }
-
-_fleet_member_public() { jq -c 'del(.identity.machine_id)' <<< "$1"; }
 
 # GET /fleet/status — What this server is in the fleet: a hub (members, join codes), a member (its hub), or standalone; plus a pending join and how others reach this API
 handle_fleet_status() {
