@@ -69,7 +69,7 @@ Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.
 | Read one `.env` key | `envfile_get FILE KEY` (first line, every quote character dropped) | `.lib/envfile.sh` | 18 inline `grep -m1 '^KEY=' … \| cut \| tr` reads |
 | Load a whole `.env` as data | `_api_load_env_file FILE` (quotes, escapes, comments, reserved keys) | `api-server.sh` | — |
 | A key over every stack's `.env`, then the root one | `_stack_envs_first KEY` | `api-server.sh` | the loops in `_find_traefik_domain`, the template deploy, the CrowdSec trusted LAN (×2) |
-| Write a root `.env` key | `_api_env_write KEY VALUE` (bash quoting, line moved to the end) | `api-server.sh` | the copy inside `POST /config` |
+| Write `.env` | `_env_file_write FILE KEY VALUE [KEY VALUE]…` or `FILE --content TEXT` (one at a time under `.env.lock`, a temp file of this process, a checked `mv`, the mode kept); `_api_env_write KEY VALUE` for one root key | `api-server.sh` | the inline writers of `POST /config` and the raw editor, and `_api_env_write`'s own copy |
 | Write a stack `.env` key | `_envfile_set FILE KEY VALUE [bash\|compose]` (quoted, in place) | `api-server.sh` | — |
 | Quote a value for `.env` | `envfile_quote VALUE [bash\|compose]` | `.lib/envfile.sh` | — |
 | Now, as ISO 8601 UTC | `_api_now_iso`; epoch seconds are plain `date +%s` | `api-server.sh` | 52 inline `date -u '+%Y-%m-%dT%H:%M:%SZ'`, the wrapper `_api_now_epoch` |
@@ -83,7 +83,7 @@ Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.
 | Is a job's lock held | `_lock_busy LOCKFILE` | `api-server.sh` | 3 inline `flock -n` probes |
 | Start a detached job of the API script | `_api_job_launch LOCKFILE LOG ARGS…` | `api-server.sh` | the two copies in `_self_update_launch`, `_image_update_launch` |
 | Unattended-update history | `_update_history_add dcs\|images RESULT MESSAGE [FROM TO]` | `api-server.sh` | `_self_update_history_add`, `_image_update_history_add` |
-| A sliding-window rate limit | `_api_rate_window FILE LIMIT SECONDS` | `api-server.sh` | the terminal's own copy (`_terminal_rate_limited` is now a call) |
+| A sliding-window rate limit | `_api_rate_window FILE LIMIT SECONDS` (under `FILE.lock`) | `api-server.sh` | the terminal's own unlocked copy (`_terminal_rate_limited` is now a call) |
 | Audit | `_api_audit_log IP EVENT USER DETAIL` (auth log, mirrored), `_audit_log ACTION DETAIL` (the JSON log behind `GET /audit` and webhooks) | `api-server.sh` | — |
 | Secrets | `secrets_get`, `secrets_env_exports`, `compose_with_secrets` | `.lib/secrets.sh` | the aliases `_decrypt_secret`, `_secrets_env_exports`, `_compose_with_secrets` |
 | A compose file backup before a template changes it | `_compose_backup DIR TIMESTAMP` (`.bak.TIMESTAMP`, newest 5 kept) | `api-server.sh` | the copies in the template deploy and removal |
