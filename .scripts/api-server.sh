@@ -33246,9 +33246,15 @@ handle_request() {
     REQUEST_XFF_HEADER=""
     AUTH_ERROR=""
     DL_TICKET_USER=""; REQUEST_BODY_LENGTH=0; REQUEST_BODY_DEFERRED=""; REQUEST_CONTENT_TYPE=""
-    local _hdr_count=0
+    # 10 s a line and 30 s for the whole head: a client sending one header every few seconds must not hold a connection
+    # slot (socat's -T does nothing for a handler run in its place)
+    local _hdr_count=0 _hdr_deadline=$(( EPOCHSECONDS + 30 ))
     while IFS= read -r -t 10 header; do
         (( ++_hdr_count ))
+        if (( EPOCHSECONDS > _hdr_deadline )); then
+            printf 'HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+            return
+        fi
         if [[ $_hdr_count -gt 100 ]]; then
             printf 'HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
             return
@@ -35101,6 +35107,13 @@ start_server() {
     if (( API_WORKERS > 0 )) && [[ ! -x "$BASE_DIR/.scripts/api-dispatch.sh" ]]; then
         echo "warning: .scripts/api-dispatch.sh is missing or not executable: one process per request instead of a worker pool"; API_WORKERS=0
     fi
+    # a unix socket's path holds 108 bytes at most: past that the workers' socat could never bind and spun instead
+    if (( API_WORKERS > 0 )); then
+        local _wsock="${API_RUN_DIR:-$BASE_DIR/.data/run-$$}/w${API_WORKERS}.sock"
+        if (( $(printf '%s' "$_wsock" | wc -c) > 100 )); then
+            echo "warning: the workers' socket path ($_wsock) is longer than 100 bytes: one process per request instead of a worker pool (a shorter install path brings the pool back)"; API_WORKERS=0
+        fi
+    fi
     if (( API_WORKERS > 0 )); then
         _api_workers_start
         _front="$BASE_DIR/.scripts/api-dispatch.sh"
@@ -35227,6 +35240,7 @@ _api_worker_loop() {
     if mkfifo "${sock%.sock}.z" 2>/dev/null; then exec {zfd}<>"${sock%.sock}.z"; rm -f "${sock%.sock}.z"; fi
     while :; do
         # one connection: socat puts the client's bytes on the coprocess's output and our answer on its input
+        local _t0="${EPOCHREALTIME/[.,]/}"
         coproc _WSOC { exec socat -t 900 -T "${API_WORKER_IDLE_SECS:-900}" "UNIX-LISTEN:$sock,unlink-early,umask=077,backlog=32" STDIO 2>/dev/null; }
         local rfd wfd; sp="$_WSOC_PID"
         # bash closes a coprocess's own descriptors in every subshell: plain copies of them are what the request's subshell can use
@@ -35250,6 +35264,9 @@ _api_worker_loop() {
                   _API_PREREAD_SET=1; _API_PREREAD_LINE="$req"; handle_request ) <&"$rfd" >&"$wfd"
                 served=$(( served + 1 ))
             fi
+        elif [[ -n "$_t0" ]] && (( ${EPOCHREALTIME/[.,]/} - _t0 < 500000 )); then
+            # socat ended at once, with no connection (it could not bind the socket): a pause, not a loop that spins
+            if [[ -n "$zfd" ]]; then read -r -t 1 -u "$zfd" _ 2>/dev/null; else sleep 1; fi
         fi
         exec {rfd}<&- {wfd}>&-
         # the answer is written (the subshell is gone); socat ends as soon as the front has read it. A detached job the handler left

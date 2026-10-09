@@ -25,8 +25,9 @@ peer="${SOCAT_PEERADDR:-${NCAT_REMOTE_ADDR:-}}"
 tmp="$d/req-$$-$RANDOM$RANDOM"
 ( umask 077; : > "$tmp" ) 2>/dev/null || answer "503 Service Unavailable" "" "No room for the request"
 trap 'rm -f "$tmp"' EXIT
-# the request, buffered: the line and the headers (up to the blank line), then the body
-cl=0; n=0; req=""
+# the request, buffered: the line and the headers (up to the blank line), then the body. socat's -T does nothing for a
+# program it runs in its own place (nofork): the patience is here: 10 s a line, 30 s for the whole head, 30 s for the body
+cl=0; n=0; req=""; hd=$(( EPOCHSECONDS + 30 ))
 IFS= read -r -t 10 line || exit 0
 req="$line"$'\n'
 while IFS= read -r -t 10 h; do
@@ -34,6 +35,7 @@ while IFS= read -r -t 10 h; do
     hl="${h%%$'\r'}"
     [[ -z "$hl" ]] && break
     (( ++n > 200 )) && answer "431 Request Header Fields Too Large" "" "Too many headers"
+    (( EPOCHSECONDS <= hd )) || answer "408 Request Timeout" "" "The request did not arrive within 30 seconds"
     if [[ "${hl,,}" == content-length:* ]]; then cl="${hl#*:}"; cl="${cl//[[:space:]]/}"; [[ "$cl" =~ ^[0-9]{1,15}$ ]] || cl=0; fi
 done
 path="${line#* }"; path="${path%% *}"; path="${path%%\?*}"
@@ -57,8 +59,14 @@ if [[ "${line%% *}" == POST ]]; then
             exit 0 ;;
     esac
 fi
-(( cl <= 134217728 )) || answer "413 Content Too Large" "" "The body is larger than 128 MB"
-{ printf 'DCS-PEER %s\r\n' "$peer"; printf '%s' "$req"; (( cl > 0 )) && head -c "$cl"; } > "$tmp"
+# before anyone is known, a body is as big as the API takes it (API_MAX_BODY_SIZE, 1 MB); the setup wizard's restore (a
+# bundle sent as JSON) is the one bigger (API_MAX_UPLOAD_SIZE, 128 MB), as in the API's own reader
+lim="${API_MAX_BODY_SIZE:-1048576}"
+case "$path" in /setup/restore) lim="${API_MAX_UPLOAD_SIZE:-134217728}" ;; esac
+[[ "$lim" =~ ^[0-9]{1,15}$ ]] || lim=1048576
+(( cl <= lim )) || answer "413 Content Too Large" "" "Request body too large. Maximum: $lim bytes"
+{ printf 'DCS-PEER %s\r\n' "$peer"; printf '%s' "$req"; } > "$tmp"
+if (( cl > 0 )); then timeout 30 head -c "$cl" >> "$tmp" || answer "408 Request Timeout" "" "Request timeout: body not received within 30 seconds"; fi
 
 # a process of its own for this request: the API script reads the request from its stdin (the buffered copy without the
 # address line; the address is in the environment socat gave this front)
@@ -73,9 +81,11 @@ case "$path" in */stream) oneshot ;; esac
 
 # A worker's socket file is away for a moment between two connections (socat removes it on close, the next one binds it
 # again), so the list is read on every round. A burst of dashboard polls is served by the pool one after the other (a
-# worker takes a request every few hundredths of a second); a second without a free worker is "all busy".
-start=$RANDOM
-for (( round = 0; round < 20; round++ )); do
+# worker takes a request every few hundredths of a second); a second without a free worker is "all busy" (a budget of time,
+# not of rounds: twenty rounds over busy workers' sockets took four or five seconds)
+start=$RANDOM; t_end="${EPOCHREALTIME/[.,]/}"; [[ -n "$t_end" ]] || t_end=$(date +%s%6N); t_end=$(( t_end + 1000000 ))
+while :; do
+    t1="${EPOCHREALTIME/[.,]/}"; [[ -n "$t1" ]] || t1=$(date +%s%6N); (( t1 < t_end )) || break
     socks=("$d"/w*.sock); nw=${#socks[@]}
     for (( i = 0; i < nw; i++ )); do
         s="${socks[(start + i) % nw]}"
