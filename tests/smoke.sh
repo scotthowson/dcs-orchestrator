@@ -3443,6 +3443,15 @@ fake_request POST /templates/bypass-tpl/deploy '{"target_stack":"demo","auto_sta
 check "deploy: bypass template stays open"  0 "$(grep -c '"authelia-forwardauth"' "$_ZZR/demo/bypass-tpl.yml")"
 fake_request POST /templates/routed-tpl/deploy '{"target_stack":"demo2","auto_start":false,"authelia_services":[]}' >/dev/null
 check "deploy: explicit none respected"     0 "$(grep -c '"authelia-forwardauth"' "$_ZZR/demo2/routed-tpl.yml")"
+# a template deployed with auto_start into a stack that uses the core Redis password before DCS ever started that stack (a
+# fresh install: setup.sh brings the core stack up by itself): the password is made then, as a start makes it, and the
+# stack starts instead of waiting for a secret nobody is meant to type
+mkdir -p "$WORK/.templates/coresecret-tpl"
+printf '{"name":"coresecret-tpl","title":"Core secret","category":"other","variables":[]}\n' > "$WORK/.templates/coresecret-tpl/template.json"
+printf 'services:\n  coresecret-tpl:\n    image: alpine\n    container_name: CoreSecret\n    environment:\n      - P=${SECRETS_DCS_REDIS_PASSWORD:-}\n' > "$WORK/.templates/coresecret-tpl/docker-compose.yml"
+rm -f "$WORK/.secrets/DCS_REDIS_PASSWORD.enc"
+_DS=$(fake_request POST /templates/coresecret-tpl/deploy '{"target_stack":"demo2","auto_start":true}')
+check "deploy: the core Redis password is made, not asked for" "200 asked=no made=yes" "$(status_of <<< "$_DS") asked=$(body_of <<< "$_DS" | grep -q 'do not exist yet' && echo yes || echo no) made=$(_lib secrets_exists DCS_REDIS_PASSWORD && echo yes || echo no)"
 check "deploy: explicit none is marked"     1 "$(grep -c '^# authelia: off' "$_ZZR/demo2/routed-tpl.yml")"
 # every built-in template passes the scan a deploy runs on it (its variables at their defaults): a rule that is too
 # wide makes a template in the gallery one nobody can deploy (the /dev rule refused every device: a VPN's tunnel,

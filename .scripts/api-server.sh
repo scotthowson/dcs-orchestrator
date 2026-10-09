@@ -20224,6 +20224,9 @@ print('\n'.join(result))
     _deploy_ctx=$(jq -nc --arg t "$name" --argjson svcs "$services_json" '{template: $t, services: $svcs}')
     if [[ "$auto_start" == "true" ]]; then
         local _missing_secrets
+        # the secrets DCS makes itself (the core Redis password) are made here too, as a start does: a template deployed into
+        # the core stack before its first start through DCS was left stopped, asking for a secret nobody is meant to type
+        secrets_ensure_generated "$target_dir/docker-compose.yml" "$target_dir/.env" "$BASE_DIR/.env"
         _missing_secrets=$(secrets_missing "$target_dir/docker-compose.yml" "$target_dir/.env" "$BASE_DIR/.env" | tr '\n' ' ')
         if [[ -n "${_missing_secrets// /}" ]]; then
             auto_start=false
