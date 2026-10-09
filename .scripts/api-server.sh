@@ -2667,7 +2667,7 @@ handle_system_info_internal() {
     disk_usage=$(df -hP "$BASE_DIR" 2>/dev/null | tail -1 | awk '{printf "{\"total\":\"%s\",\"used\":\"%s\",\"available\":\"%s\",\"percent\":\"%s\"}", $2, $3, $4, $5}')
     [[ -z "$disk_usage" || "$disk_usage" == *'""'* ]] && disk_usage=$(df -hP / 2>/dev/null | tail -1 | awk '{printf "{\"total\":\"%s\",\"used\":\"%s\",\"available\":\"%s\",\"percent\":\"%s\"}", $2, $3, $4, $5}')
     printf '{"hostname":"%s","uptime_seconds":%d,"system":{"load_average":%s,"memory_mb":{"total":%d,"available":%d},"disk":%s,"cpu_count":%d}}' \
-        "$(_api_json_escape "$(_hostname)")" "$uptime_seconds" "$load_avg" "$mem_total" "$mem_available" "${disk_usage:-{}}" "$cpu_count"
+        "$(_api_json_escape "$(_hostname)")" "$uptime_seconds" "$load_avg" "$mem_total" "$mem_available" "${disk_usage:-"{}"}" "$cpu_count"
 }
 
 # GET /health — Health report for every container (running, unhealthy, stopped, restart loops) On a hub, ?fleet=1 adds every member's containers (member, member_name, vmid) and per-member summaries

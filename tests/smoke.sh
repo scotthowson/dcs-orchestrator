@@ -578,6 +578,12 @@ check "record validator: apex"          example.com "$(_lib _dns_validate_record
 check "record validator: mx priority"   10 "$(_lib _dns_validate_record example.com MX @ mail.example.com 1 false "" "" | jq -r '.priority' 2>/dev/null)"
 check "stack activity idle"             idle "$(auth_request GET /stacks/demo/activity | body_of | jq -r '.phase' 2>/dev/null)"
 check "stack activity unknown stack"    404 "$(auth_request GET /stacks/nope/activity | status_of)"
+# the Export page's system file: "${x:-{}}" ends at the first brace, so a disk line got a "}" too many and every
+# export answered 500 (invalid JSON)
+check "export system: 200, valid JSON"    "200 yes" "$(R=$(auth_request GET /export/system); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -e '.system.disk | type == "object"' >/dev/null 2>&1 && echo yes || echo no)")"
+mkdir -p "$WORK/hookplug/p1/hooks"; printf '#!/bin/sh\ncat > "%s/hook-ctx.json"\n' "$WORK" > "$WORK/hookplug/p1/hooks/pre-start"; chmod +x "$WORK/hookplug/p1/hooks/pre-start"
+check "plugin hook: the context arrives intact" '{"stack":"a"}' "$(_lib eval 'PLUGINS_DIR="$WORK/hookplug" PLUGINS_HOOKS_ENABLED=true; _plugin_hooks_now pre-start "{\"stack\":\"a\"}"' >/dev/null 2>&1; cat "$WORK/hook-ctx.json" 2>/dev/null)"
+rm -rf "$WORK/hookplug" "$WORK/hook-ctx.json"
 # two actions on one stack in a row (a stop clicked while a restart still runs) take turns: Compose never runs twice at
 # once on a project (they removed each other's containers: "No such container", the stack left down), and the record
 # shows the later action running until it really ended
