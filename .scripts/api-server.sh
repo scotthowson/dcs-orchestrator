@@ -32073,7 +32073,7 @@ _stack_activity_begin() {
     [[ -n "$_extra_json" ]] || _extra_json='{}'
     mkdir -p "$STACK_ACTIVITY_DIR" 2>/dev/null
     local id
-    id="${stack}-$(date +%s)"
+    id="${stack}-$(date +%s)-${RANDOM}"   # two actions in one second stay apart (_stack_activity_end ID)
     # the output of the action before stays readable (a stop right after a failed start would otherwise erase the reason)
     [[ -s "$STACK_ACTIVITY_DIR/$stack.log" ]] && command cp -f "$STACK_ACTIVITY_DIR/$stack.log" "$STACK_ACTIVITY_DIR/$stack.prev.log" 2>/dev/null
     : > "$STACK_ACTIVITY_DIR/$stack.log"
@@ -32084,19 +32084,21 @@ _stack_activity_begin() {
 }
 
 # Called first thing inside the background runner so a dead runner is detectable
+# _stack_activity_pid STACK [ID] — with ID, only while the record is still that action's (a newer one replaced it)
 _stack_activity_pid() {
     local f="$STACK_ACTIVITY_DIR/$1.json"
-    [[ -f "$f" ]] && _api_jq_update_file "$f" --argjson p "$BASHPID" '.pid = $p'
+    [[ -f "$f" ]] && _api_jq_update_file "$f" --argjson p "$BASHPID" --arg id "${2:-}" 'if $id == "" or .id == $id then .pid = $p else . end'
     return 0
 }
 
-# _stack_activity_end STACK SUCCESS(true|false) [MESSAGE]
+# _stack_activity_end STACK SUCCESS(true|false) [MESSAGE] [ID] — with ID, only the record of that action is closed:
+# an action that waited behind this one already owns the record and is still running
 _stack_activity_end() {
-    local stack="$1" ok="$2" msg="${3:-}"
+    local stack="$1" ok="$2" msg="${3:-}" id="${4:-}"
     local f="$STACK_ACTIVITY_DIR/$stack.json"
     [[ -f "$f" ]] || return 0
-    _api_jq_update_file "$f" --arg t "$(_api_now_iso)" --argjson ok "$ok" --arg m "$msg" \
-        '.finished_at = $t | .success = $ok | (if $m != "" then .message = $m else . end)'
+    _api_jq_update_file "$f" --arg t "$(_api_now_iso)" --argjson ok "$ok" --arg m "$msg" --arg id "$id" \
+        'if $id == "" or .id == $id then (.finished_at = $t | .success = $ok | (if $m != "" then .message = $m else . end)) else . end'
     return 0
 }
 
@@ -32156,12 +32158,19 @@ _stack_run_detached() {
     [[ -f "$env_file" ]] && args+=(--env-file "$env_file")
     mkdir -p "$BASE_DIR/logs" 2>/dev/null
     local logf="$STACK_ACTIVITY_DIR/$stack.log"
-    _stack_activity_begin "$stack" "$action" >/dev/null
+    local act_id
+    act_id=$(_stack_activity_begin "$stack" "$action")
     local -a prog=()
     read -ra prog <<< "$(_compose_progress_args)"
     (
         set +e
-        _stack_activity_pid "$stack"
+        # one Compose run per stack at a time: a stop sent while a restart still runs waits for it instead of racing it
+        # (two runs on one project remove each other's containers: "No such container", a stack left down)
+        if command -v flock >/dev/null 2>&1; then
+            exec 8>"$STACK_ACTIVITY_DIR/.$stack.run.lock"
+            flock -w 900 8 || true
+        fi
+        _stack_activity_pid "$stack" "$act_id"
         local ok
         local base_ctx
         base_ctx=$(_hook_ctx "$stack" "{\"action\":\"$action\"}")
@@ -32182,7 +32191,7 @@ _stack_run_detached() {
                 ;;
             restart)
                 # never taken down when it cannot come up again (its App-Data drive is not there)
-                if _stack_appdata_missing "$stack" >>"$logf" 2>&1; then echo >>"$logf"; ok=false; _stack_activity_end "$stack" false; exit 0; fi
+                if _stack_appdata_missing "$stack" >>"$logf" 2>&1; then echo >>"$logf"; ok=false; _stack_activity_end "$stack" false "" "$act_id"; exit 0; fi
                 _plugin_hooks_now "pre-stop" "$base_ctx"
                 compose_with_secrets "$compose_file" "$env_file" "${prog[@]}" down --remove-orphans --timeout 15 >>"$logf" 2>&1 && ok=true || ok=false
                 _plugin_hooks_now "post-stop" "$(_hook_ctx "$stack" "{\"action\":\"restart\"}" "$ok")"
@@ -32192,7 +32201,7 @@ _stack_run_detached() {
                 [[ "$ok" == "false" ]] && _fire_notifications "stack_failed" "stack=$stack" "action=restart"
                 ;;
         esac
-        _stack_activity_end "$stack" "${ok:-false}"
+        _stack_activity_end "$stack" "${ok:-false}" "" "$act_id"
         local _verb
         case "$action" in start) _verb="Started" ;; stop) _verb="Stopped" ;; *) _verb="Restarted" ;; esac
         [[ "${ok:-false}" == "true" ]] || _verb+=" (with errors)"

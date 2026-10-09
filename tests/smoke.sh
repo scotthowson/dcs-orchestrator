@@ -578,6 +578,20 @@ check "record validator: apex"          example.com "$(_lib _dns_validate_record
 check "record validator: mx priority"   10 "$(_lib _dns_validate_record example.com MX @ mail.example.com 1 false "" "" | jq -r '.priority' 2>/dev/null)"
 check "stack activity idle"             idle "$(auth_request GET /stacks/demo/activity | body_of | jq -r '.phase' 2>/dev/null)"
 check "stack activity unknown stack"    404 "$(auth_request GET /stacks/nope/activity | status_of)"
+# two actions on one stack in a row (a stop clicked while a restart still runs) take turns: Compose never runs twice at
+# once on a project (they removed each other's containers: "No such container", the stack left down), and the record
+# shows the later action running until it really ended
+_QS="$WORK/Stacks/queued"; mkdir -p "$_QS"; printf 'services:\n  q:\n    image: alpine:3\n' > "$_QS/docker-compose.yml"
+_QC="$WORK/queued-compose.sh"; _QL="$WORK/queued-compose.log"; : > "$_QL"
+printf '#!/bin/bash\ncase " $* " in *" version "*) exit 0;; esac\necho "begin $*" >> %q; sleep 2; echo end >> %q\n' "$_QL" "$_QL" > "$_QC"; chmod +x "$_QC"
+auth_request POST /stacks/queued/restart '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null; sleep 0.5
+auth_request POST /stacks/queued/stop '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null
+check "stack actions in a row: the later one is shown running" "stop|true" "$(auth_request GET /stacks/queued/activity | body_of | jq -r '"\(.action)|\(.active)"' 2>/dev/null)"
+for _ in $(seq 1 40); do [[ "$(auth_request GET /stacks/queued/activity | body_of | jq -r '.active' 2>/dev/null)" == false ]] && break; sleep 0.5; done
+check "stack actions in a row: Compose runs one at a time" "begin|end|begin|end|begin|end" "$(awk '{print $1}' "$_QL" | paste -sd'|')"
+check "stack actions in a row: the last one goes down last" "down" "$(grep begin "$_QL" | tail -1 | grep -oE ' (down|up) ' | tr -d ' ')"
+check "stack actions in a row: the record is the stop's, ended well" "stop|false|true" "$(auth_request GET /stacks/queued/activity | body_of | jq -r '"\(.action)|\(.active)|\(.success)"' 2>/dev/null)"
+rm -rf "$_QS"
 check "container name derives project"  demo-x-1 "$(_lib _compose_container_name "$WORK/Stacks/demo" x)"
 mkdir -p "$WORK/.templates/demo-tpl" && printf '{"name":"demo-tpl","title":"Demo","category":"other","variables":[]}\n' > "$WORK/.templates/demo-tpl/template.json" && printf 'services:\n  demo:\n    image: alpine\n    environment:\n      - PW=${SECRETS_DEMO_TPL_PW}\n' > "$WORK/.templates/demo-tpl/docker-compose.yml"
 check "template detail lists secrets"   DEMO_TPL_PW "$(auth_request GET /templates/demo-tpl | body_of | jq -r '.secrets[0].name' 2>/dev/null)"
