@@ -12002,7 +12002,7 @@ _api_update_switch() {
     fi
     local stamp f st
     stamp=$(date +%Y%m%d-%H%M%S)
-    UPD_BACKUP_DIR="$BASE_DIR/.data/update-backups/$stamp"
+    UPD_BACKUP_DIR="$BASE_DIR/.data/update-backups/$stamp-$$"
     # 1. copies of everything the switch would overwrite
     for f in ${UPD_USER_KEEP[@]+"${UPD_USER_KEEP[@]}"} ${UPD_FW_CONFLICT[@]+"${UPD_FW_CONFLICT[@]}"}; do
         [[ -n "$f" ]] || continue
@@ -12220,7 +12220,7 @@ handle_system_update_check() {
     [[ ${#UPD_FW_CONFLICT[@]} -gt 0 ]] && has_conflicts=true
 
     local last_backup="" method pid
-    last_backup=$(git tag -l 'dcs-backup-*' --sort=-creatordate 2>/dev/null | head -1 || true)
+    last_backup=$(git tag -l 'dcs-backup-*' --sort=-refname 2>/dev/null | head -1 || true)
     read -r method pid _ <<< "$(_api_restart_method)"
 
     _api_success "{
@@ -12319,6 +12319,12 @@ handle_system_update_apply() {
     [[ "$behind" =~ ^[0-9]+$ ]] || behind=0
     notes=$(_api_update_release_notes)
 
+    # one update at a time: the unattended one (a schedule) holds SELF_UPDATE_LOCK while it runs
+    local _ulk=""
+    if command -v flock >/dev/null 2>&1 && mkdir -p "$(dirname "$SELF_UPDATE_LOCK")" 2>/dev/null && exec {_ulk}>>"$SELF_UPDATE_LOCK"; then
+        flock -n "$_ulk" || { exec {_ulk}>&-; _api_error 409 "Another update is running: try again once it has finished"; return; }
+    fi
+
     # Backup tag before anything moves: rollback returns here
     local backup_tag
     backup_tag="dcs-backup-$(date +%Y%m%d-%H%M%S)-${current}"
@@ -12326,15 +12332,14 @@ handle_system_update_apply() {
 
     local rc=0
     _api_update_switch ff "$replace_local" || rc=$?
-    if [[ $rc -eq 2 ]]; then
-        _api_error 409 "$UPD_SWITCH_OUTPUT"
-        return
-    elif [[ $rc -ne 0 ]]; then
-        _api_error 500 "Update failed (nothing was changed; backup tag $backup_tag kept): $UPD_SWITCH_OUTPUT"
+    if [[ $rc -ne 0 ]]; then
+        [[ -n "$_ulk" ]] && exec {_ulk}>&-
+        if [[ $rc -eq 2 ]]; then _api_error 409 "$UPD_SWITCH_OUTPUT"; else _api_error 500 "Update failed (nothing was changed; backup tag $backup_tag kept): $UPD_SWITCH_OUTPUT"; fi
         return
     fi
     # keep the ten newest backup tags
-    git tag -l 'dcs-backup-*' --sort=-creatordate 2>/dev/null | tail -n +11 | xargs -r git tag -d >/dev/null 2>&1 || true
+    git tag -l 'dcs-backup-*' --sort=-refname 2>/dev/null | tail -n +11 | xargs -r git tag -d >/dev/null 2>&1 || true
+    [[ -n "$_ulk" ]] && exec {_ulk}>&-
 
     local new_version new_commit changelog service_changed=false new_settings
     new_version=$(tr -d '[:space:]' < "$BASE_DIR/VERSION" 2>/dev/null || echo "unknown")
@@ -12412,7 +12417,7 @@ handle_system_update_rollback() {
 
     if [[ -z "$backup_tag" ]]; then
         local tag_list
-        tag_list=$(git tag -l 'dcs-backup-*' --sort=-creatordate 2>/dev/null | head -20 || true)
+        tag_list=$(git tag -l 'dcs-backup-*' --sort=-refname 2>/dev/null | head -20 || true)
         _api_error 400 "Missing backup_tag in request body. Available tags: $(printf '%s' "$tag_list" | tr '\n' ',' | sed 's/,$//')"
         return
     fi
@@ -12435,8 +12440,14 @@ handle_system_update_rollback() {
     UPD_TARGET=$(git rev-parse "$backup_tag^{commit}" 2>/dev/null)
     UPD_TARGET_NAME="$backup_tag"
     UPD_CHANNEL=$(_api_update_channel)
+    # one update at a time: the unattended one (a schedule) holds SELF_UPDATE_LOCK while it runs
+    local _ulk=""
+    if command -v flock >/dev/null 2>&1 && mkdir -p "$(dirname "$SELF_UPDATE_LOCK")" 2>/dev/null && exec {_ulk}>>"$SELF_UPDATE_LOCK"; then
+        flock -n "$_ulk" || { exec {_ulk}>&-; _api_error 409 "An update is running: try the rollback once it has finished"; return; }
+    fi
     local rc=0
     _api_update_switch reset true || rc=$?
+    [[ -n "$_ulk" ]] && exec {_ulk}>&-
     if [[ $rc -ne 0 ]]; then
         _api_error 500 "Rollback failed: $UPD_SWITCH_OUTPUT"
         return
@@ -12665,7 +12676,7 @@ _self_update_job() {
             fi
             to_version=$(tr -d '[:space:]' < "$BASE_DIR/VERSION" 2>/dev/null || echo "?")
             did_update=true
-            git tag -l 'dcs-backup-*' --sort=-creatordate 2>/dev/null | tail -n +11 | xargs -r git tag -d >/dev/null 2>&1 || true
+            git tag -l 'dcs-backup-*' --sort=-refname 2>/dev/null | tail -n +11 | xargs -r git tag -d >/dev/null 2>&1 || true
             echo "$lp updated $from_version → $to_version (backup tag $backup_tag)"
             _api_restart_schedule
             if [[ "$UPD_RESTART_METHOD" == "manual" ]]; then
