@@ -138,23 +138,6 @@ source "$BASE_DIR/.scripts/stop.sh"
 _source_optional "$BASE_DIR/.lib/banner.sh"                  "banner.sh"
 
 # =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
-
-# Set the terminal title (non-fatal if not supported)
-_set_terminal_title() {
-    echo -ne "\033]0;${1:-Docker Services Manager}\007" 2>/dev/null || true
-}
-
-# Graceful exit handler
-_graceful_exit() {
-    local exit_code="${1:-1}"
-    log_warning "Script interrupted (exit code: $exit_code)"
-    close_logger
-    exit "$exit_code"
-}
-
-# =============================================================================
 # ERROR HANDLING
 # =============================================================================
 

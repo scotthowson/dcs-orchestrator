@@ -224,21 +224,12 @@ _cs_is_private() {
 
 # A ban length: 90m, 4h, 7d, 2w, 1h30m … → canonical minutes-or-hours text ("90m", "4h", "168h"); 1 minute … 10 years
 _cs_norm_duration() {
-    local v="${1,,}" total=0 rest part n u
+    local v="${1,,}" total
     v="${v// /}"
-    [[ -n "$v" && ${#v} -le 24 && "$v" =~ ^([0-9]+[smhdw])+$ ]] || return 1
-    rest="$v"
-    while [[ -n "$rest" ]]; do
-        [[ "$rest" =~ ^([0-9]{1,9})([smhdw])(.*)$ ]] || return 1
-        n="${BASH_REMATCH[1]}"; u="${BASH_REMATCH[2]}"; rest="${BASH_REMATCH[3]}"
-        case "$u" in
-            s) total=$(( total + n )) ;; m) total=$(( total + n * 60 )) ;; h) total=$(( total + n * 3600 )) ;;
-            d) total=$(( total + n * 86400 )) ;; w) total=$(( total + n * 604800 )) ;;
-        esac
-    done
+    [[ -n "$v" && ${#v} -le 24 ]] || return 1
+    total=$(_cs_duration_seconds "$v") || return 1
     (( total >= 60 && total <= CROWDSEC_PERMANENT_SECONDS )) || return 1
-    part=$(( total / 60 ))
-    if (( total % 3600 == 0 )); then printf '%dh' $(( total / 3600 )); else printf '%dm' "$part"; fi
+    if (( total % 3600 == 0 )); then printf '%dh' $(( total / 3600 )); else printf '%dm' $(( total / 60 )); fi
 }
 
 # seconds of a duration text (for comparing); empty when invalid
@@ -1562,7 +1553,7 @@ handle_crowdsec_allowlist() {
 # the trusted list: add and remove a value (the legacy mechanism, also used when CrowdSec is old)
 _cs_trust_add() {
     local v="$1" comment="$2" now
-    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    now=$(_api_now_iso)
     mkdir -p "$(dirname "$CROWDSEC_TRUSTED_FILE")" 2>/dev/null
     [[ -s "$CROWDSEC_TRUSTED_FILE" ]] || echo '{"ips": []}' > "$CROWDSEC_TRUSTED_FILE"
     _api_jq_update_file "$CROWDSEC_TRUSTED_FILE" --arg ip "$v" --arg ts "$now" --arg c "$comment" \
@@ -1860,13 +1851,8 @@ _cs_bouncer_register() {
         fi
         echo "[dcs] could not register the Traefik bouncer (cscli gave no key)" >> "$log"; return 1
     fi
-    lan=$(grep -m1 '^TRAEFIK_TRUSTED_LAN=' "$target_dir/.env" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'")
-    if [[ -z "$lan" ]]; then
-        local ef; for ef in "$COMPOSE_DIR"/*/.env "$BASE_DIR/.env"; do
-            [[ -f "$ef" ]] || continue
-            lan=$(grep -m1 '^TRAEFIK_TRUSTED_LAN=' "$ef" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'"); [[ -n "$lan" ]] && break
-        done
-    fi
+    lan=$(envfile_get "$target_dir/.env" TRAEFIK_TRUSTED_LAN)
+    [[ -n "$lan" ]] || lan=$(_stack_envs_first TRAEFIK_TRUSTED_LAN)
     [[ -n "$lan" ]] || lan="192.168.1.0/24"
     mkdir -p "$dir/$target_stack"
     # the plugin key is the one this Traefik declares the bouncer under (a middleware under another name is refused)
@@ -1919,7 +1905,7 @@ handle_crowdsec_traefik_restart() {
     (( CS_DOCKER == 1 )) || { _api_error 503 "Docker does not answer: $CS_DOCKER_ERR"; return; }
     [[ "$(jq -r '.present' <<< "$CS_TRAEFIK")" == true ]] || { _api_error 409 "Traefik was not found on this server"; return; }
     timeout 90 docker restart Traefik >/dev/null 2>&1 || { _api_error 502 "docker could not restart Traefik"; return; }
-    for i in $(seq 1 20); do [[ "$(docker inspect -f '{{.State.Running}}' Traefik 2>/dev/null)" == true ]] && break; sleep 1; done
+    for i in $(seq 1 20); do _container_running Traefik && break; sleep 1; done
     _cs_cache_clear
     _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_TRAEFIK_RESTART" "${AUTH_USERNAME:-}" "Traefik restarted"
     _api_success "$(jq -nc '{success: true, message: "Traefik was restarted. It loads the bouncer plugin as it starts."}')"
@@ -2425,7 +2411,7 @@ _cs_capi_paused() {
 # _cs_register_note OK REASON MESSAGE — remember how registering again went (the community answer shows it)
 _cs_register_note() {
     mkdir -p "$(dirname "$CROWDSEC_REGISTER_STATE")" 2>/dev/null
-    jq -nc --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --argjson ok "$1" --arg r "$2" --arg m "$3" '{at: $at, ok: $ok, reason: (if $r == "" then null else $r end), message: $m}' \
+    jq -nc --arg at "$(_api_now_iso)" --argjson ok "$1" --arg r "$2" --arg m "$3" '{at: $at, ok: $ok, reason: (if $r == "" then null else $r end), message: $m}' \
         > "$CROWDSEC_REGISTER_STATE.tmp" 2>/dev/null && mv -f "$CROWDSEC_REGISTER_STATE.tmp" "$CROWDSEC_REGISTER_STATE"
 }
 

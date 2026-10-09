@@ -74,6 +74,19 @@ _source_optional() {
     fi
 }
 
+# The entry points' own helpers (start.sh, stop.sh): the terminal title (non-fatal if not supported) and the exit
+# their ERR/INT/TERM traps take (logs the interruption, closes the logger)
+_set_terminal_title() {
+    echo -ne "\033]0;${1:-Docker Services Manager}\007" 2>/dev/null || true
+}
+
+_graceful_exit() {
+    local exit_code="${1:-1}"
+    log_warning "Script interrupted (exit code: $exit_code)"
+    close_logger
+    exit "$exit_code"
+}
+
 # Export functions
 export -f _detect_docker_compose _docker_compose_version_string _is_compose_v2 _source_optional
 export DOCKER_COMPOSE_CMD

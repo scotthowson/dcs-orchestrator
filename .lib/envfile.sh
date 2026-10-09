@@ -7,9 +7,18 @@
 # a space (SERVER_NAME=Howson Server) reads fine as data yet runs "Server" as
 # a command when sourced, which broke every stack start after a reboot.
 #
+#   envfile_get FILE KEY                 print KEY's value (first line, quotes taken out)
 #   envfile_quote VALUE [bash|compose]   print VALUE ready to follow KEY=
 #   envfile_repair FILE                  quote such values in place (backup kept)
 # =============================================================================
+
+# The quick read of one setting: the first KEY= line, everything after the first "=", with every quote
+# character taken out (not only the surrounding pair). A missing file or key prints nothing; the status is the
+# pipeline's (with pipefail, 1 for a missing key). The API's full reader, which honours escapes and comments
+# and skips reserved keys, is _api_load_env_file. KEY is a plain variable name.
+envfile_get() {
+    grep -m1 "^$2=" "$1" 2>/dev/null | cut -d= -f2- | tr -d "\"'"
+}
 
 # Bare values are left alone; anything else is double-quoted with the escapes
 # the reader needs: bash mode escapes \ " $ ` (what `source` interprets),

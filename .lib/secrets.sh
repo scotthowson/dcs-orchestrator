@@ -268,8 +268,3 @@ compose_with_secrets() {
         ${DOCKER_COMPOSE_CMD:-docker compose} "${args[@]}" "$@"
     )
 }
-
-# Backwards-compatible names used across the code base
-_decrypt_secret() { secrets_get "$@"; }
-_secrets_env_exports() { secrets_env_exports "$@"; }
-_compose_with_secrets() { compose_with_secrets "$@"; }
