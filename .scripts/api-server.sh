@@ -7322,7 +7322,8 @@ _restore_stop_reason() {
 # BACKUP_DEST_DIR: its staging folder and its half-written archive (gigabytes, kept for good and counted against the room
 # an upload or the next backup needs). Only while no backup or restore runs: they share the PID files with backup-server.sh.
 _backup_tidy_leftovers() {
-    local dest="${BACKUP_DEST_DIR%/}"
+    # (set -u where the listener starts: an install without BACKUP_DEST_DIR must not stop it here)
+    local dest="${BACKUP_DEST_DIR:-}"; dest="${dest%/}"
     [[ -n "$dest" && -d "$dest" ]] || return 0
     _backup_pid_alive "$BACKUP_PID_FILE" && return 0
     _backup_pid_alive "$BACKUP_RESTORE_PID_FILE" && return 0
