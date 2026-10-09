@@ -228,7 +228,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/templates/import` | admin | Import a template from compose content |
 | POST | `/templates/fetch-url` | admin | Fetch compose content from URL without saving |
 | POST | `/templates/import-url` | admin | Import a template from a URL |
-| POST | `/compose/validate` | user | Validate a compose file |
+| POST | `/compose/validate` | admin | Validate a compose file |
 | POST | `/templates/{template}/update` | admin | Update an existing template's compose, metadata, and .env |
 | DELETE | `/templates/{template}` | admin | Delete a template |
 
