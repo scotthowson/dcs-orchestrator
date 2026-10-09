@@ -3,6 +3,15 @@ services:
     image: acouvreur/sablier:1.6.1
     container_name: Sablier
     restart: unless-stopped
+    # Sablier talks to the Docker socket and writes only its state file in App-Data/Sablier/data, which belongs to PUID
+    # after the deploy: DAC_OVERRIDE lets it (root) write there, nothing else is needed. The image is read-only.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    read_only: true
     # Every setting is a flag: the idle time and the waiting page of a container come from
     # the Traefik middleware on its route (the Containers page writes it), these are defaults.
     # The state file lives in a directory, which Sablier creates it in on the first start.

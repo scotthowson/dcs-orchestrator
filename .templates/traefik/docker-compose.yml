@@ -1,10 +1,19 @@
 services:
   docker-socket-proxy:
     container_name: Docker-Socket
-    image: tecnativa/docker-socket-proxy:latest
+    image: tecnativa/docker-socket-proxy:v0.5.0
     restart: unless-stopped
+    # label:disable: the Docker socket cannot be relabelled, so on an SELinux host the proxy reads it unconfined.
+    # It needs no capability (it reads a socket root owns and listens on 2375); HAProxy writes its config to /tmp, its pid to /run.
     security_opt:
       - label:disable
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -28,8 +37,21 @@ services:
 
   traefik:
     container_name: Traefik
-    image: traefik:v3
+    image: traefik:v3.7
     restart: unless-stopped
+    # Traefik runs as root with two capabilities: NET_BIND_SERVICE for :80 and :443, DAC_OVERRIDE because App-Data/Traefik
+    # belongs to PUID (DCS writes the routes, acme.json and the bouncer's middleware 0600) and Traefik writes acme.json and its log there.
+    # The image is read-only: plugins are downloaded to plugins-storage (kept in App-Data, so a restart needs no download), /tmp is a tmpfs.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - DAC_OVERRIDE
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
       - "${TRAEFIK_PORT_HTTP:-80}:80"
       - "${TRAEFIK_PORT_HTTPS:-443}:443"
@@ -41,6 +63,7 @@ services:
       - ${APP_DATA_DIR:-./App-Data}/Traefik/traefik.yml:/etc/traefik/traefik.yml:z
       - ${APP_DATA_DIR:-./App-Data}/Traefik/acme.json:/etc/traefik/acme.json:z
       - ${APP_DATA_DIR:-./App-Data}/Traefik/logs:/var/log/traefik:z
+      - ${APP_DATA_DIR:-./App-Data}/Traefik/plugins-storage:/plugins-storage:z
     environment:
       - TZ=${TZ:-UTC}
       - DOCKER_HOST=tcp://Docker-Socket:2375

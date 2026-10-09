@@ -291,7 +291,11 @@ bundle for a Traefik + SSH server (each with a sentence on what it does), search
   `cloudflarewarp` or `real-ip` when the chain starts with one, because a bouncer that runs before them would judge Cloudflare's addresses instead of the visitor's; the file is
   rewritten in place, so a stack that bind-mounts it as a single file keeps seeing it).
 * **Bouncers**: every program that enforces bans (Traefik's plugin, a firewall bouncer …): type, version, address, last pull. Add one (the API key is shown **once**, with a copy button)
-  or delete one (its key stops working at once; deleting the Traefik one stops enforcement until it is registered again).
+  or delete one (its key stops working at once). A bouncer whose key Traefik's `crowdsec-bouncer` middleware still holds is not deleted: the answer is 409 *"Traefik's
+  crowdsec-bouncer middleware still uses this bouncer; register again from the Bouncers tab instead of deleting it"*, because Traefik would keep asking with a key CrowdSec
+  no longer knows and the plugin fails open. CrowdSec never shows a key again, so the match is by name: `dcs-traefik-bouncer` while any routes file defines the middleware,
+  and every name DCS recorded in `.data/crowdsec/traefik-bouncers.json` when it wrote one. `DELETE /crowdsec/bouncers/{name}?force=true` (or `{"force": true}`) deletes it
+  anyway. The connections CrowdSec files under `name@ip` are CrowdSec's own: it refuses to delete them, and the answer is 409 with its reason.
 * **Machines**: the engines that report to this CrowdSec (this container's agent, others you enrolled).
 * **Community**: whether the community blocklist is pulled, whether your detections are shared, whether the machine is enrolled in the CrowdSec Console. The status is read
   locally and never logs in at CrowdSec's Central API: `cscli capi status` and `cscli console status` each make a fresh login, and the central service pauses an engine

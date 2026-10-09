@@ -418,6 +418,25 @@ MQTT, DNS), *Optional* services can be left out.
 
 <!-- templates:end -->
 
+## Hardening and pinned images
+
+DCS's own containers (the core stack, and the `traefik`, `crowdsec`, `authelia`, `docker-socket-proxy`, `sablier` and
+`discord-bot` templates) follow three rules a new core template follows too:
+
+- **A pinned line, never `:latest`.** The minor tag where the image publishes one (`traefik:v3.7`, `authelia/authelia:4.39`,
+  `redis:7.4-alpine`), the release where it does not (`crowdsecurity/crowdsec:v1.8.1`). Check that the tag exists on the
+  registry (`docker manifest inspect IMAGE:TAG`); the image updates then follow the line ([Operations](OPERATIONS.md#image-updates)).
+- **`security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`** and only the capabilities the container needs, each one
+  named with its reason in a comment (`NET_BIND_SERVICE` for a port below 1024, `DAC_OVERRIDE` for a root process writing
+  App-Data, which belongs to PUID after the deploy, `SETUID`/`SETGID` for an entrypoint that drops to its own user).
+- **`read_only: true`** with a `tmpfs` for `/tmp` (and `/run`) where the image writes nothing else; where it does (CrowdSec's
+  hub, Authelia's `/app/.healthcheck.env`, the dashboard's nginx config) the comment says why it is not read-only.
+  `label:disable` only where a host path cannot be relabelled (CrowdSec reading `/var/log`, the socket proxy).
+
+`tests/lint.sh` fails when a service of `Stacks/*/docker-compose.yml` or of the crowdsec, traefik and authelia templates
+lacks `no-new-privileges:true`, and counts the app templates that lack it as a warning. The app templates keep their
+`:latest` tags and are not hardened by default.
+
 ## template.json reference
 
 Every template is a folder under `.templates/` with a `docker-compose.yml`, a `template.json` and, when

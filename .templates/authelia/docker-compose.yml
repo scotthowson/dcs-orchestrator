@@ -1,8 +1,18 @@
 services:
   authelia:
     container_name: Authelia
-    image: authelia/authelia:latest
+    image: authelia/authelia:4.39
     restart: unless-stopped
+    # The entrypoint gives /config to PUID:PGID (0 here: root) and switches to that user: CHOWN, SETUID and SETGID, nothing else.
+    # Not read-only: Authelia writes /app/.healthcheck.env when it starts and refuses to start when it cannot.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     environment:
       - TZ=${TZ:-UTC}
     volumes:
@@ -26,9 +36,21 @@ services:
 
   authelia-redis:
     container_name: Authelia-Redis
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     restart: unless-stopped
     command: redis-server --save 60 1 --loglevel warning
+    # The entrypoint gives /data to the redis user and drops to it: CHOWN, SETUID and SETGID. Redis writes only /data.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    read_only: true
+    tmpfs:
+      - /tmp
     volumes:
       - ${APP_DATA_DIR:-./App-Data}/Authelia/redis:/data:z
     expose:

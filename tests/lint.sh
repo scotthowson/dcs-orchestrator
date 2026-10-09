@@ -47,16 +47,43 @@ if awk '/cat > \/etc\/systemd\/system\/dcs-api.service/ {u=1} u && /^EOF$/ {exit
     echo "  .scripts/install-service.sh: dcs-api.service sets ProtectSystem (sudo in the web terminal could not write /usr or /etc)"; rc=1
 fi
 
-echo "dashboard image: latest for a release, the version's own tag for a release candidate"
+echo "dashboard image: the release's minor line for a release, the version's own tag for a release candidate"
 # a hub and its dashboard are one version: the compose file of the core stack pins the dashboard image while VERSION is a
-# release candidate (the API's update check and the update follow that file) and goes back to :latest with the release
+# release candidate (the API's update check and the update follow that file) and goes back to the minor line (4.0 for 4.0.x,
+# a tag the dashboard's release moves) with the release. docs/OPERATIONS.md: "Pinned images"
 ui_tag=$(sed -n -E 's/^[[:space:]]+image:[[:space:]]*"?ghcr\.io\/[^"[:space:]]+-ui:([^"[:space:]]+)"?.*$/\1/p' Stacks/core-infrastructure/docker-compose.yml | head -1)
 dcs_ver=$(tr -d '[:space:]' < VERSION)
 if [[ "$dcs_ver" == *-* ]]; then
     [[ "$ui_tag" == "$dcs_ver" ]] || { echo "  VERSION is the release candidate $dcs_ver: Stacks/core-infrastructure/docker-compose.yml must pin the dashboard image to :$dcs_ver (it says :${ui_tag:-nothing})"; rc=1; }
 else
-    [[ "$ui_tag" == latest ]] || { echo "  VERSION $dcs_ver is a release: the dashboard image in Stacks/core-infrastructure/docker-compose.yml must be :latest (it says :${ui_tag:-nothing})"; rc=1; }
+    ui_line=$(cut -d. -f1-2 <<< "$dcs_ver")
+    [[ "$ui_tag" == "$ui_line" ]] || { echo "  VERSION $dcs_ver is a release: the dashboard image in Stacks/core-infrastructure/docker-compose.yml must be :$ui_line, the release's minor line (it says :${ui_tag:-nothing})"; rc=1; }
 fi
+
+echo "Core containers: no-new-privileges"
+# Every service of the stacks DCS ships and of its own security templates runs with no-new-privileges (docs/TEMPLATES.md, "Hardening");
+# the app templates are counted, not failed. A YAML reader by indentation: two-space service keys under the top-level "services:".
+_nnp_missing() {
+    awk '
+        { line = $0; sub(/\r$/, "", line) }
+        line ~ /^[^ \t#][^:]*:/ { if (svc != "" && !ok) print svc; svc = ""; top = line; sub(/:.*/, "", top); next }
+        top == "services" && line ~ /^  [A-Za-z0-9._-]+:[ \t]*(#.*)?$/ { if (svc != "" && !ok) print svc; svc = line; sub(/^  /, "", svc); sub(/:.*/, "", svc); ok = 0; next }
+        svc != "" && line !~ /^[ \t]*#/ && line ~ /no-new-privileges[:=]true/ { ok = 1 }
+        END { if (svc != "" && !ok) print svc }' "$1"
+}
+NNP_CORE=(Stacks/*/docker-compose.yml .templates/crowdsec/docker-compose.yml .templates/traefik/docker-compose.yml .templates/authelia/docker-compose.yml)
+for f in "${NNP_CORE[@]}"; do
+    [[ -f "$f" ]] || continue
+    while IFS= read -r svc; do
+        [[ -n "$svc" ]] && { echo "  $f: service $svc has no \"security_opt: [no-new-privileges:true]\""; rc=1; }
+    done < <(_nnp_missing "$f")
+done
+nnp_warn=0
+for f in .templates/*/docker-compose.yml; do
+    case "$f" in .templates/crowdsec/*|.templates/traefik/*|.templates/authelia/*) continue ;; esac
+    nnp_warn=$(( nnp_warn + $(_nnp_missing "$f" | grep -c .) ))
+done
+(( nnp_warn == 0 )) || echo "  WARNING: $nnp_warn services of the app templates run without no-new-privileges:true (counted, not failed)"
 
 echo "VM images: one list everywhere"
 if [[ -f vm-images/images.json ]]; then

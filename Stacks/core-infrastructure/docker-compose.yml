@@ -1,8 +1,20 @@
 services:
   redis:
     container_name: skeleton-redis
-    image: redis:alpine
+    image: redis:8.10-alpine
     restart: unless-stopped
+    # The entrypoint gives /data to the redis user and drops to it: CHOWN, SETUID and SETGID. Redis writes only /data.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    read_only: true
+    tmpfs:
+      - /tmp
     # The password lives in the secrets store as DCS_REDIS_PASSWORD, created on
     # first start by secrets_ensure_generated and injected only into the compose
     # process. No secret means plain redis-server — exactly today's behaviour.
@@ -28,9 +40,18 @@ services:
     container_name: DCS-UI
     # Debian's own docker.io (26) with AppArmor 4 denies nginx its worker sockets and the dashboard never answers:
     # setup.sh sets DCS_UI_APPARMOR=unconfined in this stack's .env on such hosts; Docker CE needs nothing
+    # nginx starts as root and runs its workers as nginx: SETUID and SETGID, CHOWN for its cache directories. Not read-only:
+    # the entrypoint writes the API's address into /etc/nginx/conf.d/default.conf when it starts.
     security_opt:
       - "apparmor=${DCS_UI_APPARMOR:-docker-default}"
-    image: ghcr.io/scotthowson/dcs-orchestrator-ui:latest
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    image: ghcr.io/scotthowson/dcs-orchestrator-ui:4.0
     # To build locally instead of pulling from GHCR, uncomment below:
     # build:
     #   context: ../../Docker-Compose-Skeleton-UI

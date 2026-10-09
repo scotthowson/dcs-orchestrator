@@ -170,6 +170,16 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
   **Update everything** *(4.0.33)* runs the same job now, schedule or not, on the servers the chips select
   (`POST /images/update-all` on each; 409 while one runs).
 - **At boot** nothing is pulled unless `UPDATE_ON_BOOT=true`: a boot stays fast and predictable.
+- **Pinned images**: the security core runs on a pinned line instead of `:latest`: Traefik `traefik:v3.7`,
+  Authelia `authelia/authelia:4.39`, its Redis `redis:7.4-alpine`, the core stack's Redis `redis:8.10-alpine`, the dashboard
+  `ghcr.io/scotthowson/dcs-orchestrator-ui:4.0` and the Discord bot `ghcr.io/scotthowson/dcs-discord-bot:4.0`; CrowdSec `crowdsecurity/crowdsec:v1.8.1` and the Docker socket proxy
+  `tecnativa/docker-socket-proxy:v0.5.0` publish no minor tag, so they are pinned to the release; Sablier stays on `1.6.1`. A
+  minor tag still moves with every patch release, so *Check Registry* and the automatic image updates (which compare the
+  local digest of `repo:tag` with the registry's) keep bringing fixes within the line, while a new minor or major release,
+  which can change configuration or data formats, never arrives unannounced. Moving a line is a deliberate change: edit the
+  tag in the stack's `docker-compose.yml` (or the template, for new deploys), check that release's notes, then **Update**
+  the image on the Updates page (it pulls the new tag and recreates the containers). DCS releases move the shipped lines;
+  the app templates stay on `:latest`.
 - **Docker Engine**: a card on the Updates page shows the engine's version, where it comes from and the
   newest version on offer, and updates it (with passwordless sudo, or with the Terminal's Linux password).
 
