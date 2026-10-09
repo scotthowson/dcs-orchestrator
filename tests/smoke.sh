@@ -897,7 +897,8 @@ _rip_install() {
 # the answer of the listener on RIPPORT, and how long a restart takes to bring it back (seconds, or "never")
 _rip_ping() { curl -s -m 1 "http://127.0.0.1:$RIPPORT/ping" 2>/dev/null; }
 _rip_wait() { local i; for ((i = 0; i < ${1:-60}; i++)); do [[ "$(_rip_ping)" == *ok* ]] && return 0; sleep 0.25; done; return 1; }
-_rip_holders() { local p c=""; for p in $(ss -Hltnp "sport = :$RIPPORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do c+="$(cat "/proc/$p/comm" 2>/dev/null) "; done; printf '%s' "$c" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'; }
+_rip_pids() { ss -Hltnp "sport = :$RIPPORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ' | sed 's/ $//'; }
+_rip_holders() { local p c=""; for p in $(_rip_pids); do c+="$(cat "/proc/$p/comm" 2>/dev/null) "; done; printf '%s' "$c" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//'; }
 # A listener started with a RELATIVE path (`.scripts/api-server.sh --bind …`, as CLAUDE.md shows) is stopped by --stop like any other:
 # its command line holds only the relative path, and --stop used to call the process foreign and leave it running
 if command -v socat >/dev/null 2>&1 && command -v ss >/dev/null 2>&1; then
@@ -921,8 +922,11 @@ if command -v socat >/dev/null 2>&1 && command -v ss >/dev/null 2>&1; then
     RIP_MAIN=$(cat "$RIP/.data/api-server.pid" 2>/dev/null)
     check "restart in place: served through socat"   socat "$(sed 's/\x1b\[[0-9;]*m//g' "$RIP/logs/rip.log" | awk '/Transport/{print $2; exit}')"
     for _n in 1 2; do
-        kill -USR1 "$RIP_MAIN"; sleep 0.5
-        _rip_wait 60
+        # the restart is done when another front holds the port and answers: an answer alone can still be the old front's
+        # (the old one answers until the shutdown ends it, and a look at the port in between finds nobody)
+        _rip_old=$(_rip_pids); kill -USR1 "$RIP_MAIN"
+        for _i in $(seq 1 120); do _rip_new=$(_rip_pids); [[ -n "$_rip_new" && "$_rip_new" != "$_rip_old" && "$(_rip_ping)" == *ok* ]] && break; sleep 0.25; done
+        check "restart in place: a new front holds the port (restart $_n)" yes "$([[ -n "$_rip_new" && "$_rip_new" != "$_rip_old" ]] && echo yes || echo no)"
         check "restart in place: the API answers again (restart $_n)" yes "$([[ "$(_rip_ping)" == *ok* ]] && echo yes || echo no)"
         check "restart in place: the same process lives on ($_n)"     yes "$(kill -0 "$RIP_MAIN" 2>/dev/null && echo yes || echo no)"
     done
@@ -5993,11 +5997,14 @@ cst_services_community() {
     cst_j "community/unreachable: a DNS failure is not a refusal" '.capi.state' ok '.capi.forbidden' null '.capi.reachable' false '.capi.error | test("no such host")' true \
         '.capi.error | test("Register again")' false '.needs_register' false
     # -- 403s that began minutes ago: the central service is pausing the engine; registering would make it worse
+    #    (one refused send writes two refusal lines 10 ms apart: the run begins with the first, the newest refusal is the second,
+    #    and the two fall in different seconds when the burst straddles one, about one run in a hundred)
     cst_mock --mock-set capi_log=forbidden@300
     cst_call admin GET /crowdsec/community
     cst_j "community/paused: a fresh run of 403s" '.capi.state' paused '.capi.forbidden' true '.capi.reachable' false '.needs_register' false \
         '.hint' "The community service is pausing this engine after many logins today (starts, reloads, checks). It recovers on its own within an hour or two; registering again now would extend the pause." \
-        '.capi.refused_since == .capi.last_refusal' true '.capi.error | test("Forbidden")' true '.capi.error | test("Register again")' false
+        '((.capi.last_refusal | fromdateiso8601) - (.capi.refused_since | fromdateiso8601)) as $d | ($d >= 0 and $d <= 5)' true \
+        '.capi.error | test("Forbidden")' true '.capi.error | test("Register again")' false
     # -- 403 for three hours without one success: refused, and only now registering again is the advice
     cst_mock --mock-set capi_log=clear started_ago=30000 capi_log=forbidden@11000,forbidden@7200,forbidden@1800,forbidden@600
     cst_call admin GET /crowdsec/community

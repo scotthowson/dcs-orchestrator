@@ -34999,8 +34999,11 @@ start_server() {
 
     local rc=0
     if (( ${API_WORKERS:-0} > 0 )); then
-        # a worker that died (killed, out of memory) is replaced while the front runs; the front's own end ends the loop
-        while kill -0 "$listener_pid" 2>/dev/null; do _api_workers_tend; sleep 2; done
+        # a worker that died (killed, out of memory) is replaced while the front runs; the front's own end ends the loop.
+        # The pause is a job waited for, not a foreground sleep: bash runs a trap only once its foreground child has ended,
+        # so a plain `sleep 2` held a restart (SIGUSR1) or a stop (SIGTERM) back for up to two seconds, during which the old
+        # listener still answered as if it had restarted (the shutdown ends this job with the others)
+        while kill -0 "$listener_pid" 2>/dev/null; do _api_workers_tend; sleep 2 & wait "$!" 2>/dev/null || true; done
     fi
     wait "$listener_pid" || rc=$?
     # The listener exited on its own (port in use, crash): tidy up and report
