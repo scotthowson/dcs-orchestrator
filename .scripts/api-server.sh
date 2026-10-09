@@ -7223,8 +7223,7 @@ handle_root_env_update() {
         cp -p "$env_file" "${env_file}.bak" 2>/dev/null
     fi
 
-    if ! (umask 077; printf '%s\n' "${content%$'\n'}" > "${env_file}.tmp") 2>/dev/null || ! mv -f "${env_file}.tmp" "$env_file" 2>/dev/null; then
-        rm -f "${env_file}.tmp" 2>/dev/null
+    if ! _env_file_write "$env_file" --content "$content" 2>/dev/null; then
         _api_error 500 "Failed to write .env file"
         return
     fi
@@ -8948,20 +8947,15 @@ handle_config_update() {
     # Backup current .env
     cp -p "$env_file" "${env_file}.bak" 2>/dev/null
 
-    # Apply updates to .env file (grep + temp file: no sed metacharacter issues)
+    # Apply updates to .env file (grep + temp file: no sed metacharacter issues), all of them in one locked write
+    local -a _env_kv=()
     for key in "${!updates[@]}"; do
-        local value="${updates[$key]}"
-        if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-            grep -v "^${key}=" "$env_file" > "${env_file}.tmp" 2>/dev/null
-            printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)" >> "${env_file}.tmp"
-            chmod --reference="$env_file" "${env_file}.tmp" 2>/dev/null
-            mv -f "${env_file}.tmp" "$env_file"
-        else
-            [[ -s "$env_file" && "$(tail -c1 "$env_file")" != "" ]] && printf '\n' >> "$env_file"
-            printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)" >> "$env_file"
-        fi
+        _env_kv+=("$key" "${updates[$key]}")
         changed=$(( changed + 1 ))
     done
+    if (( ${#_env_kv[@]} )) && ! _env_file_write "$env_file" "${_env_kv[@]}"; then
+        _api_error 500 "Failed to write .env file"; return
+    fi
 
     # A feed that is on (by this save, or by hand in .env) always has a token
     if { [[ "${updates[TRAEFIK_FEED_ENABLED]:-}" == "true" ]] || grep -qE '^TRAEFIK_FEED_ENABLED=["'"'"']?true' "$env_file" 2>/dev/null; } && ! grep -qE '^TRAEFIK_FEED_TOKEN=.+' "$env_file" 2>/dev/null; then
@@ -23831,21 +23825,45 @@ _feed_touch() {
     jq -nc --argjson t "$(date +%s)" --arg c "${CLIENT_IP:-}" '{last_poll: $t, last_client: $c}' > "$TRAEFIK_FEED_STATE.tmp" 2>/dev/null && mv -f "$TRAEFIK_FEED_STATE.tmp" "$TRAEFIK_FEED_STATE" 2>/dev/null
     return 0
 }
+# _env_file_write FILE KEY VALUE [KEY VALUE]... — sets each KEY in FILE (its line replaced, else added at the end; quoted as
+# Config does); _env_file_write FILE --content TEXT replaces the whole file. Every writer of .env goes through here: one at
+# a time (FILE's directory/.env.lock), through a temp file of this process and a checked mv, the file's mode kept (600 for
+# a new file, and for a whole new content). Two saves at once used to share one temp file: one was lost, or .env emptied.
+_env_file_write() {
+    local file="$1"; shift
+    local tmp="$file.tmp.${BASHPID:-$$}" lock; lock="$(dirname -- "$file")/.env.lock"
+    (
+        umask 077
+        if command -v flock >/dev/null 2>&1; then flock -w 10 9 || { echo "the .env lock is held" >&2; exit 1; }; fi
+        if [[ "${1:-}" == "--content" ]]; then
+            printf '%s\n' "${2%$'\n'}" > "$tmp" || exit 1
+            chmod 600 "$tmp" 2>/dev/null
+        else
+            if [[ -f "$file" ]]; then cat -- "$file" > "$tmp" || exit 1; else : > "$tmp" || exit 1; fi
+            local key value
+            while (( $# >= 2 )); do
+                key="$1" value="$2"; shift 2
+                if grep -q "^${key}=" "$tmp" 2>/dev/null; then
+                    { grep -v "^${key}=" "$tmp"; printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)"; } > "$tmp.n" && mv -f "$tmp.n" "$tmp" || exit 1
+                else
+                    [[ -s "$tmp" && "$(tail -c1 "$tmp")" != "" ]] && printf '\n' >> "$tmp"
+                    printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)" >> "$tmp" || exit 1
+                fi
+            done
+            if [[ -f "$file" ]]; then chmod --reference="$file" "$tmp" 2>/dev/null; else chmod 600 "$tmp" 2>/dev/null; fi
+        fi
+        mv -f "$tmp" "$file" || exit 1
+    ) 9>"$lock"
+    local rc=$?
+    rm -f "$tmp" "$tmp.n" 2>/dev/null
+    return "$rc"
+}
+
 # Write one KEY=VALUE into the root .env (same quoting as Config)
 _api_env_write() {
     local key="$1" value="$2" env_file="$BASE_DIR/.env"
     [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
-    [[ -f "$env_file" ]] || touch "$env_file" 2>/dev/null || return 1
-    if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-        grep -v "^${key}=" "$env_file" > "${env_file}.tmp" 2>/dev/null || return 1
-        printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)" >> "${env_file}.tmp"
-        chmod --reference="$env_file" "${env_file}.tmp" 2>/dev/null
-        mv -f "${env_file}.tmp" "$env_file"
-    else
-        [[ -s "$env_file" && "$(tail -c1 "$env_file")" != "" ]] && printf '\n' >> "$env_file"
-        printf '%s=%s\n' "$key" "$(envfile_quote "$value" bash)" >> "$env_file"
-    fi
-    return 0
+    _env_file_write "$env_file" "$key" "$value"
 }
 # The dynamic configuration for the remote Traefik. Prints JSON, sets
 # FEED_SKIPPED (routes it could not offer and why).
