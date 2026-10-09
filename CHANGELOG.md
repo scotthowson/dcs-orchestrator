@@ -5,6 +5,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+Found on the Proxmox lab hub (a small, loaded VM):
+
+- **Actions on one stack take turns.** A stop sent while a restart still ran started a second Compose run on the same
+  project; they removed each other's containers ("No such container") and left the stack down. The detached runner now
+  holds a per-stack lock around its Compose run, the activity record is closed only by the action it belongs to, and its
+  id carries a random part so two actions in one second stay apart.
+- **A burst of requests is answered instead of dropped.** At 50 in parallel, 191 of 200 requests got an empty answer: two
+  fronts reaching one worker in the same instant (the second was reset after it had sent its request), and a slow refusal
+  taken for a request the worker had seen. One front now talks to a worker at a time (a lock beside its socket), and
+  socat's own error tells a refusal from a failure after the connection. This keeps 4.0.42's limits on the front (30 s for
+  the head and the body, the 1 MB cap, a one-second budget to find a free worker).
+- **Connections beyond `API_MAX_CHILDREN` wait in a queue** (the listener's backlog is four times that, 256 at least)
+  instead of being dropped by the kernel after socat's queue of 5.
+- **The dashboard's heartbeat no longer waits behind a burst:** `GET /ping` takes a free worker when there is one, and
+  otherwise the API's fast path answers it after one look (it waited seconds, the dashboard showed "Reconnecting").
+- **A closed dashboard leaves no processes behind** on the hub and its VMs: the event stream's `tail --pid` and the VM
+  forwarders watched themselves instead of the handler, and the stream's helpers were not stopped when the client went.
+- **An on-demand container started at boot falls asleep again:** its announcement to Sablier is recorded only once Sablier
+  took it (right after a boot Sablier's container runs before its server listens).
+- **`GET /export/system` answered 500 on every server** (one `}` too many in its disk object), and the API's plugin hooks
+  are checked to get their context intact.
+- **After a reboot the hub watches its VMs at once,** not ten minutes later: a fleet-loop or VM App-Data lock made before
+  the machine started is taken over.
+- **A backup a reboot cut off leaves no half-written archive behind:** its staging folder and `.partial` archive are removed
+  when the listener starts, before the next backup, and when the status shows it died (never while a backup or restore
+  runs; an install without `BACKUP_DEST_DIR` starts as before).
+- **The dashboard gets the answer of an update that restarts the API:** the restart waits until the request that asked for
+  it has written its answer (a minute at most); it came first on a small VM and the dashboard got nothing.
+
+### Performance
+
+- The stack list looks for Traefik's routes once, not once per stack, and a hub does not inspect its own copy of a stack a
+  VM runs.
+- The config export trims `.env` lines in bash: three processes per line took 30 s for a long `.env` on a small VM, and a
+  value with an apostrophe was dropped.
+
 ### Changed
 
 - **Internal consolidation, no behaviour change.** Where the server had several helpers, or inline copies, for one job,
@@ -21,6 +59,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Answers, `docs/API.md`, settings and files on disk are unchanged (but for that lock file).
 - Tests: the two smoke checks that depend on timing wait longer on a busy machine: the chat stream stays open 20 s
   (was 5 s), and a relayed fleet event gets up to 20 s to reach the hub (was 1 s).
+- Tests: the worker-pool race tests never hang on a slow machine and read the listener's queue from socat's command line.
 
 ### Removed
 
