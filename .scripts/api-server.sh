@@ -21522,9 +21522,13 @@ handle_export() {
             if [[ -f "$BASE_DIR/.env" ]]; then
                 local vars=""
                 while IFS='=' read -r key value; do
+                    # trimmed in bash: three processes per line (echo | xargs | sed) took 30 s for a long .env on a small
+                    # VM, and xargs dropped any value with an apostrophe in it ("unmatched single quote")
+                    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
                     [[ -z "$key" || "$key" == \#* ]] && continue
-                    key=$(echo "$key" | xargs)
-                    value=$(echo "$value" | xargs | sed 's/^"//; s/"$//')
+                    value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
+                    if [[ "$value" == \"*\" && ${#value} -ge 2 ]]; then value="${value:1:${#value}-2}"
+                    elif [[ "$value" == \'*\' && ${#value} -ge 2 ]]; then value="${value:1:${#value}-2}"; fi
                     # SECURITY: Mask sensitive values (tokens, passwords, secrets, keys)
                     local key_upper="${key^^}"
                     if [[ "$key_upper" == *TOKEN* || "$key_upper" == *PASSWORD* || "$key_upper" == *SECRET* || "$key_upper" == *KEY* || "$key_upper" == *CREDENTIAL* ]]; then

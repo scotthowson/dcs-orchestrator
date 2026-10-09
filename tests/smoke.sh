@@ -581,6 +581,9 @@ check "stack activity unknown stack"    404 "$(auth_request GET /stacks/nope/act
 # the Export page's system file: "${x:-{}}" ends at the first brace, so a disk line got a "}" too many and every
 # export answered 500 (invalid JSON)
 check "export system: 200, valid JSON"    "200 yes" "$(R=$(auth_request GET /export/system); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -e '.system.disk | type == "object"' >/dev/null 2>&1 && echo yes || echo no)")"
+printf 'E2E_APOS="it'"'"'s here"\nE2E_SPACED =  two words  \n' >> "$WORK/.env"
+check "export config: an apostrophe and spaces survive" "it's here|two words" "$(auth_request GET /export/config | body_of | jq -r '"\(.data.E2E_APOS)|\(.data.E2E_SPACED)"' 2>/dev/null)"
+sed -i '/^E2E_APOS=/d; /^E2E_SPACED /d' "$WORK/.env"
 mkdir -p "$WORK/hookplug/p1/hooks"; printf '#!/bin/sh\ncat > "%s/hook-ctx.json"\n' "$WORK" > "$WORK/hookplug/p1/hooks/pre-start"; chmod +x "$WORK/hookplug/p1/hooks/pre-start"
 check "plugin hook: the context arrives intact" '{"stack":"a"}' "$(_lib eval 'PLUGINS_DIR="$WORK/hookplug" PLUGINS_HOOKS_ENABLED=true; _plugin_hooks_now pre-start "{\"stack\":\"a\"}"' >/dev/null 2>&1; cat "$WORK/hook-ctx.json" 2>/dev/null)"
 rm -rf "$WORK/hookplug" "$WORK/hook-ctx.json"
