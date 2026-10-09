@@ -9316,19 +9316,9 @@ _terminal_command_blocked() {
 }
 
 # Ten terminal commands a minute, the host and the VMs together: returns 0 when
-# the limit is reached, otherwise records this command in the window.
-_terminal_rate_limited() {
-    local rate_file="$BASE_DIR/.api-auth/terminal-rate.log" now one_min_ago recent_count=0
-    mkdir -p "$BASE_DIR/.api-auth"
-    now=$(date +%s); one_min_ago=$(( now - 60 ))
-    if [[ -f "$rate_file" ]]; then
-        recent_count=$(awk -v cutoff="$one_min_ago" '$1 >= cutoff' "$rate_file" 2>/dev/null | wc -l)
-        (( recent_count >= 10 )) && return 0
-    fi
-    # Keep only the current window in the rate log (it must not grow forever)
-    { [[ -f "$rate_file" ]] && awk -v cutoff="$one_min_ago" '$1 >= cutoff' "$rate_file" 2>/dev/null; echo "$now"; } > "$rate_file.tmp" && mv -f "$rate_file.tmp" "$rate_file"
-    return 1
-}
+# the limit is reached, otherwise records this command in the window. (61 s: the
+# window counts the commands of the last 60 seconds and of the second 60 s ago.)
+_terminal_rate_limited() { ! _api_rate_window "$BASE_DIR/.api-auth/terminal-rate.log" 10 61; }
 
 # POST /terminal/exec — Run a shell command on the host (terminal session required, 60 s limit)
 handle_terminal_exec() {
@@ -16443,6 +16433,22 @@ _api_config_path_ok() {
     [[ -n "$p" && ${#p} -le 200 && "$p" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$ ]]
 }
 
+# _traefik_stack_routes_dir — the custom_routes folder in the App-Data of the stack whose compose file runs Traefik
+# (container_name Traefik or a traefik image; a folder left by an old Traefik does not count); nothing when there is none.
+# _find_traefik_routes_dir is the wider lookup (any App-Data, the global one, the feed's .data/routes).
+_traefik_stack_routes_dir() {
+    local _s _ad
+    for _s in $(_api_get_stacks); do
+        _ad=$(_stack_appdata_override "$_s") || _ad="${APP_DATA_DIR:-$COMPOSE_DIR/$_s/App-Data}"
+        [[ "$_ad" == ./* ]] && _ad="$COMPOSE_DIR/$_s/${_ad#./}"
+        if [[ -d "$_ad/Traefik/custom_routes" ]] && grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_s/docker-compose.yml" 2>/dev/null; then
+            printf '%s' "$_ad/Traefik/custom_routes"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Helper: find Traefik custom_routes directory (shared by all route handlers)
 # Uses the SAME per-stack resolution as handle_traefik_status() which is known to work
 _find_traefik_routes_dir() {
@@ -19286,17 +19292,7 @@ handle_template_deploy() {
     # Checks both existing App-Data AND the deploy request variables.
     # -----------------------------------------------------------------------
     local traefik_routes_dir="" traefik_domain=""
-    for _check_stack in $(_api_get_stacks); do
-        local _check_appdata; _check_appdata=$(_stack_appdata_override "$_check_stack") || _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
-        [[ "$_check_appdata" == ./* ]] && _check_appdata="$COMPOSE_DIR/$_check_stack/${_check_appdata#./}"
-        if [[ -d "$_check_appdata/Traefik/custom_routes" ]]; then
-            # Verify this stack actually runs Traefik (not a stale artifact)
-            if grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_check_stack/docker-compose.yml" 2>/dev/null; then
-                traefik_routes_dir="$_check_appdata/Traefik/custom_routes"
-                break
-            fi
-        fi
-    done
+    traefik_routes_dir=$(_traefik_stack_routes_dir)
     # A Traefik whose routes directory sits elsewhere (a global App-Data next to per-stack ones): the same lookup the rest of the API uses
     if [[ -z "$traefik_routes_dir" ]]; then
         local _found_dir; _found_dir=$(_find_traefik_routes_dir 2>/dev/null)
@@ -19475,16 +19471,7 @@ handle_template_deploy() {
     # the config copy above creates the custom_routes directory. The early detection at
     # the top of the handler found nothing because the directory didn't exist yet.
     if [[ -z "$traefik_routes_dir" ]]; then
-        for _check_stack in $(_api_get_stacks); do
-            local _check_appdata; _check_appdata=$(_stack_appdata_override "$_check_stack") || _check_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_check_stack/App-Data}"
-            [[ "$_check_appdata" == ./* ]] && _check_appdata="$COMPOSE_DIR/$_check_stack/${_check_appdata#./}"
-            if [[ -d "$_check_appdata/Traefik/custom_routes" ]]; then
-                if grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_check_stack/docker-compose.yml" 2>/dev/null; then
-                    traefik_routes_dir="$_check_appdata/Traefik/custom_routes"
-                    break
-                fi
-            fi
-        done
+        traefik_routes_dir=$(_traefik_stack_routes_dir)
     fi
 
     # -----------------------------------------------------------------------
@@ -20939,17 +20926,8 @@ handle_template_undeploy() {
     local routes_removed="false"
 
     # ALWAYS remove Traefik route files and CF DNS on undeploy (these are infrastructure, not user data)
-    local _routes_dir=""
-    local _sd_stack
-    for _sd_stack in $(_api_get_stacks); do
-        local _sd_appdata; _sd_appdata=$(_stack_appdata_override "$_sd_stack") || _sd_appdata="${APP_DATA_DIR:-$COMPOSE_DIR/$_sd_stack/App-Data}"
-        [[ "$_sd_appdata" == ./* ]] && _sd_appdata="$COMPOSE_DIR/$_sd_stack/${_sd_appdata#./}"
-        if [[ -d "$_sd_appdata/Traefik/custom_routes" ]] && \
-           grep -q 'container_name: Traefik\|image: traefik' "$COMPOSE_DIR/$_sd_stack/docker-compose.yml" 2>/dev/null; then
-            _routes_dir="$_sd_appdata/Traefik/custom_routes"
-            break
-        fi
-    done
+    local _routes_dir
+    _routes_dir=$(_traefik_stack_routes_dir)
     # Collect actual subdomains from route files BEFORE deleting them
     local -a _dns_subs_to_remove=()
     if [[ -n "$_routes_dir" ]]; then

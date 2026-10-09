@@ -54,6 +54,74 @@ The API writes its state to `.api-auth/`, `.data/`, `.secrets/` and `logs/`; git
 
 `CLAUDE.md` in the repository root has the full list of conventions.
 
+## Helpers and where they live
+
+One helper per job. Before writing a pipeline that reads `.env`, checks a container or takes a lock, look
+here: the helper below is the one the rest of the code uses, with the same arguments and exit status.
+Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.sh`) call live in
+`api-server.sh` or in a library it sources at start (`envfile.sh`, `secrets.sh`).
+
+| Job | The helper | Where | What it replaced |
+|---|---|---|---|
+| Answer a request | `_api_success BODY`, `_api_error CODE MESSAGE`, `_api_response CODE BODY` | `api-server.sh` | — |
+| A string inside hand-built JSON | `_api_json_escape` (also strips ANSI and control characters) | `api-server.sh` | — |
+| Update a JSON file | `_api_jq_update_file FILE [jq args] FILTER` (tmp + lock + mv) | `api-server.sh` | — |
+| Read one `.env` key | `envfile_get FILE KEY` (first line, every quote character dropped) | `.lib/envfile.sh` | 18 inline `grep -m1 '^KEY=' … \| cut \| tr` reads |
+| Load a whole `.env` as data | `_api_load_env_file FILE` (quotes, escapes, comments, reserved keys) | `api-server.sh` | — |
+| A key over every stack's `.env`, then the root one | `_stack_envs_first KEY` | `api-server.sh` | the loops in `_find_traefik_domain`, the template deploy, the CrowdSec trusted LAN (×2) |
+| Write a root `.env` key | `_api_env_write KEY VALUE` (bash quoting, line moved to the end) | `api-server.sh` | the copy inside `POST /config` |
+| Write a stack `.env` key | `_envfile_set FILE KEY VALUE [bash\|compose]` (quoted, in place) | `api-server.sh` | — |
+| Quote a value for `.env` | `envfile_quote VALUE [bash\|compose]` | `.lib/envfile.sh` | — |
+| Now, as ISO 8601 UTC | `_api_now_iso`; epoch seconds are plain `date +%s` | `api-server.sh` | 52 inline `date -u '+%Y-%m-%dT%H:%M:%SZ'`, the wrapper `_api_now_epoch` |
+| Is a container running | `_container_running NAME` | `api-server.sh` | 12 inline `docker inspect -f '{{.State.Running}}'` tests |
+| A container's label | `_container_label NAME LABEL` | `api-server.sh` | 13 inline compose-label inspects |
+| Run cscli in CrowdSec | `_cs_run OUTVAR ARGS…` (stdout into OUTVAR, stderr into `CS_ERR`, 25 s); `_cs_pipe OUTVAR TEXT ARGS…` (the same with TEXT on stdin, `docker exec -i`, 60 s) | `.lib/crowdsec.sh` | — |
+| The Traefik routes folder | `_find_traefik_routes_dir` (any App-Data, then the feed's `.data/routes`); `_traefik_stack_routes_dir` (only the stack whose compose file runs Traefik) | `api-server.sh` | three copies of the second lookup in the template deploy and removal |
+| Write a file CrowdSec's config folder may not let us write | `_crowdsec_conf_put DIR REL CONTENT` (direct, else `docker cp`) | `api-server.sh` | — |
+| Lock `tokens.json` / `users.json` | `_api_with_auth_lock tokens\|users CMD…` | `api-server.sh` | `_api_with_tokens_lock`, `_api_with_users_lock`, the inline lock of `_api_store_token` |
+| Is a job's lock held | `_lock_busy LOCKFILE` | `api-server.sh` | 3 inline `flock -n` probes |
+| Start a detached job of the API script | `_api_job_launch LOCKFILE LOG ARGS…` | `api-server.sh` | the two copies in `_self_update_launch`, `_image_update_launch` |
+| Unattended-update history | `_update_history_add dcs\|images RESULT MESSAGE [FROM TO]` | `api-server.sh` | `_self_update_history_add`, `_image_update_history_add` |
+| A sliding-window rate limit | `_api_rate_window FILE LIMIT SECONDS` | `api-server.sh` | the terminal's own copy (`_terminal_rate_limited` is now a call) |
+| Audit | `_api_audit_log IP EVENT USER DETAIL` (auth log, mirrored), `_audit_log ACTION DETAIL` (the JSON log behind `GET /audit` and webhooks) | `api-server.sh` | — |
+| Secrets | `secrets_get`, `secrets_env_exports`, `compose_with_secrets` | `.lib/secrets.sh` | the aliases `_decrypt_secret`, `_secrets_env_exports`, `_compose_with_secrets` |
+| A compose file backup before a template changes it | `_compose_backup DIR TIMESTAMP` (`.bak.TIMESTAMP`, newest 5 kept) | `api-server.sh` | the copies in the template deploy and removal |
+| Parse a `.env` for the editor | `_env_file_vars_json FILE` | `api-server.sh` | the copies in `GET /env`, `GET /stacks/{stack}/env` |
+| Terminal title, the traps' exit | `_set_terminal_title`, `_graceful_exit` | `.lib/docker-utils.sh` | the copies in `start.sh` and `stop.sh` |
+
+Kept apart on purpose:
+
+- **`_envfile_set` and `_stack_env_set`.** `_envfile_set` quotes the value and also replaces `export KEY=`
+  and `KEY =` lines; `_stack_env_set` writes the value as given (Traefik add-on switches) and matches
+  `KEY=` only.
+- **`_pve_norm_url` (API) and `_pve_clean_url` (`.lib/setup-checks.sh`).** The API turns `http` into `https`
+  only on port 8006; setup turns it always and retries plain `http` itself. Different processes, different rule.
+- **The `.bak` names.** `.env.bak` (one, overwritten), `docker-compose.yml.bak.TIMESTAMP` (template changes,
+  newest 5), `configuration.yml.bak-TIME` (Authelia), `.bak-repair` (`envfile_repair`), CrowdSec's
+  `*.TIME.bak` inside the container: the restore, the backup excludes and the cleanups know these names.
+- **The audit files.** `auth-audit.log`, `.data/audit.jsonl`, `terminal-audit.log`, `terminal-auth-audit.log`
+  and `cf-dns-audit.log` have their own formats and readers.
+- **Writing Authelia's `configuration.yml`** rewrites the file in place (`cat >`, directly or through
+  `docker exec -i Authelia`), after a dated backup; `_crowdsec_conf_put` replaces a file (`mv`, or `docker cp`).
+- **Timeouts around `docker exec`** differ per call (8 to 60 s) on purpose: a `cscli` import is not a `test -e`.
+- **Hand-built 4xx bodies with a `reason`** (CrowdSec, chat) answer through `_api_response`, which does not count
+  them in the error statistics the way `_api_error` does; merging them would change `GET /stats`.
+- **The scenario labels** live once, in `_CS_LABEL_TABLE` (`.lib/crowdsec.sh`). The Discord template's
+  `if hasPrefix …` chain is generated from it (`_cs_notify_go_template`); the shipped
+  `.templates/crowdsec/files/notifications-discord.yaml` is that output, kept so a template deploy works
+  without the CrowdSec page, and `tests/smoke.sh` (notify/golden) fails when the two differ.
+- **The standalone tools** (`health-check.sh`, `logs-viewer.sh`, `maintenance.sh`, …) keep their small `_xx_repeat`
+  and color helpers: each runs from a bare checkout without sourcing a library.
+- **`_jsonl_escape`** (`.lib/logger.sh`) serves `start.sh`'s structured log, outside the API.
+- **The ntfy pushes** of `.scripts/run.sh`, `.scripts/stop.sh` and `ntfy-status.sh` differ in title, priority, tags and
+  target (`NTFY_URL` or `_ntfy_target`), and in what a failed `curl` returns (some end in `|| true`, some do not).
+- **`_api_update_user_hash_locked` and `_api_totp_update_user_locked`** each change their own fields of one account under
+  the same lock; one generic writer would add a `jq` run to every sign-in and hide which fields a path may touch.
+- **A stack's App-Data folder** is worked out two ways: `_stack_appdata_dir` (the stack's drive, else `APP_DATA_DIR`
+  made absolute below the stack's folder, trailing `/` dropped) and an inline rule in the Traefik and Authelia code paths
+  (only a leading `./` is resolved). They agree for the shipped `./App-Data` and for absolute paths; they differ for a
+  relative `APP_DATA_DIR` without `./` and for a trailing `/`, so making them one is a behaviour change left for a decision.
+
 ## Tests
 
 ```bash
@@ -122,7 +190,8 @@ port; for an API elsewhere, type its address into the server field of the sign-i
 
 ## Adding an API route
 
-1. Write the handler with a comment on the line above it: `# METHOD /path — what it does`.
+1. Write the handler with a comment on the line above it: `# METHOD /path — what it does`. Use the
+   [shared helpers](#helpers-and-where-they-live) rather than a new copy of their pipelines.
 2. Add the route to the router and validate every path parameter with the `_api_validate_*` helpers.
 3. Decide who may call it in `_api_route_allowed`.
 4. Run `.scripts/api-docs.sh` to regenerate `docs/API.md` and the `GET /` catalogue.

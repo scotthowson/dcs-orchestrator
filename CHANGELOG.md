@@ -3,6 +3,39 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **Internal consolidation, no behaviour change.** Where the server had several helpers, or inline copies, for one job,
+  it now has one: reading a `.env` key (`envfile_get`), a key over every stack's `.env` (`_stack_envs_first`), writing a
+  root `.env` key (`_api_env_write`, which `POST /config` copied), the ISO time now (`_api_now_iso`), whether a container
+  runs (`_container_running`) and its labels (`_container_label`), the accounts and sessions locks
+  (`_api_with_auth_lock`), starting a detached job (`_api_job_launch`), the update history (`_update_history_add`), the
+  `.env` editor's parser, the Traefik stack's routes folder (`_traefik_stack_routes_dir`), the network connect/disconnect and schedule delete/toggle handlers, the compose backup of a
+  template change, the terminal's rate limit (now `_api_rate_window`), and `start.sh`/`stop.sh`'s terminal title and
+  exit trap. The secrets library's old aliases (`_decrypt_secret`, `_secrets_env_exports`, `_compose_with_secrets`) are
+  gone; callers use its own names. The list, and what stays apart on purpose, is in
+  [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#helpers-and-where-they-live). Answers, `docs/API.md`, settings and files on
+  disk are unchanged (one corner case aligned: a root `.env` that held only the key being written is now rewritten by
+  every writer, not by `POST /config` alone).
+
+### Removed
+
+- Dead code nothing called (no behaviour change):
+  - `.lib/metrics.sh`, `.lib/rollback.sh`, `.lib/scheduler.sh`, `.lib/health-score.sh`, `.lib/sse.sh`: sourced by
+    `start.sh`, none of their functions ever ran (the API has its own metrics, snapshots, schedules, health scores and
+    event stream).
+  - `.lib/debugger.sh`, `.lib/error_handling.sh`: sourced by nothing.
+  - `.lib/helpers.sh`: `clean-up.sh` used `confirm_deletion` alone; the prompt now lives in `clean-up.sh`, unchanged.
+  - `.scripts/ntfy-status-restart.sh` (sourced by nothing) and `.scripts/ntfy-status-stop.sh` (its one function was
+    never called).
+  - `plugins_list`, `plugins_get`, `plugins_install`, `plugins_remove`, `plugins_enable`, `plugins_disable`,
+    `plugins_run_hook`, `plugins_list_templates`, `plugins_validate` (`start.sh` uses `plugins_init` and `plugins_scan`;
+    the API manages plugins itself).
+  - `secrets_list`, `secrets_export_bundle`, `secrets_import_bundle`, `_fleet_save`, `_cs_prune_backups`,
+    `_mt_human_size`, `_sm_print`, `_sm_get_stack_containers`, and `ntfy-status.sh`'s `get_container_memory_usage`,
+    `get_container_cpu_usage` and `check_resource_usage`.
 ## [4.0.42] - 2026-10-09
 
 ### Security
