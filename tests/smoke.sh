@@ -1990,6 +1990,8 @@ _EV0=$(grep -c '"action":"fleet_event"' "$WORK/.data/audit.jsonl" 2>/dev/null); 
 _mlib eval '_fire_notifications stack_stopped relayed=1 stack=demo; sleep 1'
 check "relay: a relayed event stays put" "$_EV0" "$(grep -c '"action":"fleet_event"' "$WORK/.data/audit.jsonl" 2>/dev/null)"
 _mlib eval '_fire_notifications stack_stopped stack=demo; sleep 1'
+# the member posts it in the background: up to 20 s for it to land on a busy machine
+for _w in $(seq 1 20); do (( $(grep -c '"action":"fleet_event"' "$WORK/.data/audit.jsonl" 2>/dev/null) > _EV0 )) && break; sleep 1; done
 check "relay: a fresh event reaches the hub" $((_EV0 + 1)) "$(grep -c '"action":"fleet_event"' "$WORK/.data/audit.jsonl" 2>/dev/null)"
 # a member may post 30 events a minute; the 31st is refused
 rm -f "$WORK/.data/rates/relay-$MID"
@@ -9328,12 +9330,12 @@ check "chat: …in the audit"                      1 "$(grep -c 'scott cleared t
 check "chat: …and live"                          clear "$(tail -1 "$CHD/live.jsonl" | jq -r '.type')"
 check "chat: ids do not start again"             67 "$(ch_post "$CHU" "fresh start" | body_of | jq -r '.message.id')"
 
-# the live stream (event "chat" over GET /stream)
+# the live stream (event "chat" over GET /stream): open for 20 s, so the three changes below reach it on a busy machine too
 _sse_out="$CHW/sse-user.out"; _sse_bot="$CHW/sse-bot.out"
 touch -d '-10 minutes' "$CHD/presence/austin"
-{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHU"; sleep 6; } | timeout 5 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_out" 2>/dev/null &
+{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHU"; sleep 21; } | timeout 20 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_out" 2>/dev/null &
 _sse_pid=$!
-{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHB"; sleep 6; } | timeout 5 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_bot" 2>/dev/null &
+{ printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHB"; sleep 21; } | timeout 20 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_bot" 2>/dev/null &
 _sse_bpid=$!
 sleep 2
 ch_post "$CHA" "live from scott" >/dev/null

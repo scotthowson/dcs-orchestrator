@@ -53,18 +53,6 @@ get_container_uptime() {
     fi
 }
 
-# Return memory usage for a container.
-get_container_memory_usage() {
-    local container="$1"
-    docker stats --no-stream --format "{{.MemUsage}}" "$container" 2>/dev/null || echo "N/A"
-}
-
-# Return CPU usage for a container.
-get_container_cpu_usage() {
-    local container="$1"
-    docker stats --no-stream --format "{{.CPUPerc}}" "$container" 2>/dev/null || echo "N/A"
-}
-
 # Gather high-level system information.
 get_system_info() {
     local total_containers total_images disk_usage load_avg
@@ -278,63 +266,6 @@ Infrastructure running optimally."
     fi
 
     log_success "Notification sent successfully"
-}
-
-# =============================================================================
-# EXTENDED MONITORING
-# =============================================================================
-
-# Check for containers with high CPU usage and send an alert if found.
-check_resource_usage() {
-    log_bold_info "Gathering system metrics..."
-
-    local -a critical_containers=()
-    local -a important_containers=()
-
-    if [[ -n "${CRITICAL_CONTAINERS:-}" ]]; then
-        IFS=',' read -ra critical_containers <<< "$CRITICAL_CONTAINERS"
-    fi
-    if [[ -n "${IMPORTANT_CONTAINERS:-}" ]]; then
-        IFS=',' read -ra important_containers <<< "$IMPORTANT_CONTAINERS"
-    fi
-
-    local -a high_cpu_containers=()
-    local server_name="${SERVER_NAME:-Docker Server}"
-
-    for container in "${critical_containers[@]}" "${important_containers[@]}"; do
-        container="${container## }"; container="${container%% }"
-        [[ -z "$container" ]] && continue
-
-        if docker ps --format "{{.Names}}" | grep -q "^${container}$"; then
-            local cpu
-            cpu=$(docker stats --no-stream --format "{{.CPUPerc}}" "$container" 2>/dev/null)
-
-            if [[ "$cpu" =~ ^([0-9]+\.?[0-9]*)% ]]; then
-                local cpu_num="${BASH_REMATCH[1]}"
-                if (( $(echo "$cpu_num > 80" | bc -l 2>/dev/null) )); then
-                    high_cpu_containers+=("$container ($cpu)")
-                fi
-            fi
-        fi
-    done
-
-    if [[ ${#high_cpu_containers[@]} -gt 0 ]] && [[ -n "${NTFY_URL:-}" ]]; then
-        local message
-        message="RESOURCE USAGE ALERT
-
-High CPU usage detected:
-$(printf " - %s\n" "${high_cpu_containers[@]}")
-
-Monitor system performance closely."
-
-        curl -s \
-            -H "Title: Resource Alert - $server_name" \
-            -H "Priority: default" \
-            -H "X-Tags: performance,monitoring,resources" \
-            -d "$message" \
-            ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} \
-            "$(_ntfy_target)" >/dev/null 2>&1
-    fi
 }
 
 # =============================================================================

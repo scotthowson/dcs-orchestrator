@@ -93,20 +93,6 @@ _mt_kv() {
     printf "  ${_MT_DIM}%s${_MT_RESET} %s ${_MT_BOLD}%s${_MT_RESET}\n" "$key" "$dots" "$value"
 }
 
-# Convert bytes to human-readable
-_mt_human_size() {
-    local bytes="$1"
-    if [[ "$bytes" -ge 1073741824 ]]; then
-        awk -v b="$bytes" 'BEGIN {printf "%.1f GB", b/1073741824}'
-    elif [[ "$bytes" -ge 1048576 ]]; then
-        awk -v b="$bytes" 'BEGIN {printf "%.1f MB", b/1048576}'
-    elif [[ "$bytes" -ge 1024 ]]; then
-        awk -v b="$bytes" 'BEGIN {printf "%.1f KB", b/1024}'
-    else
-        printf "%d B" "$bytes"
-    fi
-}
-
 # =============================================================================
 # COMMAND: REPORT (default)
 # =============================================================================

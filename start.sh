@@ -154,22 +154,12 @@ _source_optional "$BASE_DIR/.scripts/health-check.sh"        "health-check.sh"
 _source_optional "$BASE_DIR/.scripts/system-info.sh"         "system-info.sh"
 
 # v2.0 subsystem libraries
-_source_optional "$BASE_DIR/.lib/metrics.sh"                 "metrics.sh"
-_source_optional "$BASE_DIR/.lib/rollback.sh"                "rollback.sh"
 _source_optional "$BASE_DIR/.lib/secrets.sh"                 "secrets.sh"
-_source_optional "$BASE_DIR/.lib/scheduler.sh"               "scheduler.sh"
-_source_optional "$BASE_DIR/.lib/health-score.sh"            "health-score.sh"
 _source_optional "$BASE_DIR/.lib/plugins.sh"                 "plugins.sh"
-_source_optional "$BASE_DIR/.lib/sse.sh"                     "sse.sh"
 
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
-
-# Set the terminal title (non-fatal if not supported)
-_set_terminal_title() {
-    echo -ne "\033]0;${1:-Docker Services Manager}\007" 2>/dev/null || true
-}
 
 # Verify that the Docker environment is ready
 _verify_environment() {
@@ -201,14 +191,6 @@ _verify_environment() {
     log_keyvalue "Compose" "$(_docker_compose_version_string)"
     log_success "Environment verification passed"
     return 0
-}
-
-# Graceful exit handler
-_graceful_exit() {
-    local exit_code="${1:-1}"
-    log_warning "Script interrupted (exit code: $exit_code)"
-    close_logger
-    exit "$exit_code"
 }
 
 # =============================================================================

@@ -107,11 +107,6 @@ _sm_detect_compose() {
 # UTILITY FUNCTIONS
 # =============================================================================
 
-_sm_print() {
-    local color="$1"; shift
-    echo "${color}${*}${_SM_RESET}"
-}
-
 _sm_header() {
     local title="$1"
     local width=60
@@ -163,13 +158,6 @@ _sm_validate_stack() {
     fi
 
     return 0
-}
-
-# Get running containers for a stack
-_sm_get_stack_containers() {
-    local stack="$1"
-    local compose_file="$COMPOSE_DIR/$stack/docker-compose.yml"
-    $DOCKER_COMPOSE_CMD -f "$compose_file" ps --format '{{.Name}}|{{.Status}}|{{.Ports}}' 2>/dev/null
 }
 
 # =============================================================================

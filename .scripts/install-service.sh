@@ -25,6 +25,8 @@ RST='\033[0m'
 # Detect DCS base directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=.lib/envfile.sh
+source "$BASE_DIR/.lib/envfile.sh"
 
 # Check root
 if [[ $EUID -ne 0 ]]; then
@@ -48,7 +50,7 @@ DCS_HOME=$(getent passwd "$DCS_USER" 2>/dev/null | cut -d: -f6)
 # Read API bind address from .env if available
 API_BIND="0.0.0.0"
 if [[ -f "$BASE_DIR/.env" ]]; then
-    _bind=$(grep -m1 '^API_BIND=' "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    _bind=$(envfile_get "$BASE_DIR/.env" API_BIND || true)
     [[ -n "$_bind" ]] && API_BIND="$_bind"
 fi
 
@@ -216,7 +218,7 @@ echo ""
 # bind the same port until that instance is gone, so the hand-over is: stop it, start the
 # service, wait for /ping. Unattended installs (no terminal, or DCS_UNATTENDED=true) never prompt.
 _api_port=""
-[[ -f "$BASE_DIR/.env" ]] && _api_port=$(grep -m1 '^API_PORT=' "$BASE_DIR/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+[[ -f "$BASE_DIR/.env" ]] && _api_port=$(envfile_get "$BASE_DIR/.env" API_PORT || true)
 [[ "$_api_port" =~ ^[0-9]+$ ]] || _api_port=9876
 _start_now=false
 if ! systemctl is-active --quiet dcs-api.service; then

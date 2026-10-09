@@ -302,15 +302,6 @@ _cs_wait_healthy() {
     return 1
 }
 
-# keep the newest N backups of one kind
-_cs_prune_backups() {
-    local kind="$1" keep="${2:-10}" f i=0
-    while IFS= read -r f; do
-        i=$(( i + 1 ))
-        (( i > keep )) && rm -f "$f"
-    done < <(ls -1t "$CS_BACKUP_DIR/$kind"-*.yaml 2>/dev/null)
-}
-
 # _cs_copy_in TEXT DEST MODE — write TEXT to DEST inside the container (docker cp of a private temp file)
 _cs_copy_in() {
     local text="$1" dest="$2" mode="$3" tmp rc
@@ -1459,7 +1450,7 @@ handle_crowdsec_notifications_apply() {
     _cs_target || return
     if [[ -z "$webhook" ]] && [[ -z "$(_cs_webhook_resolve global)" && -z "$(_cs_webhook_resolve custom)" ]]; then
         # the webhook the template was deployed with, else the one CrowdSec already posts to
-        local proj; proj=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$CS_NAME" 2>/dev/null)
+        local proj; proj=$(_container_label "$CS_NAME" com.docker.compose.project.working_dir)
         [[ -n "$proj" && -f "$proj/.env" ]] && webhook=$(sed -n 's/^DISCORD_WEBHOOK_URL=//p' "$proj/.env" | head -1 | tr -d '"'"'"'')
         [[ "$webhook" =~ ^\$\{SECRETS[._]([A-Za-z_][A-Za-z0-9_]*)\}$ ]] && webhook=$(secrets_get "${BASH_REMATCH[1]}" 2>/dev/null || true)
         _discord_is_webhook "$webhook" || webhook=""
@@ -1687,11 +1678,8 @@ _CS_PLUGIN_LIMITS='{"update_interval":[10,3600],"default_decision_seconds":[10,3
 
 # the LAN Traefik trusts (TRAEFIK_TRUSTED_LAN of the proxy's stack), or the default the template uses
 _cs_plugin_lan() {
-    local lan="" ef t
-    for ef in "$COMPOSE_DIR"/*/.env "$BASE_DIR/.env"; do
-        [[ -f "$ef" ]] || continue
-        lan=$(grep -m1 '^TRAEFIK_TRUSTED_LAN=' "$ef" 2>/dev/null | cut -d= -f2- | tr -d '"' | tr -d "'"); [[ -n "$lan" ]] && break
-    done
+    local lan t
+    lan=$(_stack_envs_first TRAEFIK_TRUSTED_LAN)
     # it is written into the middleware file as a list entry: only an address or a network may go there (a hand-edited .env must not be able to break that file)
     if [[ -n "$lan" ]] && t=$(_cs_norm_target "$lan"); then lan="${t#*$'\t'}"; else lan="192.168.1.0/24"; fi
     printf '%s' "$lan"

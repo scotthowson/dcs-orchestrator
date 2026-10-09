@@ -14,20 +14,18 @@
 # Logger functions (log_info, log_error, etc.) must be available.
 # =============================================================================
 
-# confirm_deletion lives in .lib/helpers.sh, which the entry points do not
-# source; load it here so the safety prompt below is real
-if ! command -v confirm_deletion >/dev/null 2>&1 && [[ -f "${BASE_DIR:-.}/.lib/helpers.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "${BASE_DIR:-.}/.lib/helpers.sh"
-fi
+# confirm_deletion PROMPT — the safety prompt below: the question in red, one key within 8 seconds, anything but y/yes
+# (or no answer) is a no. Kept when the caller brought its own.
 if ! command -v confirm_deletion >/dev/null 2>&1; then
-    # Minimal fallback: default to "no", never block a headless run
     confirm_deletion() {
-        local prompt="${1:-Are you sure?}" answer=""
-        [[ -t 0 ]] || return 1
-        read -r -t 8 -p "$prompt [y/N] " answer || true
+        local prompt=$1
+        echo -ne "\033[1;31m$prompt \033[0m[y/N]: "
+        read -r -n 1 -t 8 response
         echo
-        [[ "$answer" =~ ^[Yy]$ ]]
+        if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+            return 0
+        fi
+        return 1
     }
 fi
 
