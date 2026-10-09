@@ -172,6 +172,12 @@ check "viewer cannot mutate"            403 "$(viewer_request POST /maintenance/
 check "viewer cannot install plugins"   403 "$(viewer_request POST /plugins/install '{"url":"https://example.com/x.git"}' | status_of)"
 check "viewer can logout"               200 "$(viewer_request POST /auth/logout | status_of)"
 check "viewer token gone after logout"  401 "$(viewer_request GET /stacks | status_of)"
+# a sign-in waiting for its 2FA code holds a token for POST /auth/totp/validate alone: it is never a session
+auth_request POST /auth/users '{"username":"twofa-smoke","password":"Twofa-pass-1234","role":"admin"}' >/dev/null
+jq '(.[] | select(.username == "twofa-smoke")) |= (.totp_enabled = true | .totp_secret = "3132333435363738393031323334353637383930")' "$WORK/.api-auth/users.json" > "$WORK/.api-auth/users.json.t" && mv -f "$WORK/.api-auth/users.json.t" "$WORK/.api-auth/users.json" && chmod 600 "$WORK/.api-auth/users.json"
+_TP=$(request POST /auth/login '{"username":"twofa-smoke","password":"Twofa-pass-1234"}' "${AUTH[@]}" | body_of | jq -r '.totp_token // empty' 2>/dev/null)
+check "2FA: a pending sign-in's token is not a session" "yes 401" "$([[ -n "$_TP" ]] && echo yes || echo no) $(printf 'GET /auth/users HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n' "$_TP" | env "${AUTH[@]}" "$API" --handle-request 2>/dev/null | status_of)"
+jq 'map(select(.username != "twofa-smoke"))' "$WORK/.api-auth/users.json" > "$WORK/.api-auth/users.json.t" && mv -f "$WORK/.api-auth/users.json.t" "$WORK/.api-auth/users.json" && chmod 600 "$WORK/.api-auth/users.json"
 
 echo "Input validation"
 check "env save rejects command subst"  400 "$(auth_request POST /env '{"content":"FOO=$(id)"}' | status_of)"
@@ -244,6 +250,7 @@ check "backup: …and no install state"                 0 "$(tar -tzf "$BKW/back
 echo 'row2' >> "$BKW/Stacks/demo/App-Data/db/data.db"; echo 'stray' > "$BKW/Stacks/demo/App-Data/db/data.db-wal"
 echo 'B=2' > "$BKW/Stacks/demo/.env"; rm -f "$BKW/Stacks/demo/config/app.yml"; echo '{"users":["x"]}' > "$BKW/.api-auth/users.json"
 _bkr() { _backup_restore_run "$1" "${2:-}"; printf '%s|%s' "${BR_ERROR:-ok}" "$BR_RESULT"; }
+echo 9.9.9-smoke > "$BKW/VERSION"   # the code is newer than the archive: its VERSION stays
 BKR=$(_bk _bkr "$BKA")
 check "restore: done"                                 "ok demo,other true" "$(printf '%s' "${BKR%%|*}") $(jq -r '"\(.stacks | join(",")) \(.install)"' <<< "${BKR#*|}")"
 check "restore: the data as it was"                   row1 "$(tr -d '\n' < "$BKW/Stacks/demo/App-Data/db/data.db")"
@@ -254,6 +261,31 @@ check "restore: sessions and the key stay"            "tok key" "$(cat "$BKW/.ap
 check "restore: the folder before is kept"            "row1 row2" "$(cat "$BKW/.data/pre-restore/"*/Stacks/demo/App-Data/db/data.db | tr '\n' ' ' | sed 's/ $//')"
 check "restore: a stack not in the backup is refused" "nope is not in this backup" "$(_bk _bkr "$BKA" nope | cut -d'|' -f1)"
 check "restore: one stack"                            "ok other false" "$(_bk _bkr "$BKA" other | { IFS='|' read -r e r; printf '%s %s' "$e" "$(jq -r '"\(.stacks | join(",")) \(.install)"' <<< "$r")"; })"
+check "restore: VERSION stays the code's"            9.9.9-smoke "$(cat "$BKW/VERSION")"
+cp "$ROOT/VERSION" "$BKW/VERSION"
+# an archive changed by hand: _bkcraft OUT JQ-FILTER (the manifest), with the files in $BKW/craft-extra added under .dcs-backup
+_bkcraft() {
+    local d="$BKW/craft"; rm -rf "$d"; mkdir -p "$d"; tar -xzf "$BKA" -C "$d"
+    jq -c "$2" "$d/.dcs-backup/manifest.json" > "$d/m.json" && mv -f "$d/m.json" "$d/.dcs-backup/manifest.json"
+    [[ -d "$BKW/craft-extra" ]] && cp -r "$BKW/craft-extra/." "$d/.dcs-backup/"
+    tar -czf "$1" -C "$d" .; rm -rf "$d" "$BKW/craft-extra"
+}
+# an App-Data part goes only where the stack keeps its App-Data here: an empty folder the manifest names is not written to
+mkdir -p "$BKW/empty-dir" "$BKW/craft-extra/appdata" "$BKW/plant"; echo planted > "$BKW/plant/planted"; chmod 4755 "$BKW/plant/planted"
+tar -cf "$BKW/craft-extra/appdata/demo.tar" -C "$BKW/plant" .
+_bkcraft "$BKW/crafted-ad.tar.gz" ".parts += [{kind: \"appdata\", name: \"demo\", appdata_path: \"$BKW/empty-dir\", files: 1}]"
+BKR=$(_bk _bkr "$BKW/crafted-ad.tar.gz" demo)
+check "restore: an App-Data path only the manifest names is refused" "0 yes" "$(find "$BKW/empty-dir" -mindepth 1 | wc -l) $(jq -r '.warnings | join(" ")' <<< "${BKR#*|}" 2>/dev/null | grep -q "not where demo keeps its App-Data" && echo yes || echo no)"
+# a volume whose copy as it is now cannot be made is not emptied: skipped, and said
+mkdir -p "$BKW/vol-mp" "$BKW/vsrc" "$BKW/craft-extra/volumes" "$BKW/vstub"; echo keep-me > "$BKW/vol-mp/data"; echo from-archive > "$BKW/vsrc/data"
+tar -cf "$BKW/craft-extra/volumes/smoke_vol.tar" -C "$BKW/vsrc" .
+_bkcraft "$BKW/crafted-vol.tar.gz" '.parts += [{kind: "volume", name: "smoke_vol", stack: "demo", volume: "vol"}]'
+printf '#!/bin/bash\n[[ "$1 $2" == "volume inspect" ]] && { [[ "$3" == -f ]] && echo %q; exit 0; }\nexit 0\n' "$BKW/vol-mp" > "$BKW/vstub/docker"
+printf '#!/bin/bash\n[[ " $* " == *" --one-file-system "* ]] && exit 2\nexec %q "$@"\n' "$(command -v tar)" > "$BKW/vstub/tar"; chmod +x "$BKW/vstub/docker" "$BKW/vstub/tar"
+# shellcheck disable=SC2034,SC2209  # FLEET_READER and AUTH_ROLE are read by the functions it calls
+BKR=$( ( set --; source "$BKW/.scripts/api-server.sh" >/dev/null 2>&1; set +e; FLEET_READER=root; AUTH_ROLE=admin; DOCKER_COMPOSE_CMD="docker compose"; PATH="$BKW/vstub:$PATH"; hash -r; _bkr "$BKW/crafted-vol.tar.gz" demo ) 2>/dev/null)
+check "restore: a volume without its safety copy is left as it is" "keep-me yes" "$(cat "$BKW/vol-mp/data") $(jq -r '.warnings | join(" ")' <<< "${BKR#*|}" 2>/dev/null | grep -q 'volume smoke_vol was not restored' && echo yes || echo no)"
+rm -rf "$BKW/crafted-ad.tar.gz" "$BKW/crafted-vol.tar.gz" "$BKW/empty-dir" "$BKW/plant" "$BKW/vol-mp" "$BKW/vsrc" "$BKW/vstub"
 
 # the checks before anything is unpacked
 _bkl() { _backup_listing_check "$(printf -- "$1")"; echo "rc=$?"; }
@@ -274,6 +306,13 @@ mkdir -p "$BKW/r"; for _i in 1 2 3; do for _k in "" "-demo"; do _f="$BKW/r/Docke
 ( set --; source "$BKW/.scripts/api-server.sh" >/dev/null 2>&1; BACKUP_DEST_DIR="$BKW/r" _backup_retention ) 2>/dev/null
 check "retention: two of each kind, sidecars with them" "02-demo 02 03-demo 03 / 4" "$(cd "$BKW/r" && LC_ALL=C; printf '%s\n' *.tar.gz | sed -E 's/Docker-Compose-Backup-2026-02-([0-9]+)_000000(-demo)?\.tar\.gz/\1\2/' | tr '\n' ' ')/ $(compgen -G "$BKW/r/*.sha256" | wc -l)"
 
+# retention counts complete backups apart from incomplete ones: six newer incomplete ones never push out the complete one
+mkdir -p "$BKW/r2"
+_mkbk() { local d="$BKW/r2/m"; rm -rf "$d"; mkdir -p "$d/.dcs-backup"; printf '{"format":2,"kind":"full","complete":%s}' "$2" > "$d/.dcs-backup/manifest.json"; tar -czf "$BKW/r2/$1" -C "$d" ./.dcs-backup/manifest.json; rm -rf "$d"; touch -d "$3" "$BKW/r2/$1"; }
+_mkbk Docker-Compose-Backup-2026-03-01_000000.tar.gz true 2026-03-01
+for _i in 2 3 4 5 6 7; do _mkbk "Docker-Compose-Backup-2026-03-0${_i}_000000.tar.gz" false "2026-03-0$_i"; done
+( set --; source "$BKW/.scripts/api-server.sh" >/dev/null 2>&1; BACKUP_DEST_DIR="$BKW/r2" BACKUP_RETENTION_COUNT=6 _backup_retention ) 2>/dev/null
+check "retention: the complete backup outlives six newer incomplete ones" "yes 6" "$([[ -f "$BKW/r2/Docker-Compose-Backup-2026-03-01_000000.tar.gz" ]] && echo yes || echo no) $(compgen -G "$BKW/r2/*.tar.gz" | grep -vc '03-01_')"
 # snapshots: a stack's other configuration files travel, App-Data never; a restore works (GNU tar refused the
 # --no-absolute-names it was called with) and keeps the state before as a snapshot of its own
 _bks() { _snapshot_take "$1"; printf '%s|%s' "${SNAP_ERROR:-ok}" "$SNAP_FILE"; }
@@ -435,6 +474,13 @@ command rm -rf "$UIQ" "$UOF"
 command rm -rf "$UIM"
 VTOKEN=$(request POST /auth/login '{"username":"viewer","password":"viewer-pass-123"}' "${AUTH[@]}" | body_of | jq -r '.token // empty')
 check "viewer signed in again"          200 "$(viewer_request GET /stacks | status_of)"
+# POST /compose/validate answers with the file as compose reads it: admins only, and no ${VAR} filled in (the API's
+# environment holds the root .env); the reference is seen kept as written where a working Compose is installed
+check "compose validate: a viewer is refused"     403 "$(viewer_request POST /compose/validate '{"content":"services:\n  x:\n    image: alpine\n"}' | status_of)"
+printf 'CF_DNS_API_TOKEN=smoke-cf-leak-0123\n' >> "$WORK/.env"
+_CV=$(auth_request POST /compose/validate '{"content":"services:\n  x:\n    image: alpine\n    environment:\n      T: ${CF_DNS_API_TOKEN}\n"}' | body_of)
+check "compose validate: no value of .env in an admin's answer" "no yes" "$(grep -q 'smoke-cf-leak-0123' <<< "$_CV" && echo yes || echo no) $(if ${DOCKER_COMPOSE_CMD:-docker compose} version >/dev/null 2>&1; then jq -r '.output' <<< "$_CV" 2>/dev/null | grep -qF '${CF_DNS_API_TOKEN}' && echo yes || echo no; else echo yes; fi)"
+sed -i '/^CF_DNS_API_TOKEN=smoke-cf-leak-0123$/d' "$WORK/.env"
 # Schedules run in the installation's TZ (from .env); compute test instants the same way
 _cron() { _lib _cron_matches "$1" "$(TZ="$(grep -m1 '^TZ=' "$WORK/.env" | cut -d= -f2- | tr -d '"')" date -d "$2" +%s)"; echo $?; }
 check "cron: */5 fires at :15"          0 "$(_cron '*/5 * * * *' '2026-09-24 10:15:00')"
@@ -794,6 +840,11 @@ check "check: restart method (no pid)"  manual "$(printf '%s' "$CHK" | jq -r '.r
 check "apply: needs confirm"            400 "$(_upd POST /system/update/apply '{}' | status_of)"
 check "apply: refuses framework edits"  409 "$(_upd POST /system/update/apply '{"confirm":true}' | status_of)"
 check "apply: nothing moved on refusal" 1.0.0 "$(tr -d '[:space:]' < "$UPD/VERSION")"
+# the unattended update holds SELF_UPDATE_LOCK while it runs: a manual update or rollback waits for it (409), nothing moves
+_gu tag dcs-backup-20200101-000000-abc1234 HEAD
+( exec 9>>"$UPD/.data/self-update.lock"; flock 9; sleep 20 ) & _ULK=$!; sleep 0.5
+check "apply/rollback: refused while an update runs" "409 409 1.0.0" "$(_upd POST /system/update/apply '{"confirm":true,"replace_local":true}' | status_of) $(_upd POST /system/update/rollback '{"backup_tag":"dcs-backup-20200101-000000-abc1234"}' | status_of) $(tr -d '[:space:]' < "$UPD/VERSION")"
+kill "$_ULK" 2>/dev/null; wait "$_ULK" 2>/dev/null; _gu tag -d dcs-backup-20200101-000000-abc1234 >/dev/null
 APPLY=$(_upd POST /system/update/apply '{"confirm":true,"replace_local":true}')
 check "apply: succeeds with replace"    200 "$(printf '%s' "$APPLY" | status_of)"
 check "apply: new version"              1.1.0 "$(printf '%s' "$APPLY" | body_of | jq -r '.new_version')"
@@ -810,6 +861,12 @@ check "apply: replaced list"            '.scripts/tool.sh' "$(printf '%s' "$APPL
 check "apply: new setting reported"     KEY_B "$(printf '%s' "$APPLY" | body_of | jq -r '.new_settings | join(" ")')"
 check "apply: no stash left behind"     0 "$(_gu stash list | wc -l)"
 check "apply: backup tag created"       1 "$(_gu tag -l 'dcs-backup-*' | wc -l)"
+# the newest backup tag is the newest by its name, not by the date of the commit it points at (an older one sorted last
+# and was deleted by the next update's pruning)
+_OLDC=$(GIT_COMMITTER_DATE='2001-01-01T00:00:00Z' GIT_AUTHOR_DATE='2001-01-01T00:00:00Z' _gu commit-tree 'HEAD^{tree}' -m old)
+_gu tag dcs-backup-29991231-235959-1234567 "$_OLDC"; _gu tag dcs-backup-20000101-000000-7654321 HEAD
+check "backup tags: the newest by name"  dcs-backup-29991231-235959-1234567 "$(_upd GET /system/update/check | body_of | jq -r '.last_backup_tag')"
+_gu tag -d dcs-backup-29991231-235959-1234567 dcs-backup-20000101-000000-7654321 >/dev/null
 BACKUP_TAG=$(printf '%s' "$APPLY" | body_of | jq -r '.backup_tag')
 check "check: current after update"     current "$(_upd GET /system/update/check | body_of | jq -r '.state')"
 check "apply: already up to date"       false "$(_upd POST /system/update/apply '{"confirm":true}' | body_of | jq -r '.updated')"
@@ -1490,7 +1547,9 @@ check "recovery: …and the bundle's copy is in place"  yes "$([[ -f "$WORK/Stac
 check "recovery: restore succeeds"      200 "$(printf '%s' "$RR" | status_of)"
 check "recovery: stack file restored"   no "$(grep -q 'changed after the bundle' "$WORK/Stacks/demo/docker-compose.yml" && echo yes || echo no)"
 check "recovery: users restored count"  yes "$([[ "$(printf '%s' "$RR" | body_of | jq -r '.users')" -ge 1 ]] && echo yes || echo no)"
-check "recovery: pre-restore snapshot"  yes "$(ls "$WORK"/.snapshots/pre-restore-*.tar.gz >/dev/null 2>&1 && echo yes || echo no)"
+check "recovery: pre-restore snapshot"  yes "$(ls "$WORK"/.data/pre-restore/config-*.tar.gz >/dev/null 2>&1 && echo yes || echo no)"
+_PRC=$(ls -1 "$WORK"/.data/pre-restore/config-*.tar.gz 2>/dev/null | tail -1)
+check "recovery: …private, without the master key, never in .snapshots" "600 0 0" "$(stat -c %a "$_PRC" 2>/dev/null) $(tar -tzf "$_PRC" 2>/dev/null | grep -c 'master-key') $(compgen -G "$WORK/.snapshots/pre-restore-*" | wc -l)"
 : > "$WORK/.api-auth/.setup-complete"
 check "recovery: setup restore refused when set up" 403 "$(request POST /setup/restore '{"content_b64":"AAAA","passphrase":"smoke-pass-123"}' "${AUTH[@]}" | status_of)"
 rm -f "$WORK/.api-auth/.setup-complete"
@@ -1997,6 +2056,10 @@ check "theme: a VM container asked"          false "$(auth_request GET "/contain
 check "fleet: viewer may read proxy"    200 "$(viewer_request GET "/fleet/members/$MID/api/stacks" | status_of)"
 check "fleet: viewer proxy inner denied" 403 "$(viewer_request GET "/fleet/members/$MID/api/secrets" | status_of)"
 check "fleet: viewer cannot post proxy" 403 "$(viewer_request POST "/fleet/members/$MID/api/stacks/demo/restart" '{}' | status_of)"
+# the role check sees the path the member is called with: one the member (or curl) would read as another path is refused
+_fpx() { local who="$1" m="$2" p; shift 2; for p in "$@"; do "${who}_request" "$m" "/fleet/members/$MID/api/$p" '{}' | status_of; done | tr '\n' ' ' | sed 's/ $//'; }
+check "fleet: a viewer's odd inner paths are refused" "400 400 400" "$(_fpx viewer GET 'env//' 'x/../env' 'terminal/history//')"
+check "fleet: a bot's odd inner paths are refused"    "400 400 400 400" "$(_fpx bot GET 'env//' 'x/../env' 'terminal/history//'; printf ' '; _fpx bot POST 'stacks/../system/update')"
 check "fleet: bot may drive members"    0 "$(_lib _api_bot_allowed POST "/fleet/members/$MID/api/stacks/demo/start"; echo $?)"
 check "fleet: overview reaches member"  true "$(auth_request GET /fleet/overview | body_of | jq -r '.members[0].reachable' 2>/dev/null)"
 check "fleet: overview counts stacks"   yes "$([[ "$(auth_request GET /fleet/overview | body_of | jq -r '.totals.stacks' 2>/dev/null)" -ge 1 ]] && echo yes || echo no)"
@@ -2120,6 +2183,13 @@ check "update: no bundle code left behind" 0 "$(jq -r '[.join_tokens[] | select(
 jq --arg m "$MID" '.join_tokens += [{"token":"BNDL-GOOD-CODE","created_at":0,"expires_at":4102444800,"created_by":"update","uses":0,"purpose":"bundle","member":$m},{"token":"BNDL-NOBO-DY00","created_at":0,"expires_at":4102444800,"created_by":"update","uses":0,"purpose":"bundle","member":"nobody"}]' "$WORK/.data/fleet.json" > "$WORK/.data/fleet.json.tmp" && mv -f "$WORK/.data/fleet.json.tmp" "$WORK/.data/fleet.json"
 check "update: a bundle code cannot join"  403 "$(request POST /fleet/join "{\"token\":\"BNDL-GOOD-CODE\",\"url\":\"http://127.0.0.1:1\",\"username\":\"admin\",\"password\":\"x\"}" "${AUTH[@]}" | status_of)"
 check "update: a bundle code opens the bundle" 200 "$(request GET '/fleet/bundle?token=BNDL-GOOD-CODE' '' "${AUTH[@]}" | status_of)"
+# the bundle is the code alone: a restore's copy of .env, a compose file's history, data, accounts and secrets stay home
+echo 'CF_DNS_API_TOKEN=leak' > "$WORK/.env.restored"; mkdir -p "$WORK/.compose-history" "$WORK/Stacks/demo/.compose-history"
+echo x > "$WORK/.compose-history/v1"; echo x > "$WORK/Stacks/demo/.compose-history/v1"
+request GET '/fleet/bundle?token=BNDL-GOOD-CODE' '' "${AUTH[@]}" > "$WORK/bundle.raw"
+tail -c "$(grep -a -m1 -i '^Content-Length:' "$WORK/bundle.raw" | tr -dc '0-9')" "$WORK/bundle.raw" > "$WORK/bundle.tgz"
+check "bundle: code only, no .env, data, history, accounts or secrets" "1 0" "$(tar -tzf "$WORK/bundle.tgz" 2>/dev/null | grep -cx '\./\.scripts/api-server\.sh') $(tar -tzf "$WORK/bundle.tgz" 2>/dev/null | grep -E '^\./(\.env|\.data/|\.compose-history|\.api-auth/|\.secrets/)|/\.compose-history/' | grep -cvx '\./\.env\.example')"
+rm -rf "$WORK/.env.restored" "$WORK/.compose-history" "$WORK/Stacks/demo/.compose-history" "$WORK/bundle.raw" "$WORK/bundle.tgz"
 check "update: a bundle code for nobody"   403 "$(request GET '/fleet/bundle?token=BNDL-NOBO-DY00' '' "${AUTH[@]}" | status_of)"
 jq 'del(.join_tokens[] | select(.token | startswith("BNDL-")))' "$WORK/.data/fleet.json" > "$WORK/.data/fleet.json.tmp" && mv -f "$WORK/.data/fleet.json.tmp" "$WORK/.data/fleet.json"
 # the hub's own update takes the VMs along: {fleet: true} leaves a marker, and the round runs by itself when the hub's API is back on the new code
@@ -4032,6 +4102,63 @@ touch -d '@1' "$WORK/osu-pkgdb"
 check "os updates: …not while they did not"                not "$(_osdue OS_UPDATES_PKGDB="$WORK/osu-pkgdb")"
 check "os updates: due after the interval"                 due "$(_osdue OS_UPDATES_PKGDB=/nonexistent OS_UPDATES_INTERVAL=300)"
 rm -rf "$_OSB" "$WORK/osu-boot" "$WORK/osu-mods" "$WORK/osu-automatic.conf" "$WORK/osu-pkgdb" "$_OSF"
+
+echo "Hardening: the front's patience and limits, sign-ins at once, IPv6 behind a proxy, auth and .env writes, logs, leftovers"
+# the front (worker mode) driven over stdin, with a run dir of its own; nothing listens there unless said
+_DR="$WORK/drun"; mkdir -p "$_DR"
+_dsp() { DCS_API_RUN_DIR="$1" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout "${2:-60}" bash "$WORK/.scripts/api-dispatch.sh" 2>/dev/null; }
+# a body announced and never sent: the front drops it within ~35 s (it waited for as long as the client kept the line open);
+# the one-process path drops a head that trickles in (a header every few seconds) the same way. Both run beside the rest.
+{ printf 'POST /auth/login HTTP/1.1\r\nHost: x\r\nContent-Length: 50\r\n\r\n'; sleep 42; } | { _t0=$SECONDS; _dsp "$_DR" 60 > "$WORK/stall.out"; echo $(( SECONDS - _t0 )) > "$WORK/stall.secs"; } &
+_STALL1=$!
+{ printf 'GET /version HTTP/1.1\r\n'; for _i in 1 2 3 4 5 6; do sleep 7; printf 'X-Slow: %s\r\n' "$_i"; done; printf '\r\n'; } | { _t0=$SECONDS; env "${AUTH[@]}" timeout 60 "$API" --handle-request 2>/dev/null > "$WORK/drip.out"; echo $(( SECONDS - _t0 )) > "$WORK/drip.secs"; } &
+_STALL2=$!
+check "front: answers others meanwhile"           200 "$(printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | _dsp "$_DR" 20 | status_of)"
+# a body over API_MAX_BODY_SIZE (1 MB) is refused before a byte of it is read, before anyone is known
+check "front: 2 MB on /auth/login, 413 at once"   413 "$({ printf 'POST /auth/login HTTP/1.1\r\nHost: x\r\nContent-Length: 2097152\r\n\r\n'; sleep 5; } | _dsp "$_DR" 3 | status_of)"
+# every worker busy (two sockets, a socat that takes 0.1 s to be refused by each): a process of its own answers after a
+# second, not after twenty rounds of tries (five seconds here)
+_BR="$WORK/brun"; mkdir -p "$_BR/slow"; printf '#!/bin/sh\nsleep 0.1\nexit 1\n' > "$_BR/slow/socat"; chmod +x "$_BR/slow/socat"
+for _i in 1 2; do python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$_BR/w$_i.sock"; done
+_t0=$(date +%s%N); _bp=$(printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\n' | PATH="$_BR/slow:$PATH" _dsp "$_BR" 20 | status_of); _ms=$(( ($(date +%s%N) - _t0) / 1000000 ))
+check "front: every worker busy, answered within ~2 s" "200 fast" "$_bp $( (( _ms < 2500 )) && echo fast || echo "slow (${_ms} ms)")"
+# sign-in attempts at once: each one counts before its password is looked at (all 40 used to reach the check)
+: > "$WORK/par.codes"; _pids=()
+for _i in $(seq 1 40); do ( request POST /auth/login '{"username":"admin","password":"wrong-wrong-wrong"}' "${AUTH[@]}" SOCAT_PEERADDR=198.51.100.40 | status_of >> "$WORK/par.codes" ) & _pids+=($!); done
+wait "${_pids[@]}"
+check "login: 40 at once, at most 5 reach the password" "yes 40" "$([[ "$(grep -c '^401$' "$WORK/par.codes")" -le 5 ]] && echo yes || echo "no ($(grep -c '^401$' "$WORK/par.codes") did)") $(grep -cE '^(401|429)$' "$WORK/par.codes")"
+# the sliding window of a rate limit, 40 calls at once against a limit of 10
+mkdir -p "$WORK/rw"; : > "$WORK/rw.ok"; _pids=()
+for _i in $(seq 1 40); do ( _lib _api_rate_window "$WORK/rw/ip" 10 60 && echo ok >> "$WORK/rw.ok" ) & _pids+=($!); done
+wait "${_pids[@]}"
+check "rate window: 40 at once, at most 10 pass"  yes "$([[ "$(grep -c ok "$WORK/rw.ok")" -le 10 ]] && echo yes || echo "no ($(grep -c ok "$WORK/rw.ok") did)")"
+# IPv6 clients behind a trusted proxy each have their own lockout (they all had the proxy's address)
+_v6() { local b='{"username":"admin","password":"nope-nope-nope"}'; printf 'POST /auth/login HTTP/1.1\r\nX-Forwarded-For: %s\r\nContent-Length: %d\r\n\r\n%s' "$1" "${#b}" "$b" | env "${AUTH[@]}" SOCAT_PEERADDR=10.9.9.9 API_TRUSTED_PROXIES=10.0.0.0/8 "$API" --handle-request 2>/dev/null | status_of; }
+for _i in 1 2 3 4 5; do _v6 2001:db8::bad >/dev/null; done
+check "IPv6: one address locked out, not another"  "429 401" "$(_v6 2001:db8::bad) $(_v6 2001:db8::good)"
+# an auth file whose lock does not come is not written (it used to be written all the same)
+echo '[1]' > "$WORK/.api-auth/smoke-lock.json"
+( exec 8>"$WORK/.api-auth/smoke-lock.json.lock"; flock 8; sleep 8 ) & _LK=$!; sleep 0.5
+check "auth file: lock held, refused, file intact" "1 [1]" "$(_lib eval 'set +e; _api_write_auth_file smoke-lock.json "[2]"; echo $?') $(cat "$WORK/.api-auth/smoke-lock.json")"
+kill "$_LK" 2>/dev/null; wait "$_LK" 2>/dev/null; rm -f "$WORK/.api-auth/smoke-lock.json" "$WORK/.api-auth/smoke-lock.json.lock"
+# 50 saves of .env at once, each replacing a key that is there: none lost, the file never emptied
+cp -p "$WORK/.env" "$WORK/.env.keep"; _pids=(); for _i in $(seq 1 50); do printf 'SMOKE_PAR_%s=old\n' "$_i" >> "$WORK/.env"; done
+for _i in $(seq 1 50); do _lib _api_env_write "SMOKE_PAR_$_i" "v$_i" & _pids+=($!); done
+wait "${_pids[@]}"
+check ".env: 50 writes at once, every key, the rest kept" "50 yes" "$(grep -c '^SMOKE_PAR_[0-9]*=v[0-9]*$' "$WORK/.env") $(grep -q '^API_PORT=' "$WORK/.env" && echo yes || echo no)"
+mv -f "$WORK/.env.keep" "$WORK/.env"
+# the hourly round: logs cut to their last 50000 lines; the staging a crash left (6 h old) goes, a fresh one stays
+_AJ="$WORK/.data/audit.jsonl"; cp -p "$_AJ" "$_AJ.keep" 2>/dev/null; seq 1 60000 > "$_AJ"
+_RD=$(_lib _recovery_dir); mkdir -p "$_RD/.staging-smoke1/bundle/secrets" "$_RD/.restore-smoke2" "$_RD/.staging-fresh"
+echo KEY > "$_RD/.staging-smoke1/bundle/secrets/.master-key"; touch -d '7 hours ago' "$_RD/.staging-smoke1" "$_RD/.restore-smoke2"
+_lib _api_hourly_cleanup
+check "hourly: a log keeps its last 50000 lines"  "50000 60000" "$(wc -l < "$_AJ") $(tail -n 1 "$_AJ")"
+check "hourly: a crash's staging goes, a fresh one stays" "0 1" "$(find "$_RD" -mindepth 1 -maxdepth 1 \( -name .staging-smoke1 -o -name .restore-smoke2 \) | wc -l) $(find "$_RD" -mindepth 1 -maxdepth 1 -name .staging-fresh | wc -l)"
+rm -rf "$_RD/.staging-fresh" "$_RD/.staging-smoke1" "$_RD/.restore-smoke2"; if [[ -f "$_AJ.keep" ]]; then mv -f "$_AJ.keep" "$_AJ"; else rm -f "$_AJ"; fi
+wait "$_STALL1" "$_STALL2" 2>/dev/null
+check "front: a body never sent is dropped within 35 s" "408 yes" "$(status_of < "$WORK/stall.out") $( (( $(cat "$WORK/stall.secs" 2>/dev/null || echo 99) <= 35 )) && echo yes || echo "no ($(cat "$WORK/stall.secs" 2>/dev/null) s)")"
+check "one process: a head that trickles in is dropped" "408" "$(status_of < "$WORK/drip.out")"
+rm -rf "$_DR" "$_BR" "$WORK/stall.out" "$WORK/stall.secs" "$WORK/drip.out" "$WORK/drip.secs" "$WORK/par.codes" "$WORK/rw" "$WORK/rw.ok"
 
 fi   # (end of the sections SMOKE_ONLY=crowdsec skips)
 
