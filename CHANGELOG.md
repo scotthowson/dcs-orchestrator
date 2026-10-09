@@ -15,6 +15,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   mawk 1.3.4 20240123 (Ubuntu 24.04's default awk) panics on an interval followed by a group ("REcompile() - panic"):
   every save answered "could not build the new middleware file". The indent is spelled out now. CI did not see it
   because the GitHub runner image has gawk as its awk.
+- **`GET /events` no longer answers 500 after a multi-line `docker exec`.** It split `docker events` lines on "|", and
+  an exec event carries the whole command (a multi-line healthcheck script, a `sh -c` with a pipe): the answer became
+  broken JSON, and the fleet's merged `/events?fleet=1` with it. Events are now read as JSON documents.
 - **Two smoke checks no longer depend on timing** (they failed on the slower ubuntu-24.04 CI runner): the restart test
   waits until a new front holds the port instead of taking the old front's answer for the restarted API, and the
   "paused" community check allows the two refusal lines of one refused send to fall in different seconds.
