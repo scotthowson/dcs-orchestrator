@@ -7333,7 +7333,7 @@ _BACKUP_INSTALL_EXCLUDES=(--exclude=./.api-auth/tokens.json --exclude=./.api-aut
     --exclude=./.data/cache --exclude=./.data/metrics --exclude=./.data/rates --exclude='./.data/run-*' --exclude='./.data/*.pid'
     --exclude='./.data/*.lock' --exclude='./.data/*.sock' --exclude=./.data/fleet-sessions --exclude=./.data/fleet-overview.json
     --exclude=./.data/fleet-last-containers --exclude=./.data/container-stats-cache.json --exclude=./.data/api-stats
-    --exclude=./.data/recovery --exclude=./.data/pre-restore --exclude=./.snapshots/code)
+    --exclude=./.data/recovery --exclude=./.data/pre-restore --exclude=./.snapshots/code --exclude='./.snapshots/pre-restore-*')
 # Files of .config that ship with DCS: a restore never puts an older copy over the code's own
 _BACKUP_SHIPPED_CONFIG=(settings.cfg schema.json palette.sh template-gallery.json)
 
@@ -11242,6 +11242,17 @@ _recovery_part() {
     rcv_parts=$(jq -c --arg s "$st" --arg sub "$sub" --arg f "$file" --arg p "$ov" '. + [{stack: $s, sub: $sub, file: $f, appdata_path: $p}]' <<< "$rcv_parts")
 }
 
+# _staging_guard DIR — DIR is removed once the process that made it is gone without removing it (an error, a kill,
+# SIGKILL too): a watcher of its own, so no trap of the caller is replaced (the automation loop has its own, and a trap
+# set in a subshell can bring back the parent's)
+_staging_guard() {
+    local d="$1" owner="${BASHPID:-$$}"
+    ( _api_close_inherited_fds; exec </dev/null >/dev/null 2>&1; trap '' HUP INT
+      while kill -0 "$owner" 2>/dev/null; do [[ -d "$d" ]] || exit 0; sleep 2; done
+      rm -rf -- "$d" ) &
+    disown 2>/dev/null || true
+}
+
 # Build a bundle. Sets RCV_FILE (its path), RCV_SIZE, RCV_STACKS, RCV_APPDATA, RCV_WARNINGS (a JSON list), RCV_ERROR.
 # Included: root .env, the secret store with its key, accounts/rules/layouts,
 # schedules, every stack's files (App-Data only for Traefik, Authelia and the
@@ -11258,6 +11269,8 @@ _recovery_bundle_create() {
     # staged next to the bundles, not in /tmp (a small tmpfs on the DCS images, and App-Data can be large)
     tmp=$(mktemp -d "$dest/.staging-XXXXXX" 2>/dev/null) || { RCV_ERROR="Cannot create a temporary directory"; return 1; }
     chmod 700 "$tmp"; b="$tmp/bundle"; mkdir -p "$b"
+    # the staging copy holds the master key in the clear: it goes with this process however that ends (_staging_guard)
+    _staging_guard "$tmp"
     [[ -f "$BASE_DIR/.env" ]] && cp -p "$BASE_DIR/.env" "$b/root.env"
     if [[ -d "$BASE_DIR/.secrets" ]]; then
         mkdir -p "$b/secrets"
@@ -11341,7 +11354,7 @@ _recovery_copy_remote() {
     printf 'copy to %s failed: %s' "$remote" "$(printf '%s' "$out" | tail -1)"; return 1
 }
 
-# Restore BUNDLE with PASS into this install. The configuration as it is now is kept as a snapshot (.snapshots/pre-restore-*).
+# Restore BUNDLE with PASS into this install. The configuration as it is now is kept (.data/pre-restore/config-*.tar.gz).
 # The stacks whose App-Data the bundle brings back are stopped first (their data is replaced under them), their App-Data as
 # it is now is set aside — in .data/pre-restore/<time>/appdata/<stack>, or for a drive of its own beside it as
 # <path>.before-restore-<time> (a rename on the same drive) — so old and new files never mix and the restore can be undone
@@ -11360,6 +11373,8 @@ _recovery_restore() {
     stage=$(_recovery_dir); mkdir -p "$stage" 2>/dev/null && chmod 700 "$stage" 2>/dev/null
     tmp=$(mktemp -d "$stage/.restore-XXXXXX" 2>/dev/null) || { RCV_ERROR="Cannot create a temporary directory in $stage"; return 1; }
     chmod 700 "$tmp"
+    # the unpacked bundle holds the master key in the clear: it goes with this process however that ends (_staging_guard)
+    _staging_guard "$tmp"
     # (-p: every file keeps the mode it had, whatever this process's umask)
     if ! RCV_PASS="$pass" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:RCV_PASS -in "$bundle" 2>/dev/null | tar -xpzf - -C "$tmp" 2>/dev/null; then
         rm -rf "$tmp"; RCV_ERROR="Wrong passphrase, or the file is not an intact DCS recovery bundle"; return 1
@@ -11425,12 +11440,14 @@ _recovery_restore() {
         rcv_parts=(${rcv_keep[@]+"${rcv_keep[@]}"})
     fi
 
-    # what is here now, in case this was a mistake
+    # what is here now, in case this was a mistake: private, in .data/pre-restore (which no backup carries), and without
+    # the master key (a copy of it next to the secrets it opens is what must never lie about)
     if [[ -f "$BASE_DIR/.env" || -d "$COMPOSE_DIR" ]]; then
-        mkdir -p "$BASE_DIR/.snapshots" 2>/dev/null
-        tar -czf "$BASE_DIR/.snapshots/pre-restore-$(date +%Y%m%d-%H%M%S).tar.gz" -C "$BASE_DIR" \
-            --exclude='Stacks/*/App-Data' --exclude='.git' --exclude='logs' --exclude='.data' \
-            .env Stacks .api-auth/users.json .secrets 2>/dev/null || true
+        local _prc; _prc="$BACKUP_PRE_RESTORE_DIR/config-$(date +%Y%m%d-%H%M%S).tar.gz"
+        (umask 077; mkdir -p "$BACKUP_PRE_RESTORE_DIR" && tar -czf "$_prc" -C "$BASE_DIR" \
+            --exclude='Stacks/*/App-Data' --exclude='.git' --exclude='logs' --exclude='.data' --exclude='.secrets/.master-key' \
+            .env Stacks .api-auth/users.json .secrets) 2>/dev/null || true
+        _prune_keep_newest "$(_pre_restore_keep)" "$_prc" "$BACKUP_PRE_RESTORE_DIR"/config-*.tar.gz >/dev/null
     fi
     if [[ -f "$tmp/root.env" ]]; then
         cp -p "$tmp/root.env" "$BASE_DIR/.env" && chmod 600 "$BASE_DIR/.env" 2>/dev/null
@@ -34862,6 +34879,34 @@ handle_request() {
 # SERVER MAIN LOOP
 # =============================================================================
 
+# _api_log_trim FILE MAX — keeps the last MAX lines of FILE: copied, then the file truncated and written in place (its mode,
+# and the descriptor of a writer appending to it, stay)
+_api_log_trim() {
+    local f="$1" max="$2" tmp
+    [[ -f "$f" && "$max" =~ ^[0-9]+$ && "$max" -ge 1 ]] || return 0
+    (( $(wc -l < "$f") > max )) || return 0
+    tmp=$(mktemp "$f.trim-XXXXXX" 2>/dev/null) || return 0
+    { tail -n "$max" "$f" > "$tmp" && cat "$tmp" > "$f"; } 2>/dev/null || true
+    rm -f "$tmp"
+}
+
+# _api_hourly_cleanup — the listener's hourly round: stale rate-limit files and TOTP tracking; the staging folders of a
+# bundle, a restore or an upload that a crash left behind (6 h old: none is still running; the ones of a recovery bundle
+# hold the master key in the clear); the request and audit logs cut to their last API_LOG_MAX_LINES (50000) lines.
+# (It runs in the listener's loop, under errexit: no step of it may end the loop.)
+_api_hourly_cleanup() {
+    local d max="${API_LOG_MAX_LINES:-50000}"
+    find "${API_RATE_DIR:-$API_AUTH_DIR/rates}" -type f -mmin +1440 -delete 2>/dev/null || true
+    : > "$API_AUTH_DIR/.totp-attempts" 2>/dev/null || true
+    for d in "$(_recovery_dir)" "${BACKUP_DEST_DIR:-}" "$SNAPSHOTS_DIR"; do
+        [[ -n "$d" && -d "$d" ]] || continue
+        find "$d" -mindepth 1 -maxdepth 1 \( -name '.staging-*' -o -name '.restore-*' -o -name '.upload-*' \) -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
+    done
+    [[ "$max" =~ ^[0-9]+$ && "$max" -ge 1 ]] || max=50000
+    for d in "$API_LOG_FILE" "$BASE_DIR/.data/audit.jsonl" "$API_AUTH_DIR/auth-audit.log"; do _api_log_trim "$d" "$max"; done
+    return 0
+}
+
 start_server() {
     # Create log directory
     mkdir -p "$(dirname "$API_LOG_FILE")" 2>/dev/null
@@ -35099,7 +35144,7 @@ start_server() {
         echo "  Automation engine started (rules and schedules, 1-minute clock)"
     fi
 
-    # Periodic cleanup: stale rate-limit files and TOTP tracking.
+    # Periodic cleanup (_api_hourly_cleanup): stale rate-limit files, TOTP tracking, staging left by a crash, long logs.
     # sleep runs as a job so SIGTERM ends the loop at once instead of leaving
     # an hour-long sleep behind when the server stops.
     (
@@ -35107,8 +35152,7 @@ start_server() {
         while true; do
             sleep 3600 & _sleep_pid=$!
             wait "$_sleep_pid" || true
-            find "${API_RATE_DIR:-$API_AUTH_DIR/rates}" -type f -mmin +1440 -delete 2>/dev/null
-            : > "$API_AUTH_DIR/.totp-attempts" 2>/dev/null
+            _api_hourly_cleanup
         done
     ) &
 

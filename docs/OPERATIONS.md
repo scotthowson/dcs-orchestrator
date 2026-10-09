@@ -252,7 +252,7 @@ puts one stack's folder back.
 **Snapshots** are light and quick: the configuration only, no App-Data. A restore takes a snapshot of the current state
 first (*before restoring …*), puts every stack's files back (a stack that runs in a VM gets them in the VM too; it uses
 them at its next start), with the routes, the schedules, notification rules and templates. It never restores the root
-`.env` (it lands in `.env.restored`), accounts or secrets. *(Before 4.0.28 every snapshot restore failed: the tar option
+`.env` (it lands in `.data/.env.restored`, private), accounts or secrets. *(Before 4.0.28 every snapshot restore failed: the tar option
 it used does not exist.)*
 
 **On a hub**, *Back up everything* starts a backup on the hub and on every VM (each VM needs its own `BACKUP_DEST_DIR`),
@@ -330,7 +330,7 @@ which the DCS VM images do not have)*.
 server? Restore a recovery bundle*. Then sign in with your old account and start the stacks. On a running
 install, the Backups page restores a bundle the way a backup is restored:
 
-1. The configuration as it is now is kept as a snapshot (`.snapshots/pre-restore-<time>.tar.gz`).
+1. The configuration as it is now is kept, private and without the master key (`.data/pre-restore/config-<time>.tar.gz`).
 2. The stacks whose App-Data the bundle brings back are stopped (`docker stop`, `BACKUP_RESTORE_STOP_TIMEOUT`). A stack
    whose containers do not stop keeps its App-Data exactly as it is, and nothing of it is started; the rest of the
    bundle is restored. The answer names it in `skipped` (`[{stack, reason}]`) and leads its message with it — *media-services
