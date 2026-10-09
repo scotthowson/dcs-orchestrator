@@ -599,6 +599,17 @@ _rlc() { : > "$WORK/routes-lookups"; _lib eval '_find_traefik_routes_dir() { ech
 mkdir -p "$WORK/Stacks/rl-a"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/rl-a/docker-compose.yml"
 _rl1=$(_rlc); mkdir -p "$WORK/Stacks/rl-b"; cp "$WORK/Stacks/rl-a/docker-compose.yml" "$WORK/Stacks/rl-b/"
 check "stack list: the routes lookup does not grow with the stacks" "$_rl1" "$(_rlc)"
+# an on-demand container started some other way is announced to Sablier so it falls asleep; an announcement Sablier did
+# not take (its server not listening yet, right after a boot) is tried again on the next loop instead of being taken as done
+_sbt() { _lib eval 'SABLIER_TRACK_FILE="$BASE_DIR/sab-tracked.json"; _sablier_names() { echo od-app; }; _sablier_blocks_for() { :; }; timeout() { shift; "$@"; }
+    docker() { case "$*" in "inspect -f {{.State.Running}} Sablier") echo true ;; "inspect -f {{.State.Running}} {{.State.StartedAt}} od-app") echo "true 2026-01-01T00:00:00Z" ;;
+        exec\ Sablier\ wget*) [[ -f "$BASE_DIR/sab-up" ]] ;; *) return 1 ;; esac; }
+    _sablier_track_running; jq -r ".[\"od-app\"] // \"none\"" "$SABLIER_TRACK_FILE" 2>/dev/null || echo none'; }
+rm -f "$WORK/sab-tracked.json" "$WORK/sab-up"
+check "sablier: an announcement Sablier missed is not recorded" none "$(_sbt)"
+touch "$WORK/sab-up"
+check "sablier: …and is made again once it listens" "2026-01-01T00:00:00Z" "$(_sbt)"
+rm -f "$WORK/sab-tracked.json" "$WORK/sab-up"
 rm -rf "$WORK/Stacks/rl-a" "$WORK/Stacks/rl-b"
 mkdir -p "$WORK/.templates/demo-tpl" && printf '{"name":"demo-tpl","title":"Demo","category":"other","variables":[]}\n' > "$WORK/.templates/demo-tpl/template.json" && printf 'services:\n  demo:\n    image: alpine\n    environment:\n      - PW=${SECRETS_DEMO_TPL_PW}\n' > "$WORK/.templates/demo-tpl/docker-compose.yml"
 check "template detail lists secrets"   DEMO_TPL_PW "$(auth_request GET /templates/demo-tpl | body_of | jq -r '.secrets[0].name' 2>/dev/null)"

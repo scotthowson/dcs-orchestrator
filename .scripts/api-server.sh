@@ -16025,7 +16025,9 @@ _sablier_track_running() {
         vs=""; bl=$(_sablier_blocks_for "$n" | head -1); bf="${bl%%$'\t'*}"; bm="${bl#*$'\t'}"; bm="${bm%%$'\t'*}"
         [[ -n "$bf" && -n "$bm" ]] && IFS=$'\037' read -r vs _x < <(_sablier_block_read "$bf" "$bm")
         [[ "$vs" =~ ^[0-9]+[smh]$ ]] || vs="30m"
-        timeout 15 docker exec Sablier wget -q -O /dev/null -T 10 "http://127.0.0.1:10000/api/strategies/blocking?names=$n&session_duration=$vs&timeout=5s" >/dev/null 2>&1 || true
+        # recorded only once Sablier took it: right after a boot Sablier's container runs before its server listens, and an
+        # announcement lost then left the container awake for good (the next loop tries again)
+        timeout 15 docker exec Sablier wget -q -O /dev/null -T 10 "http://127.0.0.1:10000/api/strategies/blocking?names=$n&session_duration=$vs&timeout=5s" >/dev/null 2>&1 || continue
         upd=$(jq -c --arg n "$n" --arg s "$started" '.[$n] = $s' <<< "$upd")
     done <<< "$names"
     [[ "$upd" == '{}' ]] && return 0
