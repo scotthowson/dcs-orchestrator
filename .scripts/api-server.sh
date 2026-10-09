@@ -35134,6 +35134,10 @@ start_server() {
     # SIGTERM (systemd stop, --stop) actually stop the server. socat/ncat
     # invoke this script with --handle-request for every connection.
     [[ "$API_MAX_CHILDREN" =~ ^[0-9]+$ ]] && (( API_MAX_CHILDREN > 0 )) || API_MAX_CHILDREN=64
+    # beyond API_MAX_CHILDREN a connection waits in the kernel's queue until a slot is free; socat's own queue is 5
+    # connections, and past it the kernel drops a new one (the client tries again after 1, 3, 7 … s and gives up after about
+    # two minutes): a burst of 200 left dozens of requests unanswered on a small hub
+    local _backlog=$(( API_MAX_CHILDREN * 4 )); (( _backlog < 256 )) && _backlog=256
     local listener_pid
     # the workers (API_WORKERS > 0) and the front that hands them the connections; ncat mode and API_WORKERS=0 read the script per connection
     local _front="$self_path --handle-request"
@@ -35163,11 +35167,11 @@ start_server() {
                 exit 1
             fi
             echo "Starting API server on https://${API_BIND}:${API_PORT} (TLS enabled)"
-            socat "OPENSSL-LISTEN:${API_PORT},bind=${API_BIND},reuseaddr,fork,max-children=${API_MAX_CHILDREN},cert=${API_TLS_CERT},key=${API_TLS_KEY},verify=0" \
+            socat "OPENSSL-LISTEN:${API_PORT},bind=${API_BIND},reuseaddr,fork,max-children=${API_MAX_CHILDREN},backlog=${_backlog},cert=${API_TLS_CERT},key=${API_TLS_KEY},verify=0" \
                 EXEC:"$_front",nofork &
         else
             echo "Starting API server on http://${API_BIND}:${API_PORT}"
-            socat "TCP-LISTEN:${API_PORT},bind=${API_BIND},reuseaddr,fork,max-children=${API_MAX_CHILDREN}" \
+            socat "TCP-LISTEN:${API_PORT},bind=${API_BIND},reuseaddr,fork,max-children=${API_MAX_CHILDREN},backlog=${_backlog}" \
                 EXEC:"$_front",nofork &
         fi
     else
