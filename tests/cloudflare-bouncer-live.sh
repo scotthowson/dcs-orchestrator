@@ -87,7 +87,12 @@ check "an admin" yes "$([[ -n "$TOKEN" ]] && echo yes || echo no)"
 req POST /crowdsec/cloudflare/enable "{\"token\":\"$TOK\"}"
 check "turned on" 200 "$ST"
 [[ "$ST" == 200 ]] || echo "       (the answer said: $(jq -r '.message // empty' <<< "$BODY"))"
-check "the first push" true "$(jq -r '.synced' <<< "$BODY")"
+check "the answer does not wait for the first push" running "$(jq -r '.first_sync' <<< "$BODY")"
+for _ in $(seq 1 120); do
+    req GET /crowdsec/cloudflare
+    [[ "$(jq -r '.health' <<< "$BODY")" == ok && "$(jq -r '.sync.running' <<< "$BODY")" == null ]] && break; sleep 0.25
+done
+check "the first push" ok "$(jq -r '.health' <<< "$BODY")"
 check "the list holds CrowdSec's bans (the address, the network, the IPv6 address, the import; no CAPTCHA, no country)" \
     "192.0.2.0/24 198.51.100.7 203.0.113.77 2a01:4f8:1:2::3" "$(items)"
 check "the rule blocks the list" "block ip.src in \$dcs_crowdsec_bans" "$(fake '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans") | .action + " " + .expression] | join(",")')"
@@ -118,6 +123,7 @@ check "…and the list follows" "192.0.2.0/24 198.51.100.44 198.51.100.45 203.0.
 # on again (a fresh key), then off with the clean-up
 req POST /crowdsec/cloudflare/enable '{}'
 check "on again with the stored token" 200 "$ST"
+for _ in $(seq 1 120); do [[ -d "$WORK/dcs/.data/crowdsec/.cloudflare.lock.d" ]] || break; sleep 0.25; done
 req POST /crowdsec/cloudflare/disable '{"cleanup": true}'
 check "off with the clean-up" "200 true" "$ST $(jq -r '.cleanup.ok' <<< "$BODY")"
 check "the bouncer is gone from CrowdSec" 0 "$(cs bouncers list -o json 2>/dev/null | jq '[.[] | select(.name == "dcs-cloudflare-bouncer")] | length')"

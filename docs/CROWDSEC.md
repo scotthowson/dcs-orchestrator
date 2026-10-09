@@ -340,6 +340,13 @@ nothing is pushed: Cloudflare keeps refusing the addresses it holds. When CrowdS
 reset), DCS registers the bouncer again by itself. The bouncer is not deleted from the Bouncers list while the switch is on (409: the
 switch is the way).
 
+The bans are sorted (your own first, the newest first) and cut to the capacity before anything else, then checked in one pass (one jq
+program, no command per address): 100,000 community addresses take a few seconds. Turning it on answers as soon as the list, the rule and
+the bouncer exist; the first push runs right after, and the panel says *Turning on* (and how many addresses it is working through) until it
+is done. One sync runs at a time, under a lock that knows its holder (`.data/crowdsec/.cloudflare.lock.d/owner`: process, start time,
+kind): a lock whose holder is gone is taken over, and a sync that has held it for 10 minutes is stopped and the next one starts afresh.
+Every skip and every first failure is one line in `logs/api-server.log` ("push bans to Cloudflare: …"), with the reason.
+
 **Why not CrowdSec's own Cloudflare bouncer.** `crowdsecurity/cloudflare-bouncer`, the one that kept an IP list, is archived and CrowdSec
 lists it as deprecated: it writes Cloudflare's Firewall Rules and Filters APIs, which Cloudflare stopped supporting on 2025-06-15. Its
 successor, `crowdsecurity/cloudflare-worker-bouncer`, puts a Cloudflare Worker in front of every request: on the free plan that is 100,000
@@ -375,9 +382,9 @@ the token itself) is read when no secret is stored.
 | Enterprise | 1,000 | 500,000 | 1,000 |
 
 On a free account the list is the account's one custom list: if another list holds it, the switch says which and stops. Five custom rules
-in a zone already: the same. Your own bans are a few hundred addresses at most, far below 10,000. The community blocklist (the
-*community* option, `CLOUDFLARE_BOUNCER_COMMUNITY=true`) is tens of thousands of addresses: it is added after your own bans and cut at the
-capacity (the newest first), so it never pushes one of yours out.
+in a zone already: the same. Your own bans are a few hundred addresses at most, far below 10,000. The community blocklist (*Also push the
+community blocklist*, `CLOUDFLARE_BOUNCER_COMMUNITY=true`) is tens of thousands of addresses: it is off unless you tick it each time you
+turn the switch on, and then added after your own bans and cut at the capacity (the newest first), so it never pushes one of yours out.
 
 **Status.** The Bouncers tab shows the switch, its health (on and in step, starting, not in step for over 10 minutes, or the error in plain
 words: the token was rejected, a zone was not found, a right is missing, the list or rule quota was reached, the list is full, CrowdSec

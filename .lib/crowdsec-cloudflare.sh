@@ -49,8 +49,15 @@ CFB_SECRET="CLOUDFLARE_BOUNCER_TOKEN"
 CFB_STATE="$CROWDSEC_STATE_DIR/cloudflare.json"
 CFB_ITEMS="$CROWDSEC_STATE_DIR/cloudflare-items.json"
 CFB_KEY_FILE="$CROWDSEC_STATE_DIR/cloudflare-bouncer.key"
-CFB_LOCK="$CROWDSEC_STATE_DIR/.cloudflare.lock"
+# one sync (or one turning on or off) at a time: a directory made atomically, its owner ("PID EPOCH KIND START") inside. Not flock(1):
+# a flock stays held while any process keeps the descriptor open (the sync's children inherit it), says nothing about who, and on a
+# server the loop found it held on every try and never synced again
+CFB_LOCK="$CROWDSEC_STATE_DIR/.cloudflare.lock.d"
 CFB_STAMP="$CROWDSEC_STATE_DIR/.cloudflare.stamp"
+# how long the lock may be held before the next taker stops its holder (a sync) or takes it over (a request); what the lock and the
+# loop say goes to the API's log
+CFB_STUCK_AFTER=600
+CFB_LOG="${API_LOG_FILE:-$BASE_DIR/logs/api-server.log}"
 # the origins of CrowdSec's own bans (its scenarios, the page, an import, the console) and of the community's
 CFB_LOCAL_ORIGINS="crowdsec,cscli,cscli-import,console"
 CFB_COMMUNITY_ORIGINS="CAPI,lists"
@@ -509,30 +516,75 @@ _cfb_pull() {
     [[ "$CFB_ROWS" == \[* ]] || { _cfb_fail lapi_error "CrowdSec's API answered something that is not a list of bans"; return 1; }
 }
 
-# _cfb_items ROWS_JSON — the list's items: normalised, never a private or protected address, Cloudflare's prefix limits (IPv4 /8–/32,
-# IPv6 /12–/128), local bans before the community's and the newest first, at most the capacity. Prints {items, dropped, skipped}.
+# jq: addresses and networks without a process per row. cfb_net("2001:db8::1/64") → {f: 6, g: [eight 16-bit groups, masked], bits, full}
+# (IPv4: f 4, two groups), null when it is neither; cfb_covers(A; B): A's network holds B; cfb_text(N): the canonical text
+# (IPv6 with its longest run of zero groups as "::", a single address without its prefix length).
+_CFB_JQ_NET='
+def _p2: [1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536];
+def _mask($g; $bits): [range($g | length) as $i | ($bits - 16 * $i) as $k
+    | if $k >= 16 then $g[$i] elif $k <= 0 then 0 else (($g[$i] / _p2[16 - $k]) | floor) * _p2[16 - $k] end];
+def _v4($s): ($s | split(".")) as $p
+    | if ($p | length) == 4 and all($p[]; test("^(0|[1-9][0-9]{0,2})$")) and all($p[]; tonumber <= 255)
+      then ($p | map(tonumber)) as $o | {f: 4, g: [$o[0] * 256 + $o[1], $o[2] * 256 + $o[3]]} else null end;
+def _hexval: explode | reduce .[] as $c (0; . * 16 + (if $c >= 97 then $c - 87 else $c - 48 end));
+def _groups($s): if $s == "" then [] else ($s | split(":")) end;
+def _v6($s): ($s | ascii_downcase) as $a
+    | if ($a | test("^[0-9a-f:.]{2,45}$") | not) or ($a | test(":::")) then null else
+        (($a | split(":"))[-1]) as $last
+        | (if ($last | test("[.]")) then _v4($last) else {g: []} end) as $tail
+        | if $tail == null then null else
+            (if ($last | test("[.]")) then $a[0:($a | length) - ($last | length)] + "0:0" else $a end | split("::")) as $h
+            | if ($h | length) > 2 then null else
+                _groups($h[0]) as $l | (if ($h | length) == 2 then _groups($h[1]) else [] end) as $r
+                | if any(($l + $r)[]; test("^[0-9a-f]{1,4}$") | not) then null
+                  elif ($h | length) == 2 and (($l | length) + ($r | length)) > 7 then null
+                  elif ($h | length) == 1 and ($l | length) != 8 then null
+                  else (($l + [range(8 - ($l | length) - ($r | length)) | "0"] + $r) | map(_hexval)) as $g
+                    | {f: 6, g: (if ($tail.g | length) == 2 then $g[0:6] + $tail.g else $g end)} end end end end;
+def cfb_net($s): ($s | tostring | split("/")) as $x
+    | if ($x | length) > 2 then null else
+        ($x[0] | if test(":") then _v6(.) else _v4(.) end) as $a
+        | if $a == null then null else
+            (if $a.f == 4 then 32 else 128 end) as $full
+            | (if ($x | length) == 2 then ($x[1] | if test("^[0-9]{1,3}$") then tonumber else null end) else $full end) as $bits
+            | if $bits == null or $bits > $full then null else $a + {bits: $bits, full: $full, g: _mask($a.g; $bits)} end end end;
+def cfb_covers($a; $b): $a.f == $b.f and $a.bits <= $b.bits and (_mask($b.g; $a.bits) == $a.g);
+def _hex: if . == 0 then "0" else [recurse(if . >= 16 then (. / 16 | floor) else empty end)] | map(. % 16) | reverse | map("0123456789abcdef"[.:.+1]) | add end;
+def cfb_text($n):
+    (if $n.f == 4 then "\($n.g[0] / 256 | floor).\($n.g[0] % 256).\($n.g[1] / 256 | floor).\($n.g[1] % 256)"
+     else
+        ($n.g | map(_hex)) as $h
+        | (reduce range(8) as $i ({bs: -1, bl: 0, cs: -1, cl: 0};
+            if $n.g[$i] == 0 then (if .cl == 0 then .cs = $i else . end) | .cl += 1 | (if .cl > .bl then .bs = .cs | .bl = .cl else . end) else .cl = 0 end)) as $r
+        | if $r.bl < 2 then ($h | join(":")) else ($h[0:$r.bs] | join(":")) + "::" + ($h[($r.bs + $r.bl):] | join(":")) end
+     end) + (if $n.bits == $n.full then "" else "/\($n.bits)" end);
+'
+
+# _cfb_items ROWS_JSON — the list's items, in ONE jq pass: local bans before the community's and the newest first, cut to the capacity
+# (plus a margin for what the guard takes out) BEFORE anything else, then normalised and guarded: never a private or protected address,
+# never a network wider than Cloudflare takes or the ban guard allows (IPv4 /8, IPv6 /16). 100,000 rows take a second or two.
+# Prints {items, dropped, skipped}.
 _cfb_items() {
-    local rows="$1" cap v n norm kept=() skipped=0 total
+    local rows="$1" cap prot priv
     cap=$(_cfb_capacity)
-    CS_PROT_LOADED=0
-    while IFS= read -r v; do
-        [[ -n "$v" ]] || continue
-        n=$(_cs_norm_target "$v" 2>/dev/null) || { skipped=$((skipped + 1)); continue; }
-        norm="${n#*$'\t'}"
-        if [[ "$norm" == */* ]]; then
-            local bits="${norm#*/}"
-            if [[ "$norm" == *:* ]]; then (( bits >= 12 )) || { skipped=$((skipped + 1)); continue; }
-            else (( bits >= 8 )) || { skipped=$((skipped + 1)); continue; }; fi
-        fi
-        _cs_ban_guard "$norm" || { skipped=$((skipped + 1)); continue; }
-        kept+=("$v"$'\t'"$norm")
-    done < <(jq -r --arg local "$CFB_LOCAL_ORIGINS" '($local | split(",")) as $l | sort_by((if (.origin as $o | $l | index($o)) != null then 0 else 1 end), -(.id)) | .[].value' <<< "$rows")
-    total=${#kept[@]}
-    printf '%s\n' "${kept[@]}" | jq -R -s -c --argjson rows "$rows" --argjson cap "$cap" --argjson skipped "$skipped" '
-        ($rows | map({key: .value, value: .origin}) | from_entries) as $origin
-        | split("\n") | map(select(length > 0) | split("\t") | {raw: .[0], ip: .[1]})
-        | (reduce .[] as $r ({seen: {}, out: []}; if .seen[$r.ip] then . else .seen[$r.ip] = true | .out += [$r] end) | .out) as $u
-        | {items: ($u[0:$cap] | map({ip: .ip, comment: ("crowdsec: " + ($origin[.raw] // "ban"))})), dropped: ([($u | length) - $cap, 0] | max), skipped: $skipped}'
+    prot=$(_cs_protected_addresses 2>/dev/null | cut -f2 | jq -R . | jq -sc 'map(select(length > 0))')
+    priv=$(printf '%s\n' "${_CS_PRIVATE_NETS[@]}" | jq -R . | jq -sc .)
+    jq -c --argjson cap "$cap" --argjson prot "$prot" --argjson priv "$priv" --arg local "$CFB_LOCAL_ORIGINS" "$_CFB_JQ_NET"'
+        ($local | split(",")) as $l
+        | ([$priv[] | cfb_net(.)] | map(select(. != null))) as $PRIV
+        | ([$prot[] | cfb_net(.)] | map(select(. != null))) as $PROT
+        | (map(. + {k: (if (.origin as $o | $l | index($o)) != null then 0 else 1 end)}) | sort_by(.k, -(.id // 0))) as $sorted
+        | ($sorted | length) as $total
+        | [$sorted[0:($cap + ([256, ($cap / 10 | floor)] | max))][]
+            | cfb_net(.value) as $n
+            | {origin, n: $n, ok: ($n != null
+                and (if $n.f == 4 then $n.bits >= 8 else $n.bits >= 16 end)
+                and (any($PRIV[]; cfb_covers(.; $n)) | not)
+                and (any($PROT[]; cfb_covers(.; $n) or cfb_covers($n; .)) | not))}] as $checked
+        | ([$checked[] | select(.ok)] | [.[] | {ip: cfb_text(.n), comment: ("crowdsec: " + (.origin // "ban"))}]
+            | reduce .[] as $i ({seen: {}, out: []}; if .seen[$i.ip] then . else .seen[$i.ip] = true | .out += [$i] end) | .out) as $good
+        | ([$checked[] | select(.ok | not)] | length) as $skipped
+        | {items: $good[0:$cap], skipped: $skipped, dropped: ([$total - $skipped - ([$good | length, $cap] | min), 0] | max)}' <<< "$rows"
 }
 
 # =============================================================================
@@ -543,12 +595,80 @@ _cfb_items() {
 # Returns 0 when Cloudflare holds what CrowdSec says, 75 when another sync is running.
 _cfb_sync() {
     mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null
-    ( flock -n 9 || exit 75; _cfb_sync_locked "${1:-}" ) 9>"$CFB_LOCK"
+    (
+        _cfb_lock_take sync || { _cfb_log "sync skipped: $CFB_LOCK_WHY"; exit 75; }
+        trap '_cfb_state_set "del(.running)" >/dev/null 2>&1; _cfb_lock_drop' EXIT
+        _cfb_sync_locked "${1:-}"
+    )
 }
+
+# one line in the API's log
+_cfb_log() { mkdir -p "$(dirname "$CFB_LOG")" 2>/dev/null; printf '%s push bans to Cloudflare: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$CFB_LOG" 2>/dev/null; return 0; }
+
+# _cfb_kill_tree PID — PID and everything it started
+_cfb_kill_tree() {
+    local c
+    for c in $(ps -o pid= --ppid "$1" 2>/dev/null); do _cfb_kill_tree "$c"; done
+    kill -TERM "$1" 2>/dev/null
+    return 0
+}
+
+# when a process started (in clock ticks since boot): a PID with another start time is another process
+_cfb_pid_start() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+
+# _cfb_lock_take KIND (sync | request) — take the lock for this process ($BASHPID). 1 with CFB_LOCK_WHY when another holds it. A holder
+# that is gone (killed, the machine restarted, its PID now another process's) leaves a lock that is simply taken over; one that has held it
+# for CFB_STUCK_AFTER seconds is stopped when it is a sync and taken over otherwise (a request). Both are said in the log.
+CFB_LOCK_WHY=""
+_cfb_lock_take() {
+    local kind="${1:-sync}" pid since hkind hstart age now
+    CFB_LOCK_WHY=""
+    now=$(date +%s)
+    if ! mkdir "$CFB_LOCK" 2>/dev/null; then
+        read -r pid since hkind hstart < "$CFB_LOCK/owner" 2>/dev/null
+        if [[ ! "$pid" =~ ^[0-9]+$ || ! "$since" =~ ^[0-9]+$ ]]; then
+            # being made this very moment (the owner file follows the directory), or left half-made long ago
+            age=$(( now - $(stat -c %Y "$CFB_LOCK" 2>/dev/null || echo "$now") ))
+            if (( age < 10 )); then CFB_LOCK_WHY="another sync is starting"; return 1; fi
+            _cfb_log "a lock without an owner (${age} s old) was taken over"
+        elif ! kill -0 "$pid" 2>/dev/null || [[ -n "$hstart" && "$(_cfb_pid_start "$pid")" != "$hstart" ]]; then
+            _cfb_log "the lock of a ${hkind:-sync} that is gone (pid $pid, $(( (now - since) / 60 )) min) was taken over"
+        else
+            age=$(( now - since ))
+            if (( age <= CFB_STUCK_AFTER )); then CFB_LOCK_WHY="a ${hkind:-sync} (pid $pid) has been running for ${age} s"; return 1; fi
+            if [[ "$hkind" == sync ]]; then
+                _cfb_log "a sync has held the lock for $(( age / 60 )) min (pid $pid): stopped, the next one starts afresh"
+                _cfb_kill_tree "$pid"
+            else
+                _cfb_log "a ${hkind:-request} has held the lock for $(( age / 60 )) min (pid $pid): taken over"
+            fi
+            _cfb_state_set '.stuck = {at: $now, minutes: $m, pid: $p, kind: $k}' --argjson now "$now" --argjson m $(( age / 60 )) --arg p "$pid" --arg k "${hkind:-sync}" >/dev/null 2>&1
+        fi
+        rm -rf "${CFB_LOCK:?}"
+        mkdir "$CFB_LOCK" 2>/dev/null || { CFB_LOCK_WHY="another sync took the lock first"; return 1; }
+    fi
+    printf '%s %s %s %s\n' "$BASHPID" "$now" "$kind" "$(_cfb_pid_start "$BASHPID")" > "$CFB_LOCK/owner"
+    return 0
+}
+
+# _cfb_lock_wait SECONDS KIND — take the lock, waiting for a running sync up to SECONDS
+_cfb_lock_wait() {
+    local i
+    for (( i = 0; i <= $1; i++ )); do _cfb_lock_take "${2:-request}" && return 0; sleep 1; done
+    return 1
+}
+
+# give the lock back (only the process that holds it)
+_cfb_lock_drop() {
+    local pid
+    read -r pid _ < "$CFB_LOCK/owner" 2>/dev/null
+    [[ "$pid" == "$BASHPID" ]] && rm -rf "${CFB_LOCK:?}"
+    return 0
+}
+
 _cfb_sync_locked() {
     local force="${1:-}" now st rows raw_hash itemsj items hash last_verify verify=false
     now=$(date +%s)
-    touch "$CFB_STAMP" 2>/dev/null
     _cfb_enabled || return 0
     CFB_ERR_CODE=""; CFB_ERR=""
     _cfb_state_set '.last_attempt = $now' --argjson now "$now" >/dev/null 2>&1
@@ -561,9 +681,10 @@ _cfb_sync_locked() {
         _cfb_state_set '.repaired = {at: $now, what: ["the bouncer, registered again in CrowdSec"]}' --argjson now "$now" >/dev/null 2>&1
     fi
     rows="$CFB_ROWS"
-    _cfb_state_set '.last_pull = $now | .pulled = $n' --argjson now "$now" --argjson n "$(jq 'length' <<< "$rows")" >/dev/null 2>&1
+    # what the page shows while this runs: "working through N addresses"
+    _cfb_state_set '.last_pull = $now | .pulled = $n | .running = {since: $now, rows: $n}' --argjson now "$now" --argjson n "$(jq 'length' <<< "$rows")" >/dev/null 2>&1
     st=$(_cfb_state)
-    # the items are worked out again only when the bans or the settings changed (the guard is slow on thousands of addresses)
+    # the items are worked out again only when the bans or the settings changed
     raw_hash=$(printf '%s|%s|%s|%s' "$(jq -c 'map([.value, .origin, .id])' <<< "$rows")" "$(_cfb_capacity)" "$(_cfb_origins)" "$(_cs_protected_addresses 2>/dev/null | cut -f2 | sort -u | tr '\n' ' ')" | sha256sum | cut -c1-32)
     if [[ "$raw_hash" == "$(jq -r '.raw_hash // ""' <<< "$st")" && -s "$CFB_ITEMS" ]] && jq -e '.items | type == "array"' "$CFB_ITEMS" >/dev/null 2>&1; then
         itemsj=$(cat "$CFB_ITEMS")
@@ -646,12 +767,21 @@ _cfb_sync_locked() {
 }
 
 # Called by the API's background loop every few seconds: a sync when the interval has passed since the last attempt
+# (the stamp is the time of the last attempt: it moves here, before the sync, so a sync that cannot start is not retried every few seconds)
 _cfb_tick() {
     _cfb_enabled || return 0
-    local age
+    local age rc
     age=$(( $(date +%s) - $(stat -c %Y "$CFB_STAMP" 2>/dev/null || echo 0) ))
     (( age >= $(_cfb_interval) )) || return 0
-    _cfb_sync
+    mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null
+    touch "$CFB_STAMP" 2>/dev/null || _cfb_log "cannot write $CFB_STAMP: the loop would try every few seconds"
+    _cfb_sync; rc=$?
+    # a failure is said once, when it begins (the state keeps it for the page)
+    if (( rc != 0 && rc != 75 )); then
+        _cfb_state | jq -r 'select((.error // null) != null and .error.at == .error.since) | "sync failed: \(.error.code): \(.error.message)"' 2>/dev/null \
+            | while IFS= read -r line; do _cfb_log "$line"; done
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -734,7 +864,7 @@ _cfb_brief() {
     local on=false
     _cfb_enabled && on=true
     _cfb_state | jq -c --argjson on "$on" --argjson now "$(date +%s)" --argjson stale "$CFB_STALE_AFTER" "$_cfb_health_jq"'
-        {enabled: $on, health: health($on; $now; $stale), last_sync: (.last_sync // null), last_pull: (.last_pull // null), items: (.items // 0),
+        {enabled: $on, health: health($on; $now; $stale), last_sync: (.last_sync // null), last_pull: (.last_pull // null), items: (.items // 0), running: (.running // null),
          error: (if $on then (.error // null) else null end), left_at_cloudflare: (($on | not) and ((.zones // []) | length) > 0 and (.cleaned // false | not))}'
 }
 
@@ -781,7 +911,8 @@ handle_crowdsec_cloudflare() {
                      origins: (($lorig | split(",")) + (if $community then ($corig | split(",")) else [] end))},
           bouncer: ({name: $name, crowdsec_running: $csr} + ($b // {})),
           sync: {last_attempt: (.last_attempt // null), last_pull: (.last_pull // null), last_push: (.last_push // null), last_sync: (.last_sync // null), last_verify: (.last_verify // null),
-                 pulled: (.pulled // null), items: (.items // 0), dropped: (.dropped // 0), skipped: (.skipped // 0), repaired: (.repaired // null), enabled_at: (.enabled_at // null)},
+                 pulled: (.pulled // null), items: (.items // 0), dropped: (.dropped // 0), skipped: (.skipped // 0), repaired: (.repaired // null), enabled_at: (.enabled_at // null),
+                 running: (.running // null), stuck: (.stuck // null)},
           cloudflare: {items: (.cf_items // null), checked_at: (.cf_checked // null), list: $list, rule_ref: $ref,
                        accounts: [(.accounts // [])[] | {id, name: (.name // ""), list_id: (.list_id // "")}],
                        zones: [(.zones // [])[] | {name, domains: (.domains // [.domain]), id, plan: (.plan // ""), rule_id: (.rule_id // "")}]},
@@ -833,7 +964,7 @@ handle_crowdsec_cloudflare_verify() {
     _api_success "$(jq -c --argjson perms "$CFB_PERMS" '. + {success: true, permissions: $perms, message: ("The token works: " + (.zones | map(.name) | join(", ")) + ".")}' <<< "$chk")"
 }
 
-# POST /crowdsec/cloudflare/enable — Turn Push bans to Cloudflare on: {token? (kept as the secret CLOUDFLARE_BOUNCER_TOKEN), capacity?, community?, domains?}. Checks the token's rights first (400 with what is missing, nothing changed), registers the bouncer dcs-cloudflare-bouncer in CrowdSec, makes the list dcs_crowdsec_bans and the blocking custom rule in each zone, and pushes the bans once
+# POST /crowdsec/cloudflare/enable — Turn Push bans to Cloudflare on: {token? (kept as the secret CLOUDFLARE_BOUNCER_TOKEN), capacity?, community?, domains?}. Checks the token's rights first (400 with what is missing, nothing changed), registers the bouncer dcs-cloudflare-bouncer in CrowdSec, makes the list dcs_crowdsec_bans and the blocking custom rule in each zone, and starts the first push in the background (the answer does not wait for it: first_sync "running"; the community blocklist only when the body asks for it)
 handle_crowdsec_cloudflare_enable() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     local body="${1:-}" t chk err out c
@@ -855,26 +986,26 @@ handle_crowdsec_cloudflare_enable() {
     local -A before=()
     local k
     for k in CLOUDFLARE_BOUNCER_CAPACITY CLOUDFLARE_BOUNCER_COMMUNITY CLOUDFLARE_BOUNCER_DOMAINS; do before[$k]=$(envfile_get "$BASE_DIR/.env" "$k" 2>/dev/null); done
+    # the community blocklist only when the body asks for it (tens of thousands of addresses: a choice, never a default)
+    jq -e 'has("community")' >/dev/null 2>&1 <<< "$body" || body=$(jq -c '. + {community: false}' <<< "$body")
     if ! err=$(_cfb_body_settings "$body"); then _api_error 400 "$err"; return; fi
     _cfb_settings_restore() { local k; for k in "${!before[@]}"; do _api_env_write "$k" "${before[$k]}" >/dev/null 2>&1; done; }
     chk=$(_cfb_check)
     if [[ "$(jq -r '.ok' <<< "$chk" 2>/dev/null)" != true ]]; then _cfb_settings_restore; _cfb_refuse "$chk"; return; fi
     # one at a time (a background sync, a second click)
     mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null
-    local lockfd
-    exec {lockfd}>"$CFB_LOCK"
-    flock -w 90 "$lockfd" || { exec {lockfd}>&-; _cfb_settings_restore; _api_error 409 "A sync with Cloudflare is running; try again in a minute"; return; }
+    _cfb_lock_wait 60 request || { _cfb_settings_restore; _api_error 409 "A sync with Cloudflare is running ($CFB_LOCK_WHY); try again in a minute"; return; }
     # the token is kept before anything is made at Cloudflare (a sync needs it)
     if [[ "$CFB_TOKEN_SOURCE" == body ]]; then
-        secrets_set "$CFB_SECRET" "$CFB_TOKEN" 2>/dev/null || { exec {lockfd}>&-; _cfb_settings_restore; _api_error 500 "Could not store the token in the secrets store"; return; }
+        secrets_set "$CFB_SECRET" "$CFB_TOKEN" 2>/dev/null || { _cfb_lock_drop; _cfb_settings_restore; _api_error 500 "Could not store the token in the secrets store"; return; }
     fi
     # the bouncer: a fresh key (an old registration of the same name goes first)
-    if ! _cfb_bouncer_register; then exec {lockfd}>&-; _cfb_settings_restore; _api_error 502 "$CFB_ERR"; return; fi
+    if ! _cfb_bouncer_register; then _cfb_lock_drop; _cfb_settings_restore; _api_error 502 "$CFB_ERR"; return; fi
     # the key must open CrowdSec's API before anything is made at Cloudflare
     if ! _cfb_lapi "/v1/decisions?type=ban&scopes=ip,range&origins=$(_cfb_origins)&limit=1"; then
         local why="HTTP $CFB_CODE"; [[ "$CFB_CODE" == 000 ]] && why="no answer at $(_cfb_lapi_url)"
         _cs_run out bouncers delete "$CFB_NAME" >/dev/null 2>&1; rm -f "$CFB_KEY_FILE"
-        exec {lockfd}>&-; _cfb_settings_restore; _api_error 502 "CrowdSec's API did not accept the new bouncer's key ($why); nothing was made at Cloudflare"; return
+        _cfb_lock_drop; _cfb_settings_restore; _api_error 502 "CrowdSec's API did not accept the new bouncer's key ($why); nothing was made at Cloudflare"; return
     fi
     # the list of each account and the rule of each zone; anything made here is taken away again when a later step fails
     local acc lid made_lists=() made_rules=() newa='[]' newz='[]' z zrow fail="" rs rid
@@ -899,7 +1030,7 @@ handle_crowdsec_cloudflare_enable() {
         for m in "${made_rules[@]}"; do IFS=$'\t' read -r z rs rid <<< "$m"; _cfb_cf DELETE "/zones/$z/rulesets/$rs/rules/$rid" >/dev/null 2>&1; done
         for m in "${made_lists[@]}"; do IFS=$'\t' read -r acc lid <<< "$m"; _cfb_cf DELETE "/accounts/$acc/rules/lists/$lid" >/dev/null 2>&1; done
         _cs_run out bouncers delete "$CFB_NAME" >/dev/null 2>&1; rm -f "$CFB_KEY_FILE"
-        exec {lockfd}>&-; _cfb_settings_restore
+        _cfb_lock_drop; _cfb_settings_restore
         _api_response 400 "$(jq -nc --arg c "${CFB_ERR_CODE:-cloudflare_error}" --arg m "$fail" --argjson perms "$CFB_PERMS" '{error: true, code: 400, reason: $c, message: ($m + " Nothing was left behind at Cloudflare."), missing: (if $c == "missing_permissions" then $perms else [] end)}')"
         return
     fi
@@ -907,18 +1038,16 @@ handle_crowdsec_cloudflare_enable() {
     (umask 077; jq -nc --argjson z "$newz" --argjson a "$newa" --arg dk "$(_cfb_domains | paste -sd, -)" --argjson now "$now" \
         '{version: 1, zones: $z, accounts: $a, domains_key: $dk, enabled_at: $now, cleaned: false, error: null}' > "$CFB_STATE.tmp") && mv -f "$CFB_STATE.tmp" "$CFB_STATE"
     rm -f "$CFB_ITEMS"
-    _api_env_write CLOUDFLARE_BOUNCER_ENABLED true || { exec {lockfd}>&-; _api_error 500 "Could not write .env"; return; }
-    exec {lockfd}>&-
-    # the first push, now (the background loop keeps it in step from here)
-    local synced=true
-    _cfb_sync force || synced=false
+    _api_env_write CLOUDFLARE_BOUNCER_ENABLED true || { _cfb_lock_drop; _api_error 500 "Could not write .env"; return; }
+    _cfb_lock_drop
+    # the first push runs detached: the answer does not wait for it (the page shows "Turning on" from the status until it is done, and the
+    # background loop keeps the list in step from then on)
+    ( _cfb_sync force ) </dev/null >/dev/null 2>&1 &
     _cs_cache_clear
     _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_CLOUDFLARE_ON" "${AUTH_USERNAME:-}" "zones: $(jq -r 'map(.name) | join(", ")' <<< "$newz")"
-    local st; st=$(_cfb_state)
-    _api_success "$(jq -c --argjson synced "$synced" --argjson z "$newz" --argjson w "$(jq -c '.warnings // []' <<< "$chk")" \
-        '{success: true, enabled: true, synced: $synced, zones: [$z[] | .name], items: (.items // 0), error: (.error // null), warnings: $w,
-          message: (if $synced then "Bans are pushed to Cloudflare: " + ((.items // 0) | tostring) + " address(es) on the list, blocked in " + ([$z[] | .name] | join(", ")) + "."
-                    else "Turned on, but the first push failed: " + (.error.message // "see the Bouncers tab") + " DCS tries again every few seconds." end)}' <<< "$st")"
+    _api_success "$(jq -nc --argjson z "$newz" --argjson w "$(jq -c '.warnings // []' <<< "$chk")" \
+        '{success: true, enabled: true, first_sync: "running", zones: [$z[] | .name], warnings: $w,
+          message: ("Turned on: the list and the rule are made in " + ([$z[] | .name] | join(", ")) + ", and DCS is pushing the bans to Cloudflare now.")}')"
 }
 
 # POST /crowdsec/cloudflare/disable — Turn Push bans to Cloudflare off: the background sync stops, the bouncer dcs-cloudflare-bouncer is deleted in CrowdSec; {cleanup: true} also deletes the custom rule of each zone and the list at Cloudflare (otherwise they stay, frozen, with the last bans), {forget_token: true} deletes the stored token. Safe to repeat (cleanup after an earlier off)
@@ -932,8 +1061,7 @@ handle_crowdsec_cloudflare_disable() {
     _api_env_write CLOUDFLARE_BOUNCER_ENABLED false || { _api_error 500 "Could not write .env"; return; }
     # a sync that is on its way finishes first (it sees the switch off from then on)
     mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null
-    local lockfd
-    exec {lockfd}>"$CFB_LOCK"; flock -w 90 "$lockfd" || true
+    _cfb_lock_wait 60 request || _cfb_log "turning off without the lock: $CFB_LOCK_WHY"
     if _cfb_bouncer_delete; then bdel=deleted; else bdel=kept; note="CrowdSec is not running, so the bouncer $CFB_NAME is still registered there (its key file is gone): delete it on the Bouncers tab once CrowdSec runs. "; fi
     rm -f "$CFB_KEY_FILE" "$CFB_ITEMS"
     if [[ "$cleanup" == true ]]; then
@@ -951,7 +1079,7 @@ handle_crowdsec_cloudflare_disable() {
     else
         _cfb_state_set '.disabled_at = $now | .error = null' --argjson now "$(date +%s)" >/dev/null 2>&1
     fi
-    exec {lockfd}>&-
+    _cfb_lock_drop
     if [[ "$forget" == true ]]; then
         secrets_delete "$CFB_SECRET" >/dev/null 2>&1 || true
         [[ -n "$(envfile_get "$BASE_DIR/.env" "$CFB_SECRET" 2>/dev/null)" ]] && _api_env_write "$CFB_SECRET" ""

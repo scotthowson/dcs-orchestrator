@@ -3,6 +3,28 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+Push bans to Cloudflare, from its first enable on a real server:
+
+- **The community blocklist no longer takes hours.** With it on, CrowdSec answered 103,594 bans and every one of them went through a
+  shell function or two (normalise, guard) before the cut to the capacity: the first sync held its lock for over half an hour and never
+  finished. The bans are now sorted and cut to the capacity (plus a margin) first, then normalised and guarded in one jq pass: 100,850
+  bans take seconds (a smoke check times it).
+- **The community blocklist is off unless asked for**: an enable that does not ask for it turns it off; the dialog's option is unticked
+  each time and says what it costs ("fills the list up to the capacity; slower").
+- **Turning it on answers within seconds**: the list, the rule and the bouncer are made, the switch is on, and the first push runs
+  detached (`first_sync: "running"`). The panel says *Turning on* and how many addresses it is working through; the dashboard no
+  longer reported "not turned on" for an enable whose answer had timed out.
+- **A sync can no longer block the loop for good.** The lock was a flock(1) on a file, held for as long as any process kept the
+  descriptor open (the sync's children inherit it) and silent about who that was: the loop opened the file every 30 s, found it locked
+  and never synced again, and the stamp and `last_attempt` stood still. It is now a lock directory that names its holder (process, start time, kind): a holder that is gone is taken over, a
+  sync that has held it for 10 minutes is stopped; the loop moves its stamp before it tries, logs every skip and the start of every
+  failure to `logs/api-server.log` with the reason, and the sync's own errors go there instead of nowhere. A smoke check starts an API
+  and waits for its loop to sync by itself.
+
 ## [4.0.45] - 2026-10-09
 
 ### Added

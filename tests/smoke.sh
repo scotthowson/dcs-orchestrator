@@ -9237,6 +9237,16 @@ cfb_items() { cfb_st '[.lists[][] | select(.name == "dcs_crowdsec_bans") | .item
 cfb_rules() { cfb_st '[.rulesets[] | .rules[] | select(.ref == "dcs_crowdsec_bans") | "\(.action)|\(.enabled)|\(.expression)"] | join(" ")'; }
 cfb_calls() { cfb_st "[.calls[] | select(test(\"$1\"))] | length"; }
 cfb_src() { local -a c=("$@"); ( set --; export PATH="$CST/bin:$PATH"; source "$CST_API" >/dev/null 2>&1; set +e; "${c[@]}" ) 2>/dev/null; }     # (as the API's loops run: no errexit)
+# cfb_wait — the first sync an enable starts runs detached: wait until it is done (a sync time, nothing running), 30 s at most
+cfb_wait() {
+    local i b
+    for i in $(seq 1 120); do
+        b=$(cat "$CST/.data/crowdsec/cloudflare.json" 2>/dev/null)
+        if [[ ! -d "$CST/.data/crowdsec/.cloudflare.lock.d" ]] && jq -e '((.last_sync // 0) > 0 or (.error // null) != null) and (.running // null) == null' <<< "$b" >/dev/null 2>&1; then return 0; fi
+        sleep 0.25
+    done
+    echo "  (cfb_wait: the first sync did not finish in 30 s)"
+}
 cfb_tokenfree() {      # the token is nowhere but the encrypted secret: not on a command line, in a log, a state file or an answer
     local where n
     n=$(grep -rlF -- "$CFB_TOK" "$CST/argv.log" "$CST/curl-argv.log" "$CST/api-stderr.log" "$CST/.data" "$CST/logs" "$CST/.api-auth" "$CST/.env" "$CST/fake/calls.log" 2>/dev/null | wc -l | tr -d ' ')
@@ -9394,9 +9404,12 @@ cst_cloudflare_refusals() {
 cst_cloudflare_on() {
     local mode
     cfb_fake /_mock/reset -X POST >/dev/null
+    local t0=$SECONDS
     cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}" SOCAT_PEERADDR=198.51.100.200
     cst_is "cloudflare: turned on" 200
-    cst_j "cloudflare/on" '.success' true '.enabled' true '.synced' true '.zones | join(",")' example.test '.items' 4
+    check "cloudflare/on: the answer does not wait for the first sync (within 5 s)" yes "$( (( SECONDS - t0 <= 5 )) && echo yes || echo no)"
+    cst_j "cloudflare/on" '.success' true '.enabled' true '.first_sync' running '.zones | join(",")' example.test
+    cfb_wait
     check "cloudflare/on: the list holds this server's local bans (no private, protected, captcha, country or community entry)" \
         "192.0.2.0/24 198.51.100.7 198.51.100.8 2a01:4f8:1:2::3" "$(cfb_items)"
     check "cloudflare/on: the zone's rule blocks the list" "block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_rules)"
@@ -9420,6 +9433,7 @@ cst_cloudflare_on() {
     # a second enable is safe: the same list and rule, a fresh bouncer key
     cst_call admin POST /crowdsec/cloudflare/enable '{}'
     cst_is "cloudflare: turned on again with the stored token" 200
+    cfb_wait
     check "cloudflare/on again: still one list and one rule" "1 1" "$(cfb_st '[.lists[][]] | length') $(cfb_st '[.rulesets[].rules[] | select(.ref == "dcs_crowdsec_bans")] | length')"
 }
 
@@ -9540,10 +9554,113 @@ cst_cloudflare_errors() {
     cst_j "cloudflare/key accepted again" '.error' null
 }
 
+cst_cloudflare_scale() {
+    local t0 took n
+    # the community blocklist is a choice: an enable that does not ask for it turns it off, whatever .env said
+    cst_env CLOUDFLARE_BOUNCER_COMMUNITY true
+    cst_call admin POST /crowdsec/cloudflare/enable '{}'
+    cst_is "cloudflare/community: on again" 200
+    cfb_wait
+    check "cloudflare/community: off unless the enable asks for it" false "$(grep '^CLOUDFLARE_BOUNCER_COMMUNITY=' "$CST/.env" | cut -d= -f2)"
+    # 100,000 community addresses and 850 of this server's own: one sync takes seconds, the list holds the local ones first
+    python3 - "$CST/cfb-big.json" <<'PY2'
+import json, sys
+rows = [{"id": 200000 + i, "value": "198.18.%d.%d" % (i // 250, i % 250 + 1), "origin": "crowdsec"} for i in range(850)]
+rows += [{"id": 1 + i, "value": "%d.%d.%d.%d" % (11 + i // 65025, (i // 255) % 255, i % 255 + 1, 7), "origin": "CAPI" if i % 3 else "lists"} for i in range(100000)]
+rows.append({"id": 300000, "value": "10.9.9.9", "origin": "crowdsec"})
+json.dump(rows, open(sys.argv[1], "w"))
+PY2
+    cfb_fake /_mock/decisions -X POST -H 'Content-Type: application/json' --data-binary "@$CST/cfb-big.json" >/dev/null
+    t0=$(date +%s%N)
+    cst_call admin POST /crowdsec/cloudflare/settings '{"community": true, "capacity": 10000}'
+    took=$(( ($(date +%s%N) - t0) / 1000000 ))
+    cst_is "cloudflare/scale: 100,850 bans with the community blocklist" 200
+    check "cloudflare/scale: the sync takes seconds, not hours (${took} ms)" yes "$( (( took < 30000 )) && echo yes || echo no)"
+    cst_j "cloudflare/scale" '.health' ok '.sync.items' 10000 '.sync.pulled' 100851 '.cloudflare.items' 10000
+    n=$(cfb_st '[.lists[][] | select(.name == "dcs_crowdsec_bans") | .items[] | select(.ip | startswith("198.18."))] | length')
+    check "cloudflare/scale: all 850 local bans are on the list" 850 "$n"
+    check "cloudflare/scale: the private one is not" 0 "$(cfb_st '[.lists[][] | .items[] | select(.ip == "10.9.9.9")] | length')"
+    cst_t "cloudflare/scale: the rest is left out and counted" '.sync.dropped > 90000 and .sync.skipped >= 1'
+    # off again: the local bans only, at once
+    t0=$(date +%s%N)
+    cst_call admin POST /crowdsec/cloudflare/settings '{"community": false}'
+    took=$(( ($(date +%s%N) - t0) / 1000000 ))
+    cst_j "cloudflare/scale: community off" '.sync.items' 850 '.settings.community' false
+    check "cloudflare/scale: …in seconds too (${took} ms)" yes "$( (( took < 30000 )) && echo yes || echo no)"
+    rm -f "$CST/cfb-big.json"
+    cfb_dec '[{"id": 140, "value": "198.51.100.40", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/scale: back to a small list" "198.51.100.40" "$(cfb_items)"
+}
+
+cst_cloudflare_locks() {
+    local lock="$CST/.data/crowdsec/.cloudflare.lock.d" h pulls
+    # a lock left by a sync that is gone (killed, a restart): taken over, and said in the API's log
+    mkdir -p "$lock"; printf '999999 %s sync 1\n' "$(( $(date +%s) - 120 ))" > "$lock/owner"
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/lock: a lock whose sync is gone does not block" 200
+    cst_j "cloudflare/lock: …the sync ran" '.health' ok
+    check "cloudflare/lock: …and the log says it was taken over" 1 "$(grep -c 'push bans to Cloudflare: the lock of a sync that is gone (pid 999999' "$CST/logs/api-server.log" 2>/dev/null)"
+    # a sync that runs now: the next one waits its turn (and the log says why it was skipped)
+    ( exec -a cfb-test-sync sleep 30 ) & h=$!
+    mkdir -p "$lock"; printf '%s %s sync %s\n' "$h" "$(date +%s)" "$(sed 's/^.*) //' "/proc/$h/stat" | cut -d' ' -f20)" > "$lock/owner"
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/lock: a running sync is not run over" 409
+    pulls=$(cfb_st '.lapi_pulls')
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_crowdsec_cf_lib; _cfb_tick'
+    check "cloudflare/lock: the loop skips it" "$pulls" "$(cfb_st '.lapi_pulls')"
+    check "cloudflare/lock: …and says why in the API's log" yes "$(grep -q "push bans to Cloudflare: sync skipped: a sync (pid $h) has been running for" "$CST/logs/api-server.log" 2>/dev/null && echo yes || echo no)"
+    # held for more than 10 minutes: the stuck sync is stopped and the next one runs
+    printf '%s %s sync %s\n' "$h" "$(( $(date +%s) - 700 ))" "$(sed 's/^.*) //' "/proc/$h/stat" | cut -d' ' -f20)" > "$lock/owner"
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_crowdsec_cf_lib; _cfb_tick'
+    check "cloudflare/lock: a sync stuck for 11 min is stopped" gone "$(kill -0 "$h" 2>/dev/null && echo alive || echo gone)"
+    check "cloudflare/lock: …the next sync ran" "$((pulls + 1))" "$(cfb_st '.lapi_pulls')"
+    check "cloudflare/lock: …the log says so" 1 "$(grep -c 'push bans to Cloudflare: a sync has held the lock for 11 min' "$CST/logs/api-server.log" 2>/dev/null)"
+    check "cloudflare/lock: …the lock is free" no "$([[ -d "$lock" ]] && echo yes || echo no)"
+    wait "$h" 2>/dev/null
+    # the old flock file held by a stray process does not matter any more
+    ( exec 9>"$CST/.data/crowdsec/.cloudflare.lock"; flock -x 9; exec sleep 20 ) & h=$!
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/lock: an inherited flock on the old lock file blocks nothing" 200
+    kill "$h" 2>/dev/null; wait "$h" 2>/dev/null
+    # what the page shows while a sync works: "working through N addresses"
+    jq '.running = {since: 1, rows: 12345}' "$CST/.data/crowdsec/cloudflare.json" > "$CST/cfb.tmp" && mv "$CST/cfb.tmp" "$CST/.data/crowdsec/cloudflare.json"
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/progress" '.sync.running.rows' 12345
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/progress: in the CrowdSec status" '.cloudflare.running.rows' 12345
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/progress: gone once a sync ends" '.sync.running' null
+}
+
+# the tick as the API runs it: a listener of its own, its background loop, nothing called by hand
+cst_cloudflare_listener() {
+    local port pid i pulls before_sync stamp_before
+    port=$(( 30000 + RANDOM % 20000 ))
+    pulls=$(cfb_st '.lapi_pulls')
+    before_sync=$(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json")
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"; stamp_before=$(stat -c %Y "$CST/.data/crowdsec/.cloudflare.stamp")
+    # the stand-ins without the request's sleep that does not wait (the API's loops sleep between their rounds)
+    mkdir -p "$CST/bin-listener"
+    for i in docker curl hostname ip; do ln -sf "$CST/bin/$i" "$CST/bin-listener/$i"; done
+    ( cd "$CST" && exec env PATH="$CST/bin-listener:$PATH" DOCKER_COMPOSE_CMD="docker compose" API_WORKERS=0 "$CST_API" --bind 127.0.0.1 --port "$port" ) > "$CST/listener.log" 2>&1 &
+    pid=$!
+    for i in $(seq 1 120); do (( $(cfb_st '.lapi_pulls') > pulls )) && break; sleep 0.25; done
+    for i in $(seq 1 160); do (( $(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json" 2>/dev/null || echo 0) > before_sync )) && break; sleep 0.25; done
+    check "cloudflare/listener: the running API's loop syncs by itself" yes "$( (( $(cfb_st '.lapi_pulls') > pulls )) && echo yes || echo no)"
+    check "cloudflare/listener: …the stamp moved" yes "$( (( $(stat -c %Y "$CST/.data/crowdsec/.cloudflare.stamp") > stamp_before )) && echo yes || echo no)"
+    check "cloudflare/listener: …and last_sync with it" yes "$( (( $(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json") > before_sync )) && echo yes || echo no)"
+    [[ "$(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json")" -gt "$before_sync" ]] || { jq -c '{last_sync, last_attempt, error, running}' "$CST/.data/crowdsec/cloudflare.json"; grep 'Cloudflare' "$CST/logs/api-server.log" | tail -5; }
+    kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+}
+
 cst_cloudflare_offswitch() {
     # off, keeping what is at Cloudflare
     cst_call admin POST /crowdsec/cloudflare/enable '{}'
     cst_is "cloudflare: on again (a fresh bouncer)" 200
+    cfb_wait
     cst_call admin POST /crowdsec/cloudflare/disable '{}'
     cst_is "cloudflare: off" 200
     cst_j "cloudflare/off, kept" '.enabled' false '.bouncer' deleted '.left_at_cloudflare' true '.cleanup' null
@@ -9568,6 +9685,7 @@ cst_cloudflare_offswitch() {
     cfb_fake /client/v4/zones/zone-example-test/rulesets/phases/http_request_firewall_custom/entrypoint -X GET -H "Authorization: Bearer $CFB_TOK" >/dev/null
     cst_call admin POST /crowdsec/cloudflare/enable '{}'
     cst_is "cloudflare: on once more" 200
+    cfb_wait
     cfb_fake "/client/v4/zones/zone-example-test/rulesets/$(cfb_st '.rulesets["zone-example-test"].id')/rules" -X POST -H "Authorization: Bearer $CFB_TOK" -H 'Content-Type: application/json' \
         -d '{"action":"block","expression":"ip.src eq 192.0.2.99","ref":"owner_rule"}' >/dev/null
     cst_call admin POST /crowdsec/cloudflare/disable '{"cleanup": true, "forget_token": true}'
@@ -9583,8 +9701,9 @@ cst_cloudflare_offswitch() {
     cst_j "cloudflare/secret: the status names it" '.token.set' true '.token.source' secret '.token.setting' CLOUDFLARE_BOUNCER_TOKEN
     cst_call admin POST /crowdsec/cloudflare/enable '{}'
     cst_is "cloudflare/secret: turned on with the secret, nothing pasted" 200
+    cfb_wait
     check "cloudflare/secret: …every call carried it" true "$(cfb_fake /_mock/state | jq --arg t "$CFB_TOK" '[.auth_seen[] | select(. != $t)] | length == 0')"
-    check "cloudflare/secret: …and the list was made" "198.51.100.31 198.51.100.32" "$(cfb_items)"
+    check "cloudflare/secret: …and the list was made" "198.51.100.40" "$(cfb_items)"
     # a different token pasted while the secret exists replaces it (an unknown one is refused, the secret stays)
     cst_call admin POST /crowdsec/cloudflare/verify '{"token":"cfbUNKNOWN_0123456789abcdefghijklmn"}'
     cst_is "cloudflare/secret: another token is checked on its own" 400
@@ -9606,6 +9725,9 @@ cst_part_cloudflare() {
     cst_cloudflare_on
     cst_cloudflare_sync
     cst_cloudflare_errors
+    cst_cloudflare_scale
+    cst_cloudflare_locks
+    cst_cloudflare_listener
     cst_cloudflare_offswitch
     cst_cloudflare_teardown
 }
