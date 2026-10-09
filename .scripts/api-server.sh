@@ -2862,11 +2862,12 @@ _stacks_card_facts() {
                      | select(.[0] != "127.0.0.1" and .[0] != "[::1]") | .[1] | tonumber] | unique)
         }}) | from_entries' 2>/dev/null || printf '{}'
 }
-# _stack_card_hosts STACK — the hostnames Traefik serves the stack on (its compose labels and its route files), one per line;
-# a rule that still holds a variable is left out
+# _stack_card_hosts STACK [ROUTES_DIR] — the hostnames Traefik serves the stack on (its compose labels and its route files), one
+# per line; a rule that still holds a variable is left out. A ROUTES_DIR given empty means "no Traefik here": the lookup
+# (a pass over every stack) is not repeated for each stack of a list
 _stack_card_hosts() {
     local s="$1" rdir="${2-}" f
-    [[ -n "$rdir" ]] || { rdir=$(_find_traefik_routes_dir 2>/dev/null) || rdir=""; }
+    [[ $# -ge 2 ]] || { rdir=$(_find_traefik_routes_dir 2>/dev/null) || rdir=""; }
     {
         grep -oE 'Host\(`[^`]+`\)' "$COMPOSE_DIR/$s/docker-compose.yml" 2>/dev/null
         if [[ -n "$rdir" && -d "$rdir/$s" ]]; then for f in "$rdir/$s"/*.yml "$rdir/$s"/*.yaml; do [[ -f "$f" ]] && grep -oE 'Host\(`[^`]+`\)' "$f" 2>/dev/null; done; fi

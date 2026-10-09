@@ -593,6 +593,13 @@ check "stack actions in a row: the last one goes down last" "down" "$(grep begin
 check "stack actions in a row: the record is the stop's, ended well" "stop|false|true" "$(auth_request GET /stacks/queued/activity | body_of | jq -r '"\(.action)|\(.active)|\(.success)"' 2>/dev/null)"
 rm -rf "$_QS"
 check "container name derives project"  demo-x-1 "$(_lib _compose_container_name "$WORK/Stacks/demo" x)"
+# without a Traefik here the routes lookup (a pass over every stack) runs for the list as a whole (the list and the
+# on-demand names), not once more per stack: two stacks or three, the same count
+_rlc() { : > "$WORK/routes-lookups"; _lib eval '_find_traefik_routes_dir() { echo x >> "$BASE_DIR/routes-lookups"; return 0; }; handle_stacks >/dev/null 2>&1'; wc -l < "$WORK/routes-lookups"; }
+mkdir -p "$WORK/Stacks/rl-a"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/rl-a/docker-compose.yml"
+_rl1=$(_rlc); mkdir -p "$WORK/Stacks/rl-b"; cp "$WORK/Stacks/rl-a/docker-compose.yml" "$WORK/Stacks/rl-b/"
+check "stack list: the routes lookup does not grow with the stacks" "$_rl1" "$(_rlc)"
+rm -rf "$WORK/Stacks/rl-a" "$WORK/Stacks/rl-b"
 mkdir -p "$WORK/.templates/demo-tpl" && printf '{"name":"demo-tpl","title":"Demo","category":"other","variables":[]}\n' > "$WORK/.templates/demo-tpl/template.json" && printf 'services:\n  demo:\n    image: alpine\n    environment:\n      - PW=${SECRETS_DEMO_TPL_PW}\n' > "$WORK/.templates/demo-tpl/docker-compose.yml"
 check "template detail lists secrets"   DEMO_TPL_PW "$(auth_request GET /templates/demo-tpl | body_of | jq -r '.secrets[0].name' 2>/dev/null)"
 check "template secret reported missing" false "$(auth_request GET /templates/demo-tpl | body_of | jq -r '.secrets[0].exists' 2>/dev/null)"
