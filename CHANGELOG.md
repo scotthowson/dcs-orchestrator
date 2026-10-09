@@ -3,6 +3,18 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A restart or stop of the API takes effect at once.** With the worker pool on (the default), the listener paused
+  between its worker checks with a foreground `sleep 2`, and bash runs a signal's handler only after its foreground
+  child ends: `POST /system/restart`, an update's restart (SIGUSR1) and `--stop` (SIGTERM) waited up to two seconds while
+  the old listener kept answering. The pause is now a background job that is waited for.
+- **Two smoke checks no longer depend on timing** (they failed on the slower ubuntu-24.04 CI runner): the restart test
+  waits until a new front holds the port instead of taking the old front's answer for the restarted API, and the
+  "paused" community check allows the two refusal lines of one refused send to fall in different seconds.
+
 ## [4.0.40] - 2026-10-09
 
 ### Fixed
