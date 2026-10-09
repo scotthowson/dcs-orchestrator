@@ -146,6 +146,20 @@ for f in 1 2; do (printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_D
 wait "$_SW" 2>/dev/null; sleep 0.2
 for i in $(seq 1 100); do [[ -s "$W/slowrun/front1.out" && -s "$W/slowrun/front2.out" ]] && break; sleep 0.1; done
 check "two fronts at one worker at once: both answered" "yes yes" "$(for f in 1 2; do grep -q '"ok": true' "$W/slowrun/front$f.out" && printf 'yes ' || printf 'no '; done | sed 's/ $//')"
+# the heartbeat never waits for a worker: with every worker taken (here one that holds the connection and never
+# answers) GET /ping is answered by the API's fast path at once — the dashboard gives a heartbeat 8 s
+mkdir -p "$W/busyrun"
+python3 - "$W/busyrun/w1.sock" <<'PYB' &
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(32); time.sleep(8)
+PYB
+_BW=$!
+for i in $(seq 1 40); do [[ -S "$W/busyrun/w1.sock" ]] && break; sleep 0.05; done
+_t0=$(date +%s%N)
+_hb=$(printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_DIR="$W/busyrun" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout 20 bash "$W/.scripts/api-dispatch.sh" 2>/dev/null)
+_hbms=$(( ($(date +%s%N) - _t0) / 1000000 ))
+check "heartbeat with every worker busy: answered at once" "yes fast" "$(grep -q '"ok": true' <<< "$_hb" && printf yes || printf no) $( (( _hbms < 3000 )) && echo fast || echo "slow (${_hbms} ms)")"
+kill "$_BW" 2>/dev/null; wait "$_BW" 2>/dev/null
 # every worker busy (no socket to connect to): the request is answered by a process of its own, not refused
 mkdir -p "$W/norun"
 check "no free worker: answered all the same"      yes "$(printf 'GET /ping HTTP/1.1\r\nHost: x\r\n\r\n' | DCS_API_RUN_DIR="$W/norun" SOCAT_PEERADDR=127.0.0.1 DCS_API_EFFECTIVE_AUTH=true DCS_API_EFFECTIVE_BIND=127.0.0.1 timeout 20 bash "$W/.scripts/api-dispatch.sh" 2>/dev/null | grep -q '"ok": true' && echo yes || echo no)"
