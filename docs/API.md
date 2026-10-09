@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `429` in total.
+Every endpoint below is `436` in total.
 
 ## Access levels
 
@@ -322,7 +322,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/logs/stats` | user | Log file size and per-level counts |
 | GET | `/logs/archives` | user | Rotated log archives |
 | GET | `/events` | user | Fleet merged |
-| GET | `/stream` | user | SSE endpoint: docker events + periodic metrics (on a hub ?fleet=1 adds every VM's docker events, ?member=id one VM's instead; each carries member, member_name, vmid) |
+| GET | `/stream` | user | SSE endpoint: docker events + periodic metrics, and for a signed-in person the chat room's events (event "chat": message, edit, delete, clear, typing, state) while chat is on (on a hub ?fleet=1 adds every VM's docker events, ?member=id one VM's instead; each carries member, member_name, vmid) |
 | GET | `/audit` | admin | Fleet merged |
 | GET | `/logs/live` | user | Stream DCS application log |
 
@@ -466,6 +466,18 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/terminal/auth/logout` | admin | Invalidate a terminal session |
 | POST | `/terminal/web/theme` | admin | The web terminal's look: {theme: {background, foreground, cursor, selectionBackground, black … brightWhite} (colours as #hex), font_size: 10-28}; the terminal restarts with it, open tabs reconnect (admin) |
 | POST | `/terminal/web/embed` | admin | Let other pages show the web terminal in a frame (a card on a Homarr board): {origins: ["https://dash.example.com"]}, at most 4; an empty list takes the permission away. Authelia stays in front of it (admin) |
+
+## Chat
+
+| Method | Path | Access | Description |
+|--------|------|--------|-------------|
+| GET | `/chat/messages` | user | The server's chat room: messages (?since=<id> for newer ones, or a time in epoch seconds for those sent, edited or deleted after it; ?before=<id> for older, ?limit= up to 500, default 100) and the room (who is online, retention, what the caller may do) |
+| GET | `/chat/presence` | user | Who is in the room now (dashboard open in the last minute), with their role; marks the caller as here |
+| POST | `/chat/messages` | user | Send a message to the server's room ({"text": "…"}, 1-2000 characters of plain text; admins and users, CHAT_RATE_LIMIT a minute) |
+| POST | `/chat/typing` | user | Tell the room the caller is typing (one live event per 3 s at most; nothing is stored) |
+| PUT | `/chat/messages/{id}` | user | Edit one's own message ({"text": "…"}) within 15 minutes of sending it |
+| DELETE | `/chat/messages` | admin | Clear the room: every message goes (admin, audited) |
+| DELETE | `/chat/messages/{id}` | user | Delete a message: one's own, or any as an admin (audited, never with the text); it stays as "deleted" in the room |
 
 ## Other
 

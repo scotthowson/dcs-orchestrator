@@ -17,6 +17,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Access-Control-Allow-Headers: Content-Type, Authorization` and `Access-Control-Max-Age` for an allowed origin, and
   without any CORS header for another one. Every answer that depends on the request's `Origin` carries `Vary: Origin`,
   also when the origin is not allowed.
+### Added
+
+- **Chat: one room per server for everyone signed in to it** (the dashboard's bubble, bottom right). Messages are plain
+  text (1-2000 characters; control characters and direction overrides are taken out) kept in `.data/chat/messages.jsonl`
+  (private files, appends and rewrites under one lock), the newest `CHAT_RETENTION_MAX` (2000) of the last
+  `CHAT_RETENTION_DAYS` (30) days. Routes: `GET /chat/messages` (`?since=`, `?before=`, `?limit=`; the room with who is
+  online, retention and what the caller may do), `POST /chat/messages`, `PUT /chat/messages/{id}` (one's own, within
+  15 minutes), `DELETE /chat/messages/{id}` (one's own, or any as an admin: a "deleted" mark stays, without the text),
+  `DELETE /chat/messages` (admin: clear the room), `GET /chat/presence`, `POST /chat/typing`. Admins and users write
+  (`CHAT_USERS_CAN_POST=false` keeps users to reading); bot accounts and API keys stay out; `CHAT_RATE_LIMIT` (20)
+  messages and edits a minute per person, then `429` with `retry_after`. A fleet VM has no room of its own
+  (`404 reason: "chat_on_hub"`): the hub's room is the server's.
+- **Live delivery over the existing event stream**: `GET /stream` carries `event: chat` (`message`, `edit`, `delete`,
+  `clear`, `typing`, `state`) to every signed-in person while the room is on; an open stream also keeps its person in
+  the room's "online" list (seen in the last minute).
+- **`CHAT_ENABLED`** (default `true`): off answers `404 reason: "chat_off"` on every chat route and tells every open
+  dashboard to hide the bubble. In `GET /config` (`chat_enabled`, `chat_users_can_post`, `chat_retention_days`,
+  `chat_retention_max`, `chat_rate_limit`) and `POST /config` (validated: true/false, whole numbers).
+- The messages are a phase-1 model a relay between servers can extend: every message carries `server` (null = written
+  here) and the room `id`, `kind` and `server`.
+
+### Changed
+
+- Chat requests are left out of the generic per-request audit line and do not empty the shared response cache. What
+  is audited instead: an admin removing someone else's message (`chat_message_removed`) and clearing the room
+  (`chat_room_cleared`), never with the text.
 
 ## [4.0.40] - 2026-10-09
 
