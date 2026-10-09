@@ -80,7 +80,8 @@ for _ in $(seq 1 50); do [[ "$(ls "$W/.data/run-$MAIN"/w*.sock 2>/dev/null | wc 
 check "two sockets in the run dir"                 2 "$(ls "$W/.data/run-$MAIN"/w*.sock 2>/dev/null | wc -l)"
 # the connections beyond API_MAX_CHILDREN wait in the kernel's queue (socat's default of 5 dropped a burst's: the client
 # gave up after two minutes of retries)
-check "the listener queues a burst (backlog 256 or more)" yes "$(_bl=$(ss -Hltn "sport = :$PORT" 2>/dev/null | awk '{print $3; exit}'); [[ "$_bl" =~ ^[0-9]+$ ]] && (( _bl >= 256 )) && echo yes || echo "no ($_bl)")"
+# (asked of socat's command line: ss shows a listening socket's queue as 0 on some kernels)
+check "the listener queues a burst (backlog 256 or more)" yes "$(_bl=$(pgrep -af "^socat TCP-LISTEN:$PORT," 2>/dev/null | grep -oE 'backlog=[0-9]+' | head -1 | cut -d= -f2); [[ "$_bl" =~ ^[0-9]+$ ]] && (( _bl >= 256 )) && echo yes || echo "no ($_bl)")"
 check "the run dir is the listener's own"          yes "$([[ -d "$W/.data/run-$MAIN" && ! -d "$W/.data/run" ]] && echo yes || echo no)"
 W1=$(workers)
 # the same answers as the one-process transport: status line, JSON body, CORS and security headers
