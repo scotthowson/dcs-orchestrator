@@ -76,11 +76,14 @@ oneshot() {
     tail -n +2 "$tmp" | "$api" --handle-request
     exit 0
 }
-# a stream stays open: it would take a worker out of the pool for as long as its dashboard is open. The heartbeat
-# (GET /ping) is answered by the API script's fast path before it parses the rest, in a few milliseconds: waiting for a
-# free worker behind a burst of slow calls took seconds on a busy small VM, the dashboard's 8 s heartbeat gave up and
-# it showed "Reconnecting" (and fetched everything again) while the server was fine
-case "$path" in */stream|/ping|/ping/) oneshot ;; esac
+# a stream stays open: it would take a worker out of the pool for as long as its dashboard is open
+case "$path" in */stream) oneshot ;; esac
+# The heartbeat (GET /ping) never waits for a worker: one look for a free one (a worker answers it in milliseconds), and
+# when every worker is busy the API script's fast path answers it before it parses the rest. Waiting behind a burst of
+# slow calls took seconds on a busy small VM, the dashboard's 8 s heartbeat gave up and it showed "Reconnecting" (and
+# fetched everything again) while the server was fine.
+once=""
+case "$path" in /ping|/ping/) once=yes ;; esac
 
 # A worker's socket file is away for a moment between two connections (socat removes it on close, the next one binds it
 # again), so the list is read on every round. A burst of dashboard polls is served by the pool one after the other (a
@@ -116,6 +119,7 @@ while :; do
         t1="${EPOCHREALTIME/[.,]/}"; [[ -n "$t1" ]] || t1=$(date +%s%6N)
         (( (t1 - t0) / 1000 < 150 )) || exit 0
     done
+    [[ -n "$once" ]] && break
     sleep 0.05
 done
 oneshot
