@@ -26023,6 +26023,13 @@ handle_fleet_proxy() {
     local id="$1" inner="$2" body="$3" m qs="" k res code
     m=$(_fleet_member "$id"); [[ -n "$m" ]] || { _api_error 404 "Unknown member: $id"; return; }
     [[ "$inner" == /* ]] || inner="/$inner"
+    # the role check below reads the inner path as written; the member normalises "//" and a trailing "/", and curl folds
+    # "." and "..": a path that would mean something else there is refused, so the path checked is the path called
+    local _lc="${inner,,}"
+    if [[ "$inner" == *//* || "/$inner/" == */./* || "/$inner/" == */../* || ( "$inner" != / && "$inner" == */ ) \
+          || "$_lc" == *%2e* || "$_lc" == *%2f* || "$_lc" == *%5c* || "$inner" == *\\* ]]; then
+        _api_error 400 "Invalid member path: $inner"; return
+    fi
     case "$inner" in
         /auth/*|/fleet/*|/setup/*|/events/stream|/terminal/exec|/terminal/history|/containers/*/logs/stream|/logs/stream|/stacks/*/logs/stream)
             _api_error 400 "$inner is not available through the hub — open that member directly"; return ;;
