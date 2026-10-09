@@ -36,6 +36,12 @@ Found on the Proxmox lab hub (a small, loaded VM):
 - **The dashboard gets the answer of an update that restarts the API:** the restart waits until the request that asked for
   it has written its answer (a minute at most); it came first on a small VM and the dashboard got nothing.
 
+Found on the real-Docker run of this release:
+
+- **A template deployed into the core stack starts on a fresh install.** Its start check asked for the core Redis password
+  ("Not started: the secrets DCS_REDIS_PASSWORD do not exist yet") when DCS had not started that stack itself yet; the
+  deploy now makes it, as a start does.
+
 ### Performance
 
 - The stack list looks for Traefik's routes once, not once per stack, and a hub does not inspect its own copy of a stack a
