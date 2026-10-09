@@ -3,6 +3,19 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.44] - 2026-10-09
+
+### Fixed
+
+- **"Send to members" works again on a hub that has been running for weeks.** 4.0.42 built the code bundle for the VMs
+  from `git ls-files`; on a long-lived API process (in place through many updates) git answered nothing there while a
+  fresh shell listed every file, so `tar` refused the empty list and every member got "could not fetch the bundle".
+  The bundle is now built from the files on disk whenever git says nothing (the data folders pruned first), git runs
+  without any `GIT_*` variable the process may carry, an empty or code-less list is refused with the reason in
+  `logs/api-server.log`, and tar's own message lands there too. The API also closes every stray descriptor and forgets
+  the git variables before it re-executes itself (restart in place, worker renewal), so what one run leaves open never
+  reaches the next.
+
 ## [4.0.43] - 2026-10-09
 
 ### Fixed

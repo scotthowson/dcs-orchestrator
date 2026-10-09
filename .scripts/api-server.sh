@@ -30184,22 +30184,41 @@ handle_fleet_bundle() {
     # the files of the code, by name: what git tracks (an install that is no git checkout: its files), never a .env of any
     # kind, the stacks, the accounts, the data or the history of a compose file — a list of what to leave out let every new
     # file in (a restore's .env.restored, .compose-history)
-    local list f top
+    local list f top source="git" gerr="" terr="" n=0
     list=$(mktemp "${TMPDIR:-/tmp}/dcs-bundle-list-XXXXXX") || { rm -f "$tmp"; _api_error 500 "no temp file"; return; }
-    top=$(git -C "$BASE_DIR" rev-parse --show-toplevel 2>/dev/null || true)
-    {
-        if [[ -n "$top" && "$(cd "$top" && pwd -P)" == "$(cd "$BASE_DIR" && pwd -P)" ]]; then git -C "$BASE_DIR" ls-files -z 2>/dev/null
-        else (cd "$BASE_DIR" && find . -type f -print0 2>/dev/null | sed -z 's|^\./||'); fi
-    } | while IFS= read -r -d '' f; do
+    # a GIT_DIR or GIT_WORK_TREE left in this process by an earlier update makes git look elsewhere: this checkout, always
+    top=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY git -C "$BASE_DIR" rev-parse --show-toplevel 2>/dev/null || true)
+    if [[ -n "$top" && "$(cd "$top" && pwd -P)" == "$(cd "$BASE_DIR" && pwd -P)" ]]; then
+        env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY git -C "$BASE_DIR" ls-files -z > "$list.src" 2>"$list.err" || true
+        gerr=$(tr '\n' ' ' < "$list.err" 2>/dev/null | cut -c1-200); rm -f "$list.err"
+    else
+        : > "$list.src"
+    fi
+    # git said nothing (no checkout, or a process that cannot read the index): the files on disk, the data folders pruned
+    # before they are walked (Stacks/*/App-Data would take minutes)
+    if [[ ! -s "$list.src" ]]; then
+        source="find"
+        (cd "$BASE_DIR" && find . \( -path ./.git -o -path ./.data -o -path ./.api-auth -o -path ./.secrets -o -path ./logs -o -path ./Stacks -o -path ./App-Data -o -path ./node_modules -o -path ./scratchpad -o -path ./.snapshots -o -path ./backups -o -name .compose-history \) -prune -o -type f -print0 2>/dev/null | sed -z 's|^\./||') > "$list.src"
+    fi
+    while IFS= read -r -d '' f; do
         case "$f" in
             .git/*|.data/*|.api-auth/*|.secrets/*|logs/*|Stacks/*|App-Data/*|node_modules/*|scratchpad/*|.snapshots/*|backups/*|.compose-history/*|*/.compose-history/*) continue ;;
             .env.example) ;;
             .env|.env.*|*.log|.plugins/*/data/*) continue ;;
         esac
-        [[ -f "$BASE_DIR/$f" ]] && printf './%s\0' "$f"
-    done > "$list"
-    if ! tar -C "$BASE_DIR" -czf "$tmp" --null --no-recursion -T "$list" 2>/dev/null; then
-        rm -f "$tmp" "$list"; _api_error 500 "Could not pack the bundle"; return
+        [[ -f "$BASE_DIR/$f" ]] || continue
+        printf './%s\0' "$f"
+    done < "$list.src" > "$list"
+    rm -f "$list.src"
+    n=$(tr -cd '\0' < "$list" | wc -c)
+    # a bundle without the code is no bundle: say why in the API log instead of handing tar an empty list
+    if (( n < 20 )) || ! grep -qzx './.scripts/api-server.sh' "$list" 2>/dev/null; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') fleet/bundle: only $n file(s) found from $source in $BASE_DIR${gerr:+ (git: $gerr)}" >> "$API_LOG_FILE" 2>/dev/null
+        rm -f "$tmp" "$list"; _api_error 500 "Could not pack the bundle: the hub's own code was not found (see logs/api-server.log)"; return
+    fi
+    if ! terr=$(tar -C "$BASE_DIR" -czf "$tmp" --null --no-recursion -T "$list" 2>&1); then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') fleet/bundle: tar failed on $n file(s) from $source: $(tr '\n' ' ' <<< "$terr" | cut -c1-300)" >> "$API_LOG_FILE" 2>/dev/null
+        rm -f "$tmp" "$list"; _api_error 500 "Could not pack the bundle (see logs/api-server.log)"; return
     fi
     rm -f "$list"
     size=$(stat -c '%s' "$tmp" 2>/dev/null || echo 0)
@@ -35296,6 +35315,15 @@ _api_shutdown_children() {
 # SIGHUP: restart in place. The listener and helper loops are stopped, the
 # port is waited for, then the script re-executes itself with its original
 # arguments — same PID, so a systemd unit does not even notice.
+# _api_scrub_before_exec — a process that re-executes itself keeps every descriptor a handler left open and every
+# variable an earlier run exported; after weeks of in-place restarts git, tar and friends then fail in ways a fresh
+# start never shows. Everything above stderr is closed and the git environment forgotten before the exec.
+_api_scrub_before_exec() {
+    local fd
+    for fd in /proc/$$/fd/*; do fd=${fd##*/}; [[ "$fd" =~ ^[0-9]+$ ]] && (( fd > 2 )) && { exec {fd}>&- ; } 2>/dev/null; done
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR 2>/dev/null || true
+}
+
 _api_reexec() {
     set +e
     echo ""
@@ -35310,6 +35338,7 @@ _api_reexec() {
     [[ -n "$(_api_port_listeners "$API_PORT")" ]] && { _api_reclaim_port "$API_PORT" || true; }
     rm -f "$API_PID_FILE" "$API_CAPS_FILE"
     self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    _api_scrub_before_exec
     exec "$self" ${_API_ARGV[@]+"${_API_ARGV[@]}"}
 }
 
@@ -35375,6 +35404,7 @@ _api_worker_loop() {
         kill -TERM "$sp" 2>/dev/null; wait "$sp" 2>/dev/null; sp=""
         # a renewal after the quota, or as soon as .env changed: a key removed from it would otherwise linger in this worker
         if (( served >= ${API_WORKER_REQUESTS:-500} )) || [[ "$BASE_DIR/.env" -nt "$stamp" ]]; then
+            _api_scrub_before_exec
             exec "$_self_path" --worker "$sock"
         fi
     done
