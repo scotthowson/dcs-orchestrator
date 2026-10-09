@@ -2263,7 +2263,7 @@ _BGIT=$(mktemp -d "$WORK/.bundle-git-XXXX"); mkdir -p "$_BGIT/bin"
 printf '#!/bin/sh\ncase "$*" in *rev-parse*) printf "%%s\\n" "$BUNDLE_TOP";; *ls-files*) exit 0;; *) exec /usr/bin/git "$@";; esac\n' > "$_BGIT/bin/git"; chmod +x "$_BGIT/bin/git"
 _BOUT=$( ( set --; source "$WORK/.scripts/api-server.sh" >/dev/null 2>&1; set +e; declare -A QUERY_PARAMS; QUERY_PARAMS[token]="BNDL-GOOD-CODE"; BUNDLE_TOP="$BASE_DIR" PATH="$_BGIT/bin:$PATH" handle_fleet_bundle 2>/dev/null ) | head -c 400 | tr -d '\r' | head -1 )
 check "bundle: git saying nothing still gives the code (find)" "HTTP/1.1 200 OK" "$_BOUT"
-_BLOG=$( ( set --; source "$WORK/.scripts/api-server.sh" >/dev/null 2>&1; set +e; declare -A QUERY_PARAMS; QUERY_PARAMS[token]="BNDL-GOOD-CODE"; BUNDLE_TOP="$BASE_DIR" PATH="$_BGIT/bin:$PATH" BASE_DIR="$_BGIT/empty" handle_fleet_bundle 2>/dev/null | head -c 200 | tr -d '\r' | head -1 ) )
+_BLOG=$( ( set --; source "$WORK/.scripts/api-server.sh" >/dev/null 2>&1; set +e; declare -A QUERY_PARAMS; QUERY_PARAMS[token]="BNDL-GOOD-CODE"; BUNDLE_TOP="$BASE_DIR"; export BUNDLE_TOP; PATH="$_BGIT/bin:$PATH"; BASE_DIR="$_BGIT/empty"; handle_fleet_bundle 2>/dev/null | head -c 200 | tr -d '\r' | head -1 ) )
 check "bundle: no code at all is refused, not packed empty" "HTTP/1.1 500" "$(printf '%s' "$_BLOG" | cut -c1-12)"
 rm -rf "$_BGIT"
 check "update: a bundle code for nobody"   403 "$(request GET '/fleet/bundle?token=BNDL-NOBO-DY00' '' "${AUTH[@]}" | status_of)"
