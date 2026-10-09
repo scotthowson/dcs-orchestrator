@@ -7411,11 +7411,15 @@ _backup_part_untar() {
     _fleet_reader_pick
     [[ "$FLEET_READER" == sudo ]] && bk_sudo=(sudo -n)
     mkdir -p -- "$dst" 2>/dev/null || "${bk_sudo[@]}" mkdir -p -- "$dst" 2>/dev/null || return 2
+    # owners and modes as they were, but never a setuid or setgid file: an archive must not plant one on the host
     if [[ "$FLEET_READER" == docker:* ]]; then
-        docker run -i --rm --network none --security-opt label=disable -v "$dst:/dst" "${FLEET_READER#docker:}" tar --numeric-owner -xpf - -C /dst
+        docker run -i --rm --network none --security-opt label=disable -v "$dst:/dst" "${FLEET_READER#docker:}" \
+            sh -c 'tar --numeric-owner -xpf - -C /dst && find /dst -type f \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} +'
         return
     fi
-    "${bk_sudo[@]}" tar --numeric-owner -xpf - -C "$dst"
+    "${bk_sudo[@]}" tar --numeric-owner -xpf - -C "$dst" || return
+    "${bk_sudo[@]}" find "$dst" -type f \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
+    return 0
 }
 # _backup_volume_untar VOLUME — empties the named volume and fills it from the tar stream on stdin
 _backup_volume_untar() {
@@ -7533,19 +7537,26 @@ _backup_verify() {
 }
 
 # _backup_retention — keeps BACKUP_RETENTION_COUNT backups of each kind: the full ones, and each stack's own (a schedule
-# backing up one stack every hour never pushes the full backups out)
+# backing up one stack every hour never pushes the full backups out). Newest first by the time in the name (a copy or a
+# move changes a file's mtime); a complete backup and an incomplete one (its manifest says complete: false) are counted
+# apart, so a run of incomplete ones never deletes the last complete one
 _backup_retention() {
-    local dest="${BACKUP_DEST_DIR%/}" keep="${BACKUP_RETENTION_COUNT:-6}" f name grp
+    local dest="${BACKUP_DEST_DIR%/}" keep="${BACKUP_RETENTION_COUNT:-6}" f name grp key kind
     [[ "$keep" =~ ^[0-9]+$ && "$keep" -ge 1 ]] || keep=6
     [[ -d "$dest" ]] || return 0
     local -A bk_seen=()
-    while IFS= read -r f; do
+    while IFS=$'\t' read -r key f; do
         name="${f##*/}"
         [[ "$name" =~ $BACKUP_NAME_RE ]] || continue
         grp="${BASH_REMATCH[3]:-}"; grp="${grp:-full}"
-        bk_seen[$grp]=$(( ${bk_seen[$grp]:-0} + 1 ))
-        (( ${bk_seen[$grp]} > keep )) && rm -f -- "$f" "$f.sha256"
-    done < <(ls -1t "$dest"/Docker-Compose-Backup-*.tar.gz 2>/dev/null)
+        kind=complete
+        [[ "$(_backup_manifest "$f" | jq -r 'if .complete == false then "no" else "yes" end' 2>/dev/null)" == no ]] && kind=incomplete
+        bk_seen[$grp/$kind]=$(( ${bk_seen[$grp/$kind]:-0} + 1 ))
+        (( ${bk_seen[$grp/$kind]} > keep )) && rm -f -- "$f" "$f.sha256"
+    done < <(for f in "$dest"/Docker-Compose-Backup-*.tar.gz; do
+                 name="${f##*/}"; [[ -f "$f" && "$name" =~ $BACKUP_NAME_RE ]] || continue
+                 key="${BASH_REMATCH[1]//[-_]/}"; printf '%s\t%s\n' "$key" "$f"
+             done | sort -r)
     return 0
 }
 
@@ -8022,6 +8033,19 @@ _backup_restore_run() {
     done
 
     _pre_restore_new && pre="$PR_DIR" && ts="$PR_TS" && (umask 077; mkdir -p -- "$pre/Stacks" "$pre/volumes") 2>/dev/null || { BR_ERROR="Cannot write $BACKUP_PRE_RESTORE_DIR/$PR_TS"; return 1; }
+    # Room, as a backup checks it: the volumes as they are now are copied into the set before they are replaced (the
+    # folders are moved there, not copied); nothing is stopped when they would not fit
+    local bk_kb=0 bk_free=0
+    for vs in "${bk_vols[@]}"; do
+        v="${vs%%$'\t'*}"
+        [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker volume inspect "$v" >/dev/null 2>&1 && bk_kb=$(( bk_kb + $(_backup_du volume "$v") ))
+    done
+    bk_free=$(df -Pk -- "$pre" 2>/dev/null | awk 'NR==2 {print $4}') || bk_free=0; [[ "$bk_free" =~ ^[0-9]+$ ]] || bk_free=0
+    if (( bk_free > 0 && bk_free < bk_kb + 65536 )); then
+        rm -rf -- "$pre"
+        BR_ERROR="Not enough room in $BACKUP_PRE_RESTORE_DIR: the volumes as they are now need about $(( (bk_kb + 65536) / 1024 )) MB there before they are replaced, and $(( bk_free / 1024 )) MB are free"
+        return 1
+    fi
 
     # The stacks it touches stop (their data is replaced under them) and start again at the end
     _backup_status restoring 10 stop "Stopping the stacks it restores..."
@@ -8066,7 +8090,8 @@ _backup_restore_run() {
         for v in "${_BACKUP_SHIPPED_CONFIG[@]}"; do bk_sc+=(--exclude="./.config/$v"); done
         printf '%s\n' "${bk_skip[@]}" > "$pre/skip-links"
         (( ${#bk_skip[@]} )) && bk_exargs=(--anchored --no-wildcards --exclude-from="$pre/skip-links" --wildcards)
-        if ! tar -xzf "$archive" --keep-directory-symlink -C "$BASE_DIR" --exclude=./.dcs-backup --exclude=./.templates "${bk_sc[@]}" "${bk_exargs[@]}" 2>"$pre/install.err"; then
+        # (VERSION is the code's: an older archive's would make this code say it is that older release)
+        if ! tar -xzf "$archive" --keep-directory-symlink -C "$BASE_DIR" --exclude=./.dcs-backup --exclude=./.templates --exclude=./VERSION "${bk_sc[@]}" "${bk_exargs[@]}" 2>"$pre/install.err"; then
             bk_warns+=("the install's state: $(tail -n 2 "$pre/install.err" | tr '\n' ' ' | cut -c1-300)")
         fi
         # templates that are not here come back; the ones DCS ships stay as the code has them
@@ -8101,6 +8126,12 @@ _backup_restore_run() {
     for vs in "${bk_ads[@]}"; do
         IFS=$'\t' read -r s v <<< "$vs"
         [[ "$v" == /* ]] || { bk_warns+=("$s: the backup's App-Data path is not a full path, skipped"); continue; }
+        # only where this stack keeps its App-Data on this machine (its .env, back above): never a folder that the
+        # archive's manifest alone names
+        local _cur_ad=""; _cur_ad=$(_stack_appdata_override "$s") || _cur_ad=""
+        if [[ -z "$_cur_ad" || "${_cur_ad%/}" != "${v%/}" ]]; then
+            bk_warns+=("$s: the backup's App-Data path $v is not where $s keeps its App-Data on this machine (${_cur_ad:-its own folder}), so that part was not restored"); continue
+        fi
         # the folder must be this stack's (its marker names it), or an empty one made for it on a new machine or a new
         # drive (the archive's copy brings the marker); a folder that is not there may be a drive that is not mounted
         if [[ ! -d "$v" ]]; then
@@ -8129,7 +8160,11 @@ _backup_restore_run() {
         [[ "$v" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { bk_warns+=("volume $v: not a plain name, skipped"); continue; }
         _backup_status restoring 85 volumes "Restoring the volume $v..."
         if docker volume inspect "$v" >/dev/null 2>&1; then
-            _backup_part_tar volume "$v" > "$pre/volumes/$v.tar" 2>/dev/null || true
+            # the restore empties the volume first: without its copy as it is now, it is not touched at all
+            if ! _backup_part_tar volume "$v" > "$pre/volumes/$v.tar" 2>/dev/null; then
+                rm -f -- "$pre/volumes/$v.tar"
+                bk_warns+=("volume $v was not restored: its content as it is now could not be copied aside first, so it was left as it is"); continue
+            fi
         else
             docker volume create --label "com.docker.compose.project=$s" --label "com.docker.compose.volume=$short" "$v" >/dev/null 2>&1 || { bk_warns+=("volume $v could not be created"); continue; }
         fi
