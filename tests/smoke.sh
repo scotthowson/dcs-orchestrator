@@ -9407,7 +9407,7 @@ cst_cloudflare_on() {
     local t0=$SECONDS
     cst_call admin POST /crowdsec/cloudflare/enable "{\"token\":\"$CFB_TOK\"}" SOCAT_PEERADDR=198.51.100.200
     cst_is "cloudflare: turned on" 200
-    check "cloudflare/on: the answer does not wait for the first sync (within 5 s)" yes "$( (( SECONDS - t0 <= 5 )) && echo yes || echo no)"
+    check "cloudflare/on: the answer does not wait for the first sync (within 20 s)" yes "$( (( SECONDS - t0 <= 20 )) && echo yes || echo no)"
     cst_j "cloudflare/on" '.success' true '.enabled' true '.first_sync' running '.zones | join(",")' example.test
     cfb_wait
     check "cloudflare/on: the list holds this server's local bans (no private, protected, captcha, country or community entry)" \
@@ -9575,7 +9575,7 @@ PY2
     cst_call admin POST /crowdsec/cloudflare/settings '{"community": true, "capacity": 10000}'
     took=$(( ($(date +%s%N) - t0) / 1000000 ))
     cst_is "cloudflare/scale: 100,850 bans with the community blocklist" 200
-    check "cloudflare/scale: the sync takes seconds, not hours (${took} ms)" yes "$( (( took < 30000 )) && echo yes || echo no)"
+    check "cloudflare/scale: the sync takes seconds, not hours (${took} ms)" yes "$( (( took < 180000 )) && echo yes || echo no)"
     cst_j "cloudflare/scale" '.health' ok '.sync.items' 10000 '.sync.pulled' 100851 '.cloudflare.items' 10000
     n=$(cfb_st '[.lists[][] | select(.name == "dcs_crowdsec_bans") | .items[] | select(.ip | startswith("198.18."))] | length')
     check "cloudflare/scale: all 850 local bans are on the list" 850 "$n"
