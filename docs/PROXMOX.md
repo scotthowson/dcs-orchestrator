@@ -120,6 +120,17 @@ Proxmox a real certificate (Datacenter → ACME) and keep verification on.
 - **Power** (admins) — *Start* for a stopped guest; *Shut down* (clean ACPI or container stop),
   *Reboot*, *Stop* (hard) and, for VMs, *Reset* and *Suspend* for a running one; *Resume* for a
   paused one. Every action asks first and explains what it does.
+- **Snapshots** (in a guest's details; admins take, roll back and delete, everyone sees them) — each snapshot with
+  its note, its age, *RAM* when a running VM's memory was saved with it, and *current* on the one the guest runs from.
+  *Take snapshot* asks for a name (a letter first, then letters, digits, `-` and `_`, 40 at most), a note and, for a
+  running VM, whether to include its RAM (the VM then comes back running, where it was). *Roll back* names what is lost
+  (everything changed on that guest since the snapshot) and asks first; a guest that was running starts again after a
+  snapshot without RAM. A member of the hub's fleet goes back with its DCS (its stacks, settings and App-Data as they
+  were) and the hub checks it again within a minute. The VM this DCS runs in is never rolled back from DCS itself (it
+  would cut the server off in the middle): do that one in Proxmox. The token needs `VM.Snapshot` (take, delete) and
+  `VM.Snapshot.Rollback` (roll back) on the guest; `PVEVMAdmin` has both, and a 403 names the one that is missing. The
+  disks must be on a storage that can take snapshots (LVM-thin, ZFS, Ceph, qcow2 files; not a raw image on a
+  directory, NFS or plain LVM) — Proxmox's refusal is said in those words.
 - **Recent tasks** — starts, stops, backups and migrations with who ran them and how they ended.
 - **A dashboard card** with the node load and the guests, one click from the page.
 - **Tags for the DCS VMs.** Every VM the hub builds carries `dcs` and its stack (`dcs;media-services`), the baked
@@ -169,6 +180,10 @@ The bot's DCS account may power guests when it has the **bot** or **admin** role
 | GET | `/proxmox/tasks` | user — recent tasks |
 | POST | `/proxmox/vms/{node}/{qemu\|lxc}/{vmid}/{action}` | admin, bot — `start shutdown stop reboot reset suspend resume` |
 | POST | `/proxmox/test` | admin — try `{url, token_id, token_secret, verify_tls}` without saving |
+| GET | `/proxmox/vms/{vmid}/snapshots` | user — the guest's snapshots, `current` (the one it runs from) and `can_save_ram` |
+| POST | `/proxmox/vms/{vmid}/snapshots` | admin — `{name, description?, vmstate?}`; waits for Proxmox; 409 when the name is taken |
+| POST | `/proxmox/vms/{vmid}/snapshots/{name}/rollback` | admin — `{confirm: true, start?}`; 409 for the VM this DCS runs in |
+| DELETE | `/proxmox/vms/{vmid}/snapshots/{name}` | admin |
 
 Read endpoints are cached for 10–15 s like the rest of the dashboard's polls; a power action
 clears the cache.

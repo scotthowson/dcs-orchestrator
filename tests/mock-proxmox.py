@@ -9,7 +9,10 @@ a 301 to https (what pveproxy does on 8006). MOCK_PVE_PRIVS=none: a token withou
 Folders of the host for VMs: /cluster/mapping/dir (a folder "exists" on the host when its path starts with /srv/ or
 /tank/), virtiofsN in a VM's config (pending while the VM runs, applied by a stop, a shutdown or a reboot), /pending.
 MOCK_NO_MAPPING_FILE: while that file exists the token has no Mapping privileges. MOCK_VFS_FILE: where the live
-virtiofs devices of every VM and its count of starts are written (what stands in for the VM reads them)."""
+virtiofs devices of every VM and its count of starts are written (what stands in for the VM reads them).
+Snapshots: /nodes/{n}/{qemu|lxc}/{id}/snapshot (list with the "current" entry, take one, roll back, delete); a name that
+starts with "fail" ends its task with "snapshot feature is not available"; MOCK_DENY_SNAPSHOT_FILE: while that file
+exists the token lacks VM.Snapshot (and VM.Snapshot.Rollback)."""
 import http.server, json, os, socket, ssl, subprocess, sys, tempfile, time, urllib.parse, pathlib
 
 PORT = int(sys.argv[1]); TOKEN = f"PVEAPIToken={sys.argv[2]}={sys.argv[3]}"
@@ -21,6 +24,10 @@ VMS = {
     900: {'vmid': 900, 'name': 'template-debian', 'type': 'qemu', 'node': 'pve', 'status': 'stopped', 'template': 1, 'cpu': 0, 'maxcpu': 1, 'mem': 0, 'maxmem': 1073741824},
 }
 TASKS = []
+FAILED = {}         # upid -> the exitstatus of a task that failed
+SNAPS = {}          # vmid -> [{name, description, snaptime, vmstate, parent}]
+SNAP_CUR = {}       # vmid -> the snapshot the guest runs from now
+def deny_snap(): return bool(os.environ.get('MOCK_DENY_SNAPSHOT_FILE')) and os.path.exists(os.environ['MOCK_DENY_SNAPSHOT_FILE'])
 # what the guests answer when the hub scans them: VM 100 claims the loopback address (a DCS
 # listener on 127.0.0.1 is "found" there), 101 has no guest agent, the container is unroutable
 UUIDS = {100: '11111111-2222-3333-4444-555555555555', 101: '22222222-3333-4444-5555-666666666666'}
@@ -104,11 +111,16 @@ class H(http.server.BaseHTTPRequestHandler):
             if st == 'local': items.append({'volid': 'local:iso/tiny-installer.iso', 'content': 'iso', 'size': 68157440, 'format': 'iso'})
             return self._send(200, {'data': [i for i in items if not want or i['content'] == want]})
         if path.startswith('/api2/json/nodes/pve/tasks/') and path.endswith('/status'):
-            return self._send(200, {'data': {'status': 'stopped', 'exitstatus': 'OK', 'upid': urllib.parse.unquote(path.split('/')[6])}})
+            u = urllib.parse.unquote(path.split('/')[6])
+            return self._send(200, {'data': {'status': 'stopped', 'exitstatus': FAILED.get(u, 'OK'), 'upid': u}})
         parts = path.split('/')
         if len(parts) >= 8 and parts[3] == 'nodes' and parts[5] in ('qemu', 'lxc'):
             vmid = int(parts[6]); vm = VMS.get(vmid)
             if not vm: return self._send(500, {'message': f"Configuration file 'nodes/pve/{parts[5]}-server/{vmid}.conf' does not exist", 'data': None})
+            if parts[7] == 'snapshot' and len(parts) == 8:
+                cur = {'name': 'current', 'description': 'You are here!', 'digest': 'mock', 'running': 1 if vm['status'] == 'running' else 0}
+                if SNAP_CUR.get(vmid): cur['parent'] = SNAP_CUR[vmid]
+                return self._send(200, {'data': SNAPS.get(vmid, []) + [cur]})
             if parts[7] == 'status' and parts[8:9] == ['current']:
                 return self._send(200, {'data': dict(vm, qmpstatus=vm['status'], cpus=vm['maxcpu'], netin=1234, netout=5678, diskread=0, diskwrite=0, agent=1, ha={'managed': 0})})
             if parts[7] == 'pending':
@@ -178,6 +190,17 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._auth(): return
         parts = urllib.parse.urlparse(self.path).path.split('/')
+        if len(parts) == 9 and parts[3] == 'nodes' and parts[5] in ('qemu', 'lxc') and parts[7] == 'snapshot':
+            vmid = int(parts[6]); name = parts[8]
+            if deny_snap(): return self._send(403, {'message': f'Permission check failed (/vms/{vmid}, VM.Snapshot)', 'data': None})
+            snaps = SNAPS.get(vmid, [])
+            if not any(x['name'] == name for x in snaps): return self._send(500, {'message': f"snapshot '{name}' does not exist", 'data': None})
+            gone = next(x for x in snaps if x['name'] == name)
+            for x in snaps:
+                if x.get('parent') == name: x['parent'] = gone.get('parent')
+            if SNAP_CUR.get(vmid) == name: SNAP_CUR[vmid] = gone.get('parent')
+            SNAPS[vmid] = [x for x in snaps if x['name'] != name]
+            return self._send(200, {'data': mk_upid('qmdelsnapshot', vmid)})
         if len(parts) == 7 and parts[3:6] == ['cluster', 'mapping', 'dir']:
             if no_mapping(): return self._send(403, {'message': 'Permission check failed (/mapping/dir, Mapping.Modify)', 'data': None})
             if parts[6] not in MAPPINGS: return self._send(500, {'message': f"mapping '{parts[6]}' does not exist", 'data': None})
@@ -220,6 +243,27 @@ class H(http.server.BaseHTTPRequestHandler):
             CONFIGS[newid] = dict(CONFIGS.get(vmid, {}), name=f.get('name', f'clone-{newid}'))
             UUIDS[newid] = f'bbbbbbbb-0000-0000-0000-{newid:012d}'
             save(); return self._send(200, {'data': mk_upid('qmclone', newid)})
+        if len(parts) >= 8 and parts[3] == 'nodes' and parts[5] in ('qemu', 'lxc') and parts[7] == 'snapshot':
+            vmid = int(parts[6]); vm = VMS.get(vmid)
+            if not vm: return self._send(500, {'message': 'no such vm', 'data': None})
+            if deny_snap(): return self._send(403, {'message': f"Permission check failed (/vms/{vmid}, {'VM.Snapshot.Rollback' if parts[9:10] == ['rollback'] else 'VM.Snapshot'})", 'data': None})
+            snaps = SNAPS.setdefault(vmid, [])
+            if len(parts) == 8:
+                f = form(self); name = f.get('snapname', '')
+                if any(x['name'] == name for x in snaps): return self._send(500, {'message': f"snapshot name '{name}' already used", 'data': None})
+                upid = mk_upid('qmsnapshot', vmid)
+                if name.startswith('fail'): FAILED[upid] = 'snapshot feature is not available'; return self._send(200, {'data': upid})
+                e = {'name': name, 'description': f.get('description', ''), 'snaptime': int(time.time()), 'vmstate': 1 if f.get('vmstate') == '1' and vm['status'] == 'running' else 0}
+                if SNAP_CUR.get(vmid): e['parent'] = SNAP_CUR[vmid]
+                snaps.append(e); SNAP_CUR[vmid] = name
+                return self._send(200, {'data': upid})
+            if len(parts) == 10 and parts[9] == 'rollback':
+                name = parts[8]; e = next((x for x in snaps if x['name'] == name), None)
+                if not e: return self._send(500, {'message': f"snapshot '{name}' does not exist", 'data': None})
+                # a snapshot without RAM leaves the guest stopped, one with it running
+                vm['status'] = 'running' if e['vmstate'] else 'stopped'; vm['uptime'] = 1 if e['vmstate'] else 0
+                SNAP_CUR[vmid] = name; save()
+                return self._send(200, {'data': mk_upid('qmrollback', vmid)})
         if len(parts) >= 9 and parts[3] == 'nodes' and parts[5] in ('qemu', 'lxc') and parts[7] == 'status':
             vmid = int(parts[6]); action = parts[8]; vm = VMS.get(vmid)
             if not vm: return self._send(500, {'message': 'no such vm', 'data': None})

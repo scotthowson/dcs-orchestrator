@@ -116,6 +116,9 @@ doc_path() {
         "/fleet/jobs/*"*)               p="${p/\*/\{id\}}" ;;
         "/fleet/templates/*")           p="/fleet/templates/{vmid}" ;;
         "/fleet/join-tokens/*")         p="/fleet/join-tokens/{token}" ;;
+        "/proxmox/vms/*/snapshots/*/rollback") p="/proxmox/vms/{vmid}/snapshots/{name}/rollback" ;;
+        "/proxmox/vms/*/snapshots/*")   p="/proxmox/vms/{vmid}/snapshots/{name}" ;;
+        "/proxmox/vms/*/snapshots")     p="/proxmox/vms/{vmid}/snapshots" ;;
         "/proxmox/vms/*/*/*/*")         p="/proxmox/vms/{node}/{type}/{vmid}/{action}" ;;
         "/proxmox/vms/*/*/*")           p="/proxmox/vms/{node}/{type}/{vmid}" ;;
         "/homarr/*"*)                   p="${p/\*/\{name\}}" ;;
