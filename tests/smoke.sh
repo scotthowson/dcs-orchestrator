@@ -3289,6 +3289,20 @@ check "move: the .env says ./App-Data, with a note of the drive" "1|1|no" "$(gre
 cp "$WORK/zz-move.env.keep" "$WORK/Stacks/zz-move/.env"
 chmod -R u+w "$WORK-drive2" 2>/dev/null; rm -rf "$WORK-drive2"
 rm -rf "$WORK/Stacks/zz-gpu"
+# a VM's stack back to the hub: the pieces (the end-to-end move and its rollbacks are in tests/fleet-files.sh)
+_PL=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+python3 -c 'import socket,sys,time; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.listen(1); time.sleep(20)' "$_PL" & _PLPID=$!; sleep 0.3
+check "to the hub: a port something listens on is taken"  "0 1" "$(_lib _fleet_port_used "$_PL" tcp; a=$?; _lib _fleet_port_used 1 udp; echo "$a $?")"
+kill "$_PLPID" 2>/dev/null; wait "$_PLPID" 2>/dev/null
+check "to the hub: a viewer may not ask"                   403 "$(viewer_request POST /fleet/members/vm1/stacks/web/move-to-hub/preflight | status_of)"
+check "to the hub: a viewer may not move"                  403 "$(viewer_request POST /fleet/members/vm1/stacks/web/move-to-hub '{"confirm":true}' | status_of)"
+check "to the hub: an unknown member"                      404 "$(auth_request POST /fleet/members/vm1/stacks/web/move-to-hub '{"confirm":true}' | status_of)"
+check "to the hub: a bad stack name"                       400 "$(auth_request POST '/fleet/members/vm1/stacks/..x/move-to-hub/preflight' | status_of)"
+# the VM's side gets its arguments as they are, through any login shell (the script travels base64-encoded)
+mkdir -p "$WORK/vmside/.scripts" "$WORK/vmside/Stacks/web"; : > "$WORK/vmside/.scripts/api-server.sh"
+check "to the hub: the VM's side finds its folder"         "no Stacks/web with a compose file in the VM ($WORK/vmside)" "$(_lib eval "FLEET_MEMBER_DIR='$WORK/vmside'; _fleet_ssh() { shift; sh -c \"\$1\"; }; _fleet_vm_op 10.0.0.9 facts web 2>&1 >/dev/null")"
+check "to the hub: the VM's side refuses a path outside"   5 "$(_lib eval "FLEET_MEMBER_DIR='$WORK/vmside'; _fleet_ssh() { shift; sh -c \"\$1\"; }; _rc=0; _fleet_vm_op 10.0.0.9 prune web '$WORK/vmside/Stacks' >/dev/null 2>&1 || _rc=\$?; echo \$_rc")"
+rm -rf "$WORK/vmside"
 check "move: a move takes the stack's own name"    400 "$(auth_request POST /fleet/provision '{"node":"pve","storage":"local-lvm","gateway":"192.0.2.1","ip_start":"192.0.2.10","vms":[{"stack":"zz-move","source":"other","move":true}]}' | status_of)"
 check "move: a stack that is not there"            404 "$(auth_request POST /fleet/provision '{"node":"pve","storage":"local-lvm","gateway":"192.0.2.1","ip_start":"192.0.2.10","vms":[{"stack":"zz-nope","move":true}]}' | status_of)"
 _DS0=$(grep -m1 '^DOCKER_STACKS=' "$WORK/.env"); sed -i 's|^DOCKER_STACKS=.*|DOCKER_STACKS="demo zz-move demo2"|' "$WORK/.env"

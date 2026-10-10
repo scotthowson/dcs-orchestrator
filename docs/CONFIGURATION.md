@@ -285,6 +285,10 @@ shows it, and a board that reads the [dashboard feed](DASHBOARDS.md) (`system.up
 | `FLEET_APPDATA_MOUNT` | `true` | A hub shows every VM stack's App-Data at `Stacks/<name>/VM-App-Data` (a link to an sshfs mount of the VM's folder); `false` takes the mounts and the links away |
 | `FLEET_APPDATA_INSTALL` | `true` | The hub installs `sshfs` by itself when it is missing and the DCS account has passwordless sudo; `false` leaves that to you |
 | `FLEET_MOUNT_DIR` | `~/.dcs-vm-data` | Where those mounts are made — outside the DCS folder on purpose (a folder inside it is refused) |
+| `FLEET_MOVE_BACKUP_DAYS` | `14` | A stack moved from a VM back to the hub: how long the VM keeps its copy (the stack's folder and its named volumes), and the hub what it set aside of its own |
+| `FLEET_MOVE_SETTLE_SECONDS` | `60` | After a move to the hub, how long its containers are watched (restarting, exited, unhealthy undo the move) |
+| `FLEET_MOVE_HUB_RESERVE_MB` | `1024` | The free disk a move to the hub must leave on the hub beyond the data it copies |
+| `FLEET_MEMBER_DIR` | *(the VM user's `~/.Docker-Compose-Skeleton-AIO`)* | Where DCS lives in the VMs, for the moves to the hub (a VM installed by hand in another folder) |
 
 `.config/fleet-images.json` on the hub (an array of `{id, label, url, file, family}`) replaces the list of
 operating systems the VM settings offer. [Proxmox guide](PROXMOX.md) explains every piece.

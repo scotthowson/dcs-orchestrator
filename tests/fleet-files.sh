@@ -603,5 +603,234 @@ check "nuke: …its first level is never a container's" none "$(_rootof "$NODE/A
 check "nuke: …the stack's own App-Data still counts" "$NA" "$(_rootof "$NA/Webby")"
 check "nuke: the trash is never emptied into itself" none "$(_rootof "$NA/.trash/demo/webby-1")"
 
+echo "A VM's stack moves back to the hub, with its data"
+# A second pair, hub and member, each with a Docker of its own: a stateful stand-in (containers, volumes with their files,
+# images) under a folder per machine, so the two never share a project or a volume the way one real daemon would make
+# them. ssh runs the VM's side here with the VM's Docker; the hub runs as root in CI, so it reads and writes as root.
+H2="$W/hub2"; M2="$W/member2"; DK="$W/dk"; DKH="$W/dk-hub"; DKV="$W/dk-vm"; F2="$W/fake2"
+HP2=$(free_port); MP2=$(free_port)
+install "$H2" "$HP2" "Hub 2"; install "$M2" "$MP2" "Web VM"
+mkdir -p "$DK" "$DKH" "$DKV" "$F2"
+cat > "$DK/docker" <<'FAKEDOCKER'
+#!/bin/bash
+# a Docker of its own per machine: FAKE_DOCKER_STATE is its folder (containers/<project>/<service>, volumes/<name>/_data, images)
+S="${FAKE_DOCKER_STATE:?}"; mkdir -p "$S/containers" "$S/volumes"; touch "$S/images"
+printf '%s\n' "$*" >> "$S/calls"
+proj_of() { local f="$1" p="${2:-}"; [[ -n "$p" ]] && { echo "$p"; return; }; basename "$(cd "$(dirname "$f")" && pwd)"; }
+lab() { sed -n "s/^$2=//p" "$S/volumes/$1/labels" 2>/dev/null; }
+case "$1" in
+compose)
+    shift; f=docker-compose.yml; p=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--file) f="$2"; shift 2 ;;
+            -p|--project-name) p="$2"; shift 2 ;;
+            --env-file|--progress|--ansi|--profile|--project-directory) shift 2 ;;
+            -*) shift ;;
+            *) break ;;
+        esac
+    done
+    sub="${1:-}"; shift || true
+    [[ "$sub" == version ]] && { echo "Docker Compose version v2.30.0"; exit 0; }
+    pr=$(proj_of "$f" "$p"); dir=$(cd "$(dirname "$f")" && pwd)
+    svcs=$(jq -r '.services | keys[]' "$f" 2>/dev/null)
+    case "$sub" in
+        config) jq -c --arg d "$dir" --arg n "$pr" '{name: $n} + . | .services |= with_entries(.value.volumes = [(.value.volumes // [])[] | if .type == "bind" and (.source | startswith("./")) then .source = ($d + "/" + (.source | ltrimstr("./"))) else . end])' "$f" ;;
+        up|start|create)
+            [[ -f "$S/fail-up" ]] && { echo "Error response from daemon: driver failed programming external connectivity: port is already allocated" >&2; exit 1; }
+            mkdir -p "$S/containers/$pr"
+            for s in $svcs; do
+                [[ "$sub" == start && ! -f "$S/containers/$pr/$s" ]] && continue
+                echo running > "$S/containers/$pr/$s"
+                if jq -e --arg s "$s" '.services[$s].healthcheck' "$f" >/dev/null 2>&1; then echo healthy > "$S/containers/$pr/$s.health"; fi
+            done ;;
+        stop) for c in "$S/containers/$pr"/*; do [[ -f "$c" && "$c" != *.health ]] && echo exited > "$c"; done ;;
+        down) rm -rf "${S:?}/containers/${pr:?}" ;;
+        ps)
+            all=false; q=false; fmt=false
+            for a in "$@"; do case "$a" in -a|--all) all=true ;; -q|--quiet) q=true ;; --format) fmt=true ;; -aq|-qa) all=true; q=true ;; esac; done
+            for c in "$S/containers/$pr"/*; do
+                [[ -f "$c" && "$c" != *.health ]] || continue
+                st=$(cat "$c"); [[ "$all" == true || "$st" == running ]] || continue
+                n="$pr-$(basename "$c")-1"
+                if [[ "$q" == true ]]; then echo "id-$n"; elif [[ "$fmt" == true ]]; then printf '%s\t%s\t%s\n' "$n" "$st" "$(cat "$c.health" 2>/dev/null)"; else echo "$n $st"; fi
+            done ;;
+        *) : ;;
+    esac ;;
+ps)
+    shift; q=false; all=false; flt=""; fmt=""
+    while [[ $# -gt 0 ]]; do case "$1" in -q) q=true; shift ;; -a) all=true; shift ;; -aq|-qa) q=true; all=true; shift ;; --filter) flt="$2"; shift 2 ;; --format) fmt="$2"; shift 2 ;; *) shift ;; esac; done
+    want=""; [[ "$flt" == label=com.docker.compose.project=* ]] && want="${flt#label=com.docker.compose.project=}"
+    for d in "$S/containers"/*/; do
+        pr=$(basename "$d"); [[ -z "$want" || "$pr" == "$want" ]] || continue
+        for c in "$d"*; do
+            [[ -f "$c" && "$c" != *.health ]] || continue
+            [[ "$all" == true || "$(cat "$c")" == running ]] || continue
+            if [[ "$q" == true ]]; then echo "id-$pr-$(basename "$c")"
+            elif [[ "$fmt" == *Ports* ]]; then echo ""
+            else printf '%s\t%s\t%s\n' "$pr-$(basename "$c")-1" "$pr" "$(basename "$c")"; fi
+        done
+    done ;;
+volume)
+    case "${2:-}" in
+        ls) flt=""; [[ "${4:-}" == label=com.docker.compose.project=* || "${5:-}" == label=com.docker.compose.project=* ]] && flt=$(printf '%s\n' "$@" | sed -n 's/^label=com.docker.compose.project=//p')
+            for v in "$S/volumes"/*/; do [[ -d "$v" ]] || continue; v=$(basename "$v"); [[ -z "$flt" || "$(lab "$v" com.docker.compose.project)" == "$flt" ]] && echo "$v"; done ;;
+        inspect) shift 2; fmt=""; [[ "${1:-}" == -f ]] && { fmt="$2"; shift 2; }
+            v="$1"; [[ -d "$S/volumes/$v" ]] || { echo "Error: No such volume: $v" >&2; exit 1; }
+            case "$fmt" in
+                *Mountpoint*) echo "$S/volumes/$v/_data" ;;
+                *com.docker.compose.volume*) lab "$v" com.docker.compose.volume ;;
+                *com.docker.compose.project*) lab "$v" com.docker.compose.project ;;
+                *) echo "[{\"Name\":\"$v\"}]" ;;
+            esac ;;
+        create) shift 2; labs=""; while [[ "${1:-}" == --label ]]; do labs+="$2"$'\n'; shift 2; done
+            mkdir -p "$S/volumes/$1/_data"; printf '%s' "$labs" > "$S/volumes/$1/labels"; echo "$1" ;;
+        rm) [[ -d "$S/volumes/${3:-}" ]] || exit 1; rm -rf "${S:?}/volumes/${3:?}" ;;
+    esac ;;
+image) [[ "${2:-}" == inspect ]] && { grep -qxF -- "${3:-}" "$S/images" && exit 0; exit 1; } ;;
+manifest) [[ -f "$S/no-registry" ]] && exit 1; exit 0 ;;
+pull) [[ -f "$S/fail-pull" ]] && exit 1; img="${*: -1}"; grep -qxF -- "$img" "$S/images" || echo "$img" >> "$S/images" ;;
+info) echo "$S" ;;
+inspect|run|exec|logs) exit 1 ;;
+esac
+exit 0
+FAKEDOCKER
+chmod +x "$DK/docker"
+# ssh: the VM's command runs here, with the VM's Docker; a flag file names an operation that fails (a cable pulled mid-copy)
+cat > "$F2/ssh" <<FAKESSH2
+#!/bin/bash
+cmd="\${@: -1}"
+for op in tar-vol tar-dir; do [[ -f "$F2/fail-\$op" && "\$cmd" == *" \$op "* ]] && exit 1; done
+PATH="$DK:\$PATH" FAKE_DOCKER_STATE="$DKV" bash -c "\$cmd"
+FAKESSH2
+chmod +x "$F2/ssh"
+mkdir -p "$H2/.data/fleet-ssh"; printf 'not a real key\n' > "$H2/.data/fleet-ssh/id_ed25519"
+printf 'FLEET_SSH_CMD=%s\nFLEET_MEMBER_DIR=%s\nFLEET_APPDATA_MOUNT=false\nFLEET_MOVE_SETTLE_SECONDS=5\n' "$F2/ssh" "$M2" >> "$H2/.env"
+# the hub's proxy: a Traefik stack whose App-Data holds the routes folder
+mkdir -p "$H2/Stacks/zz-proxy/App-Data/Traefik/custom_routes"
+printf '{"services":{"traefik":{"image":"traefik:v3","container_name":"Traefik"}}}\n' > "$H2/Stacks/zz-proxy/docker-compose.yml"
+# the VM's stack: nginx with its pages in App-Data, a named volume, a health check, a published port and one route
+WEBC='{"services":{"web":{"image":"nginx:alpine","ports":[{"target":80,"published":"18181","protocol":"tcp"}],"volumes":[{"type":"bind","source":"./App-Data/www","target":"/usr/share/nginx/html"},{"type":"volume","source":"webdata","target":"/data"}],"healthcheck":{"test":["CMD","true"]}}},"volumes":{"webdata":{}}}'
+mkdir -p "$M2/Stacks/web/App-Data/www/sub" "$M2/.data/routes/web"
+printf '%s\n' "$WEBC" > "$M2/Stacks/web/docker-compose.yml"; printf 'APP_DATA_DIR=./App-Data\n' > "$M2/Stacks/web/.env"
+printf 'moved-proof\n' > "$M2/Stacks/web/App-Data/www/index.html"; printf 'a\n' > "$M2/Stacks/web/App-Data/www/sub/a.txt"; chmod 640 "$M2/Stacks/web/App-Data/www/sub/a.txt"
+printf 'http:\n  routers:\n    web:\n      rule: "Host(`web.example.org`)"\n      service: web\n  services:\n    web:\n      loadBalancer:\n        servers:\n          - url: "http://web-web-1:80"\n' > "$M2/.data/routes/web/web.yml"
+printf 'DOCKER_STACKS="web"\n' >> "$M2/.env"
+_dkv() { PATH="$DK:$PATH" FAKE_DOCKER_STATE="$DKV" "$@"; }
+_dkh() { PATH="$DK:$PATH" FAKE_DOCKER_STATE="$DKH" "$@"; }
+(cd "$M2/Stacks/web" && _dkv docker compose -f docker-compose.yml up -d >/dev/null)
+_dkv docker volume create --label com.docker.compose.project=web --label com.docker.compose.volume=webdata web_webdata >/dev/null
+printf 'born\n' > "$DKV/volumes/web_webdata/_data/born"
+# what the hub kept from before the stack moved into the VM: an older App-Data and an older volume, and its old compose
+mkdir -p "$H2/Stacks/web/App-Data/www"; printf 'stale\n' > "$H2/Stacks/web/App-Data/www/index.html"
+printf '{"services":{"web":{"image":"nginx:1.25"}}}\n' > "$H2/Stacks/web/docker-compose.yml"
+_dkh docker volume create --label com.docker.compose.project=web --label com.docker.compose.volume=webdata web_webdata >/dev/null
+printf 'old\n' > "$DKH/volumes/web_webdata/_data/old"
+start2() { (cd "$1" && PATH="$DK:$PATH" FAKE_DOCKER_STATE="$3" DOCKER_COMPOSE_CMD="docker compose" setsid nohup "$1/.scripts/api-server.sh" --bind 127.0.0.1 --port "$2" > "$1/logs/listener.log" 2>&1 < /dev/null &); }
+start2 "$H2" "$HP2" "$DKH"; start2 "$M2" "$MP2" "$DKV"
+wait_up "$HP2" || { echo "  FAIL the second hub did not come up"; cat "$H2/logs/listener.log"; exit 1; }
+wait_up "$MP2" || { echo "  FAIL the second member did not come up"; cat "$M2/logs/listener.log"; exit 1; }
+HT2=$(curl -s -m 20 -X POST "http://127.0.0.1:$HP2/auth/setup" -H 'Content-Type: application/json' -d '{"username":"admin","password":"correct horse battery"}' | jq -r '.token // empty')
+curl -s -m 20 -X POST "http://127.0.0.1:$MP2/auth/setup" -H 'Content-Type: application/json' -d '{"username":"admin","password":"correct horse battery"}' >/dev/null
+hub2()      { local m="$1" p="$2" b="${3:-}"; curl -s -m 90 -X "$m" "http://127.0.0.1:$HP2$p" -H "Authorization: Bearer ${HT2:-}" -H 'Content-Type: application/json' ${b:+-d "$b"}; }
+hub2_code() { local m="$1" p="$2" b="${3:-}"; curl -s -m 90 -o /dev/null -w '%{http_code}' -X "$m" "http://127.0.0.1:$HP2$p" -H "Authorization: Bearer ${HT2:-}" -H 'Content-Type: application/json' ${b:+-d "$b"}; }
+JT2=$(hub2 POST /fleet/join-tokens '{"ttl_hours":1}' | jq -r '.token // empty')
+JOIN2=$(cd "$M2" && FLEET_IDENTITY_UUID=22222222-3333-4444-5555-666666666666 DCS_MEMBER_URL="http://127.0.0.1:$MP2" "$M2/.scripts/api-server.sh" --join-hub "http://127.0.0.1:$HP2" "$JT2" web-vm 2>&1)
+check "to the hub: the VM joined"                   yes "$(grep -q '^✓ Joined' <<< "$JOIN2" && echo yes || { echo no; tail -3 <<< "$JOIN2" >&2; })"
+MID2=$(hub2 GET /fleet/members | jq -r '.members[0].id // empty')
+check "to the hub: web is the VM's stack"           true "$(hub2 PUT "/fleet/members/$MID2" '{"stacks":["web"]}' | jq -r '.success' 2>/dev/null)"
+PF="/fleet/members/$MID2/stacks/web/move-to-hub/preflight"; MV="/fleet/members/$MID2/stacks/web/move-to-hub"
+
+P=$(hub2 POST "$PF")
+check "preflight: movable"                          true "$(jq -r '.movable' <<< "$P" 2>/dev/null)"
+check "preflight: every check is green"             "" "$(jq -r '[.checks[] | select(.state != "ok") | .id] | join(",")' <<< "$P" 2>/dev/null)"
+check "preflight: the data it would copy"           "App-Data 2 webdata 1" "$(jq -r '"\(.folders[0].name) \(.folders[0].files) \(.volumes[0].volume) \(.volumes[0].files)"' <<< "$P" 2>/dev/null)"
+check "preflight: the image is pulled first"        yes "$(jq -r '.checks[] | select(.id == "images") | .detail' <<< "$P" 2>/dev/null | grep -q 'nginx:alpine' && echo yes || echo no)"
+check "preflight: its port and its route"           "18181 web.yml" "$(jq -r '"\(.ports[0].port) \(.routes[0])"' <<< "$P" 2>/dev/null)"
+check "preflight: says what stops"                  yes "$(jq -r '.downtime' <<< "$P" 2>/dev/null | grep -q 'stops in web-vm' && echo yes || echo no)"
+check "preflight: an account is needed"             401 "$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$HP2$PF")"
+check "preflight: an unknown member"                404 "$(hub2_code POST /fleet/members/nope/stacks/web/move-to-hub/preflight)"
+check "move: refused without confirm"               400 "$(hub2_code POST "$MV" '{}')"
+check "preflight: nothing was changed"              "running web" "$(cat "$DKV/containers/web/web") $(sed -n 's/^DOCKER_STACKS="\(.*\)"/\1/p' "$M2/.env")"
+# the port is taken on the hub
+python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1",18181)); s.listen(1); time.sleep(60)' & PORTPID=$!
+sleep 0.5
+P=$(hub2 POST "$PF")
+check "preflight: a port taken on the hub is red"   "false fail" "$(jq -r '"\(.movable) \(.checks[] | select(.id == "ports") | .state)"' <<< "$P" 2>/dev/null)"
+R=$(curl -s -m 90 -w '\n%{http_code}' -X POST "http://127.0.0.1:$HP2$MV" -H "Authorization: Bearer $HT2" -H 'Content-Type: application/json' -d '{"confirm":true}')
+check "move: refused with the preflight (409)"      "409 false" "$(tail -1 <<< "$R") $(sed '$d' <<< "$R" | jq -r '.preflight.movable' 2>/dev/null)"
+kill "$PORTPID" 2>/dev/null; wait "$PORTPID" 2>/dev/null
+# no room on the hub (the reserve is larger than any disk)
+printf 'FLEET_MOVE_HUB_RESERVE_MB=999999999\n' >> "$H2/.env"
+check "preflight: no room for its data is red"      fail "$(hub2 POST "$PF" | jq -r '.checks[] | select(.id == "disk") | .state' 2>/dev/null)"
+check "move: refused when there is no room"         409 "$(hub2_code POST "$MV" '{"confirm":true}')"
+printf 'FLEET_MOVE_HUB_RESERVE_MB=1\n' >> "$H2/.env"
+# already the hub's
+printf 'DOCKER_STACKS="web"\n' >> "$H2/.env"
+check "preflight: a stack the hub lists is red"     fail "$(hub2 POST "$PF" | jq -r '.checks[] | select(.id == "hub_free") | .state' 2>/dev/null)"
+check "move: refused when it is the hub's already"  409 "$(hub2_code POST "$MV" '{"confirm":true}')"
+sed -i '/^DOCKER_STACKS=/d' "$H2/.env"
+check "refusals: nothing moved"                     "running 0 yes" "$(cat "$DKV/containers/web/web") $(ls "$H2/.data/fleet-jobs/"move-* 2>/dev/null | wc -l) $([[ -f "$M2/Stacks/web/docker-compose.yml" ]] && echo yes || echo no)"
+
+_job_wait() { local j="$1" s=""; for _ in $(seq 1 120); do s=$(hub2 GET "/fleet/jobs/$j" | jq -r '.status' 2>/dev/null); [[ "$s" == "done" || "$s" == "failed" ]] && break; sleep 0.5; done; printf '%s' "$s"; }
+_hubds() { sed -n 's/^DOCKER_STACKS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$H2/.env" | tail -1; }
+_placed() { hub2 GET /fleet/members | jq -r --arg id "$MID2" '[.members[] | select(.id == $id) | (.stacks // [])[]] | join(",")' 2>/dev/null; }
+
+# a copy that breaks off part-way: the VM starts again, the hub is as it was
+touch "$F2/fail-tar-vol"
+R=$(hub2 POST "$MV" '{"confirm":true}'); J=$(jq -r '.job // empty' <<< "$R")
+check "rollback (copy): the move is a job"          yes "$([[ "$J" == move-* ]] && echo yes || echo no)"
+check "rollback (copy): it fails at the copy"       "failed transfer" "$(_job_wait "$J") $(hub2 GET "/fleet/jobs/$J" | jq -r '[.steps[] | select(.state == "failed") | .id] | join(",")' 2>/dev/null)"
+check "rollback (copy): the VM runs it again"       "running web" "$(cat "$DKV/containers/web/web" 2>/dev/null) $(sed -n 's/^DOCKER_STACKS="\(.*\)"/\1/p' "$M2/.env")"
+check "rollback (copy): still the VM's"             "web " "$(_placed) $(_hubds)"
+check "rollback (copy): the hub's own data is back" "stale old" "$(cat "$H2/Stacks/web/App-Data/www/index.html" 2>/dev/null) $(cat "$DKH/volumes/web_webdata/_data/old" 2>/dev/null)"
+check "rollback (copy): the VM's routes stay"       yes "$([[ -f "$M2/.data/routes/web/web.yml" && ! -e "$H2/Stacks/zz-proxy/App-Data/Traefik/custom_routes/web" ]] && echo yes || echo no)"
+check "rollback (copy): the partial copy is aside"  yes "$(ls -d "$H2"/.data/moved-to-hub/web-*/failed/App-Data >/dev/null 2>&1 && echo yes || echo no)"
+check "rollback (copy): audited"                    yes "$(grep -q 'fleet_stack_move_to_hub_failed' "$H2/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+rm -f "$F2/fail-tar-vol"
+# a start on the hub that fails: the hub's copy goes aside, the VM's starts again, its routes come back
+sleep 1; touch "$DKH/fail-up"
+J=$(hub2 POST "$MV" '{"confirm":true}' | jq -r '.job // empty')
+check "rollback (start): it fails at the start"     "failed start" "$(_job_wait "$J") $(hub2 GET "/fleet/jobs/$J" | jq -r '[.steps[] | select(.state == "failed") | .id] | join(",")' 2>/dev/null)"
+check "rollback (start): Docker's words are kept"   yes "$(hub2 GET "/fleet/jobs/$J" | jq -r '.error' 2>/dev/null | grep -q 'port is already allocated' && echo yes || echo no)"
+check "rollback (start): the VM runs it again"      "running web" "$(cat "$DKV/containers/web/web" 2>/dev/null) $(sed -n 's/^DOCKER_STACKS="\(.*\)"/\1/p' "$M2/.env")"
+check "rollback (start): the VM's routes are back"  "yes no" "$([[ -f "$M2/.data/routes/web/web.yml" ]] && echo yes || echo no) $([[ -e "$H2/Stacks/zz-proxy/App-Data/Traefik/custom_routes/web" ]] && echo yes || echo no)"
+check "rollback (start): the VM's stack again"      "web " "$(_placed) $(_hubds)"
+check "rollback (start): no container on the hub"   0 "$(ls "$DKH/containers/web" 2>/dev/null | wc -l)"
+check "rollback (start): the hub's own data is back" "stale old" "$(cat "$H2/Stacks/web/App-Data/www/index.html" 2>/dev/null) $(cat "$DKH/volumes/web_webdata/_data/old" 2>/dev/null)"
+rm -f "$DKH/fail-up"
+# the move itself
+sleep 1
+R=$(curl -s -m 90 -w '\n%{http_code}' -X POST "http://127.0.0.1:$HP2$MV" -H "Authorization: Bearer $HT2" -H 'Content-Type: application/json' -d '{"confirm":true,"start":true}')
+J=$(sed '$d' <<< "$R" | jq -r '.job // empty')
+check "move: accepted (202)"                        202 "$(tail -1 <<< "$R")"
+check "move: done"                                  "done" "$(_job_wait "$J")"
+JB=$(hub2 GET "/fleet/jobs/$J")
+check "move: every step is done"                    "check:done files:done images:done stop:done transfer:done routes:done switch:done start:done verify:done retire:done" "$(jq -r '[.steps[] | .id + ":" + .state] | join(" ")' <<< "$JB" 2>/dev/null)"
+check "move: the App-Data came over"                "moved-proof a 640" "$(cat "$H2/Stacks/web/App-Data/www/index.html" 2>/dev/null) $(cat "$H2/Stacks/web/App-Data/www/sub/a.txt" 2>/dev/null) $(stat -c %a "$H2/Stacks/web/App-Data/www/sub/a.txt" 2>/dev/null)"
+check "move: the volume came over"                  "born no" "$(cat "$DKH/volumes/web_webdata/_data/born" 2>/dev/null) $([[ -e "$DKH/volumes/web_webdata/_data/old" ]] && echo yes || echo no)"
+check "move: the hub's files are the VM's"          "$WEBC" "$(cat "$H2/Stacks/web/docker-compose.yml" 2>/dev/null)"
+check "move: it runs on the hub, healthy"           "running healthy" "$(cat "$DKH/containers/web/web" 2>/dev/null) $(cat "$DKH/containers/web/web.health" 2>/dev/null)"
+check "move: the hub lists it"                      web "$(_hubds)"
+check "move: the VM no longer answers for it"       "" "$(_placed)"
+check "move: the hub's stack list says hub"         hub "$(hub2 GET /stacks | jq -r '.stacks[] | select(.name == "web") | .placement' 2>/dev/null)"
+check "move: the route is the hub's proxy's"        "yes no" "$([[ -f "$H2/Stacks/zz-proxy/App-Data/Traefik/custom_routes/web/web.yml" ]] && echo yes || echo no) $([[ -e "$M2/.data/routes/web" ]] && echo yes || echo no)"
+check "move: the VM's list lost it"                 "" "$(sed -n 's/^DOCKER_STACKS="\(.*\)"/\1/p' "$M2/.env")"
+VB=$(jq -r '.result.vm_backup.path // empty' <<< "$JB")
+check "move: the VM's copy is kept aside"           "no yes yes" "$([[ -e "$M2/Stacks/web" ]] && echo yes || echo no) $([[ -f "$VB/stack/App-Data/www/index.html" && -f "$VB/routes/web.yml" ]] && echo yes || echo no) $(grep -q 'after 14 days' "$VB/MOVED-TO-HUB.txt" 2>/dev/null && echo yes || echo no)"
+check "move: the answer lists the backup"           "14 web_webdata" "$(jq -r '"\(.result.vm_backup.days) \(.result.vm_backup.volumes | join(","))"' <<< "$JB" 2>/dev/null)"
+check "move: the hub's older data is set aside"     "stale yes" "$(cat "$H2"/.data/moved-to-hub/web-*/hub-before/App-Data/www/index.html 2>/dev/null | tail -1) $(ls "$H2"/.data/moved-to-hub/web-*/hub-before/volume-web_webdata.tar >/dev/null 2>&1 && echo yes || echo no)"
+check "move: audited"                               yes "$(grep -q 'fleet_stack_moved_to_hub' "$H2/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+check "move: the jobs list shows it"                move_to_hub "$(hub2 GET /fleet/jobs | jq -r --arg j "$J" '.jobs[] | select(.id == $j) | .kind' 2>/dev/null)"
+check "move: once is enough"                        409 "$(hub2_code POST "$MV" '{"confirm":true}')"
+# its days are over: the VM's copy and its volume go, and the hub's older data with them
+jq '[.[] | .expires_at = 0]' "$H2/.data/fleet-moved-to-hub.json" > "$H2/.data/fmh.tmp" && mv "$H2/.data/fmh.tmp" "$H2/.data/fleet-moved-to-hub.json"
+( cd "$H2" && export PATH="$DK:$PATH" FAKE_DOCKER_STATE="$DKH" DOCKER_COMPOSE_CMD="docker compose" && source "$H2/.scripts/api-server.sh" >/dev/null 2>&1; _fleet_moved_prune )
+check "prune: the VM's copy and volume are gone"    "no no" "$([[ -e "$VB" ]] && echo yes || echo no) $([[ -e "$DKV/volumes/web_webdata" ]] && echo yes || echo no)"
+check "prune: what the hub set aside is gone"       0 "$(ls -d "$H2"/.data/moved-to-hub/web-* 2>/dev/null | wc -l)"
+check "prune: the record is gone"                   0 "$(jq 'length' "$H2/.data/fleet-moved-to-hub.json" 2>/dev/null)"
+check "prune: the hub's own stack is untouched"     "moved-proof born" "$(cat "$H2/Stacks/web/App-Data/www/index.html" 2>/dev/null) $(cat "$DKH/volumes/web_webdata/_data/born" 2>/dev/null)"
+for d in "$H2" "$M2"; do [[ -f "$d/.data/api-server.pid" ]] && (cd "$d" && "$d/.scripts/api-server.sh" --stop >/dev/null 2>&1); done
+
 echo "$PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

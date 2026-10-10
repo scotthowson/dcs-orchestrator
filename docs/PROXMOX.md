@@ -560,6 +560,45 @@ API: `GET /fleet/provision/move-check?stack=NAME` (what would go with it: `movab
 `cpu_limits`, `memory_limits_mb`, `ports`, `devices`, `docker_socket`, `links_out`, `links_in`), and
 `{"move": true}` on a VM of `POST /fleet/provision`.
 
+### Moving a VM's stack back to the hub
+
+The way back: *Move to the hub* on a VM stack (its detail on the Stacks page, or the VM's menu on the Fleet page).
+The hub checks first and shows every check green, amber or red with its reason; nothing changes until you confirm:
+
+- the VM answers and the hub reaches the stack's folder in it over its ssh key (`.data/fleet-ssh`);
+- the hub does not run a stack of that name already (`DOCKER_STACKS`, containers of that project);
+- every port the stack publishes is free on the hub (and none is bound to an address of the VM);
+- the hub has the cores its largest `cpus:` limit asks for, and memory for its limits;
+- room for its folders and named volumes, with `FLEET_MOVE_HUB_RESERVE_MB` (1024) left over;
+- its images are on the hub or the registry answers for them (they are pulled before anything stops);
+- the folders outside the stack and the devices it uses exist on the hub, and the secrets it names.
+
+`POST /fleet/members/{id}/stacks/{stack}/move-to-hub/preflight` answers the same report; the move itself is
+`POST …/move-to-hub {"confirm": true, "start": true}` (409 with the report when a check fails) and runs as a job
+(`GET /fleet/jobs/{id}`, on the Fleet page with the VM builds):
+
+1. **Preflight** again, then **Files**: the hub's copy of the stack becomes the VM's (the VM wins; the version it
+   replaces is kept in the compose history). An `APP_DATA_DIR` the VM kept outside the stack's folder becomes the
+   stack's own `./App-Data` on the hub. **Images** missing on the hub are pulled now, while the stack still runs.
+2. **Stop** in the VM (its downtime starts here), then **Data**: App-Data, `data` and the named volumes come over
+   with owners and permissions as they are, counted on both sides. What the hub still had of the stack from before
+   it moved into the VM is set aside first, never deleted (`.data/moved-to-hub/<stack>-<time>/hub-before`; a
+   volume of the same name as an archive).
+3. **Routes**: the VM's route files move into the hub's Traefik folder (a hub without Traefik keeps them in
+   `.data/routes`, the feed a Traefik elsewhere reads) and the VM stops offering them.
+4. **Hand over**: the hub answers for the stack (no placement, no view of the VM's App-Data any more) and lists it in
+   its `DOCKER_STACKS`; **Start** on the hub and **Verify**: as many containers up as ran in the VM, the ones with
+   a health check healthy, and still so after `FLEET_MOVE_SETTLE_SECONDS` (60).
+5. **VM copy**: the stack leaves the VM's `DOCKER_STACKS` and its folder is kept in the VM as a backup
+   (`.data/moved-to-hub/<stack>-<time>/` with its route files and a `MOVED-TO-HUB.txt`); its named volumes stay in
+   the VM's Docker. The job's result names the folder; the hub removes both after `FLEET_MOVE_BACKUP_DAYS` (14).
+
+**Nothing is lost.** Nothing in the VM changes before the data is on the hub (the stack is only stopped): a check
+that fails, an image that does not pull, a copy that stops part-way starts it in the VM again. A start on the hub
+that fails (or containers that do not come up healthy) is undone in reverse: the hub's containers removed, the stack
+out of its `DOCKER_STACKS` and the VM's again, the copy that came over set aside, the hub's older data back, the VM's
+routes back, and the stack started in the VM. *Retry* on the job runs the move again from the start.
+
 ### Storage across every machine
 
 With Proxmox linked, the **Disk Analysis** page shows all storage, not only this server's: one bar with a segment per
