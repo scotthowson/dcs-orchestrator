@@ -26,13 +26,13 @@ the first start.
    - *Optional services*: parts you can leave out, such as Traefik's Docker socket proxy.
    - *Per route*: behind Authelia or not, start on demand or not, and whether to add it to Homarr.
 3. **Preview** (optional). The preview lists name and port conflicts, the variables and anything the
-   security scan found, without changing a thing.
+   compose policy found, without changing a thing.
 4. **Deploy.** DCS works through these steps, and stops with the reason when one fails:
 
    | Step | What happens |
    |---|---|
    | Variables | Required ones checked; values with line breaks or shell characters refused; empty secrets generated |
-   | Security scan | The compose is checked for privileged mode, host namespaces, dangerous mounts and capabilities |
+   | Compose policy | The services as they will run (variables filled in) are judged: privileged mode, host namespaces, dangerous mounts, devices and capabilities are refused unless `.config/compose-policy.json` (or the server's own exceptions) allows them for the image, and what the template declares in `host_access` is allowed for its deploy ([SECURITY.md](../SECURITY.md#compose-policy)) |
    | Conflicts | A second copy of a one-per-host template is refused, and so are clashing service names and host ports |
    | Merge | The stack's `docker-compose.yml` is backed up, the services, volumes and networks are merged in, and the result is validated (the backup comes back if it is invalid); new variables go to the stack's `.env` |
    | Config files | The template's `config/` files are copied into the app's `App-Data` folder, never over files that exist |

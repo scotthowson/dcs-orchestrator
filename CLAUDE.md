@@ -20,7 +20,7 @@ version is `API_VERSION` in `.scripts/api-server.sh`. `CHANGELOG.md` is kept per
 |------|------|
 | `setup.sh`, `start.sh`, `stop.sh`, `restart.sh`, `status.sh` | entry points (executable) |
 | `.config/settings.cfg`, `.config/palette.sh` | defaults for every setting, color detection |
-| `.lib/` | sourced libraries: `logger.sh`, `banner.sh`, `docker-utils.sh`, `environment.sh`, `envfile.sh`, `secrets.sh`, `plugins.sh`, `setup-checks.sh`; the API loads `crowdsec.sh`, `crowdsec-config.sh`, `crowdsec-cloudflare.sh` (Push bans to Cloudflare) and `chat.sh` on demand |
+| `.lib/` | sourced libraries: `logger.sh`, `banner.sh`, `docker-utils.sh`, `environment.sh`, `envfile.sh`, `secrets.sh`, `plugins.sh`, `setup-checks.sh`, `compose-policy.sh` (+ `.py`, `.jq`: what a compose file may ask of the host); the API loads `crowdsec.sh`, `crowdsec-config.sh`, `crowdsec-cloudflare.sh` (Push bans to Cloudflare) and `chat.sh` on demand |
 | `.scripts/api-server.sh` | the REST API (router `handle_request`, handlers `handle_*`) |
 | `.scripts/api-docs.sh` | generates `docs/API.md` and the `GET /` catalogue from the router |
 | `.scripts/run.sh`, `stop.sh`, `update.sh`, `update_all_stacks.sh`, `clean-up.sh`, `ntfy-status.sh` | sourced by the entry points |
