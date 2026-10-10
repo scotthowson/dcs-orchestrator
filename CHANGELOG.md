@@ -56,6 +56,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   type checked, or their emoji; a picture on another site is never passed on) and `GET /users/{name}/profile` their
   card: display name, status and bio as plain text, never the e-mail or time zone. Bots and API keys are refused.
   Docs: [Configuration](docs/CONFIGURATION.md).
+- **Technitium DNS, run from DCS.** The home's Technitium resolver, and a second one kept equal to it, get a page of
+  their own: both servers' state and whether they agree, the numbers added up (clients named after a group's
+  device), a device's own queries (admins only), the allowed and blocked names, the block lists, a pause, house-wide
+  safe search, and the kids' groups with a bedtime that blocks everything by the minute (with a pause). *Connect*
+  sets `TECHNITIUM_URL` / `TECHNITIUM_SECONDARY_URL`; the API tokens are the secrets `TECHNITIUM_TOKEN` /
+  `TECHNITIUM_SECONDARY_TOKEN` and never appear in an answer, a log or an address. *Sync* copies the first server's
+  settings to the second, and a first-time setup turns on encrypted upstreams (Quad9, Mullvad), DNSSEC, the Hagezi
+  lists and a 30-day query log. API: `/dns/technitium/*` (viewers read the page; changes are for admins). Docs:
+  [Technitium](docs/TECHNITIUM.md).
 - Tests: `tests/fleet-files.sh` moves a stack between two real listeners with a Docker of their own each (stand-ins:
   containers, volumes and their files): the preflight and its refusals (a port taken on the hub, no room, a stack the
   hub lists already), the two ways back (a copy that breaks off, a start that fails), the move, and the expiry of the
