@@ -5,6 +5,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Containers a game-server panel made are the panel's.** Pelican Wings and Pterodactyl Wings create their servers outside compose,
+  named by UUID and labelled `Service=Pelican` / `Service=Pterodactyl`. `GET /containers` (and a container's detail) now says who
+  made each container: `owner` is `pelican`, `pterodactyl`, `dcs` (a `dcs.role` label or the core-infrastructure stack), `compose`
+  or `null`, and `owner_hint` names a panel's server by its image (`steamcmd:proton`), since its name is a UUID. Such a container is
+  never an orphan (`/maintenance/orphans`, `maintenance.sh orphans`), never removed by a prune (it is kept and said), never in the
+  "container stopped" automation for every container, never a "stopped on its own" alert or announcement when its panel turns it off,
+  and a turned-off one stays out of the health score; the topology names its panel (`owner`). Start, stop, restart and remove still
+  act on it, and answer with `warning: "managed by Pelican Wings; use the panel"`.
+- **Maintenance mode per route.** `PUT /routes/{host}/maintenance {on, message?}` (admin, audited) puts one route behind a
+  "back soon" page: DCS writes `custom_routes/dcs-maintenance/<host>.yml`, a Traefik router for the route's host with a
+  far higher priority, TLS like the route, and a `replacePath` to the new public `GET /maintenance/{host}` (503,
+  `Retry-After: 300`, no script, no version; 404 when the route is not in maintenance). The router borrows the
+  dashboard's `dcs-ui` service when Traefik has the dashboard's route (nginx passes `/api/*` to the API), else a service
+  of its own to the API's address. Turning it off removes the file; the route's own files are never touched. A VM's
+  route is set on the hub, whose Traefik fronts it. `GET /routes/maintenance` lists the state (`.data/maintenance.json`)
+  and every row of `GET /routes` says `maintenance: true/false`.
+- **A VM's stack moves back to the hub, with its data** — the mirror of the move into a VM. *Move to the hub* on a VM
+  stack's detail (or the VM's menu on the Fleet page) shows the hub's preflight first, every check green, amber or red
+  with its reason: the VM and its folder reachable, the stack not on the hub already, its published ports free here, the
+  cores and memory its limits ask for, room for its data (`FLEET_MOVE_HUB_RESERVE_MB`), its images (pulled before
+  anything stops), the folders, devices and secrets it uses. Confirmed, a job stops it in the VM, copies its App-Data
+  and named volumes over the hub's ssh key (owners kept, counted on both sides), makes the hub's copy of its files the
+  VM's, moves its route files to the hub's proxy, lists it in the hub's `DOCKER_STACKS`, starts it and waits until its
+  containers run and the ones with a health check are healthy (`FLEET_MOVE_SETTLE_SECONDS`). Only then the VM lets go:
+  the stack leaves its `DOCKER_STACKS` and its folder is kept there as a backup with its named volumes for
+  `FLEET_MOVE_BACKUP_DAYS` (14), named in the job's result and removed by the hub afterwards. A failure before the
+  start leaves the VM as it was and starts the stack there again; a start on the hub that fails is undone in reverse
+  (the copy that came over set aside, the VM's routes back, the stack started in the VM). What the hub still had of
+  the stack from before it moved into the VM is set aside, never deleted. Audit: `fleet_stack_move_to_hub`,
+  `fleet_stack_moved_to_hub`, `fleet_stack_move_to_hub_failed`, `fleet_moved_pruned`.
+  API: `POST /fleet/members/{id}/stacks/{stack}/move-to-hub/preflight`, `POST /fleet/members/{id}/stacks/{stack}/move-to-hub`
+  `{confirm: true, start?: true}` (admin). Docs: [Proxmox guide](docs/PROXMOX.md#moving-a-vms-stack-back-to-the-hub).
+- **Proxmox snapshots from DCS.** A guest's details list its snapshots (its note, its age, *RAM* when a running VM's
+  memory was saved with it, *current* on the one it runs from); admins take one (`{name, description?, vmstate?}`, the
+  name checked, 409 when it is taken), roll back to one (`{confirm: true}`; a guest that was running starts again, a
+  fleet member's DCS goes back with it and the hub checks it again at once) and delete one. The VM this DCS runs in is
+  never rolled back from DCS itself (409: it would cut the server off). A 403 from Proxmox names the privilege the token
+  lacks (`VM.Snapshot`, `VM.Snapshot.Rollback`) and answers 502 like the other Proxmox calls; a storage without
+  snapshots and a locked guest are said in plain words. Audited; bots excluded. API: `GET`/`POST
+  /proxmox/vms/{vmid}/snapshots`, `POST /proxmox/vms/{vmid}/snapshots/{name}/rollback`, `DELETE
+  /proxmox/vms/{vmid}/snapshots/{name}`. Docs: [Proxmox guide](docs/PROXMOX.md).
+- **Chat rooms across servers.** A dashboard signed in to several servers keeps each server's room with that server's
+  own session and merges them on screen only: no server reads, stores or relays another's messages, and no trust between
+  servers is needed. `GET /chat/summary` gives the room without its messages (the latest id, who is online, what the
+  caller may do; `?after=<id>` adds the unread count) and `GET /stream?only=chat` the room's events and the heartbeat
+  alone. Messages and presence carry each person's picture (`GET /users/{name}/avatar`, an uploaded picture with its
+  type checked, or their emoji; a picture on another site is never passed on) and `GET /users/{name}/profile` their
+  card: display name, status and bio as plain text, never the e-mail or time zone. Bots and API keys are refused.
+  Docs: [Configuration](docs/CONFIGURATION.md).
+- Tests: `tests/fleet-files.sh` moves a stack between two real listeners with a Docker of their own each (stand-ins:
+  containers, volumes and their files): the preflight and its refusals (a port taken on the hub, no room, a stack the
+  hub lists already), the two ways back (a copy that breaks off, a start that fails), the move, and the expiry of the
+  VM's copy; `tests/smoke.sh` the port check, the route policy and the VM side's arguments.
+
 ### Security
 
 - **The compose security scanner is replaced by a compose policy that judges the file as it will run.** The old scanner read the
@@ -26,51 +82,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on disk would be refused for, in the answer and the audit log, and go on.
 - No false refusals: the ten shipped stacks pass without a warning and all 200 templates pass at their defaults; `tests/lint.sh`
   keeps it that way. Verdicts are cached by the hash of the file, its `.env` and the policy (`.data/compose-policy-cache.json`).
+- **A stack moved back to the hub passes the compose policy first**, like a push into a VM: the hub starts nothing
+  from a VM that its own editor would refuse, and the move stops before anything is stopped in the VM.
 
-### Added
+### Fixed
 
-- **Containers a game-server panel made are the panel's.** Pelican Wings and Pterodactyl Wings create their servers outside compose,
-  named by UUID and labelled `Service=Pelican` / `Service=Pterodactyl`. `GET /containers` (and a container's detail) now says who
-  made each container: `owner` is `pelican`, `pterodactyl`, `dcs` (a `dcs.role` label or the core-infrastructure stack), `compose`
-  or `null`, and `owner_hint` names a panel's server by its image (`steamcmd:proton`), since its name is a UUID. Such a container is
-  never an orphan (`/maintenance/orphans`, `maintenance.sh orphans`), never removed by a prune (it is kept and said), never in the
-  "container stopped" automation for every container, never a "stopped on its own" alert or announcement when its panel turns it off,
-  and a turned-off one stays out of the health score; the topology names its panel (`owner`). Start, stop, restart and remove still
-  act on it, and answer with `warning: "managed by Pelican Wings; use the panel"`.
-
-### Added
-
-- **Maintenance mode per route.** `PUT /routes/{host}/maintenance {on, message?}` (admin, audited) puts one route behind a
-  "back soon" page: DCS writes `custom_routes/dcs-maintenance/<host>.yml`, a Traefik router for the route's host with a
-  far higher priority, TLS like the route, and a `replacePath` to the new public `GET /maintenance/{host}` (503,
-  `Retry-After: 300`, no script, no version; 404 when the route is not in maintenance). The router borrows the
-  dashboard's `dcs-ui` service when Traefik has the dashboard's route (nginx passes `/api/*` to the API), else a service
-  of its own to the API's address. Turning it off removes the file; the route's own files are never touched. A VM's
-  route is set on the hub, whose Traefik fronts it. `GET /routes/maintenance` lists the state (`.data/maintenance.json`)
-  and every row of `GET /routes` says `maintenance: true/false`.
-
-### Added
-
-- **A VM's stack moves back to the hub, with its data** — the mirror of the move into a VM. *Move to the hub* on a VM
-  stack's detail (or the VM's menu on the Fleet page) shows the hub's preflight first, every check green, amber or red
-  with its reason: the VM and its folder reachable, the stack not on the hub already, its published ports free here, the
-  cores and memory its limits ask for, room for its data (`FLEET_MOVE_HUB_RESERVE_MB`), its images (pulled before
-  anything stops), the folders, devices and secrets it uses. Confirmed, a job stops it in the VM, copies its App-Data
-  and named volumes over the hub's ssh key (owners kept, counted on both sides), makes the hub's copy of its files the
-  VM's, moves its route files to the hub's proxy, lists it in the hub's `DOCKER_STACKS`, starts it and waits until its
-  containers run and the ones with a health check are healthy (`FLEET_MOVE_SETTLE_SECONDS`). Only then the VM lets go:
-  the stack leaves its `DOCKER_STACKS` and its folder is kept there as a backup with its named volumes for
-  `FLEET_MOVE_BACKUP_DAYS` (14), named in the job's result and removed by the hub afterwards. A failure before the
-  start leaves the VM as it was and starts the stack there again; a start on the hub that fails is undone in reverse
-  (the copy that came over set aside, the VM's routes back, the stack started in the VM). What the hub still had of
-  the stack from before it moved into the VM is set aside, never deleted. Audit: `fleet_stack_move_to_hub`,
-  `fleet_stack_moved_to_hub`, `fleet_stack_move_to_hub_failed`, `fleet_moved_pruned`.
-  API: `POST /fleet/members/{id}/stacks/{stack}/move-to-hub/preflight`, `POST /fleet/members/{id}/stacks/{stack}/move-to-hub`
-  `{confirm: true, start?: true}` (admin). Docs: [Proxmox guide](docs/PROXMOX.md#moving-a-vms-stack-back-to-the-hub).
-- Tests: `tests/fleet-files.sh` moves a stack between two real listeners with a Docker of their own each (stand-ins:
-  containers, volumes and their files): the preflight and its refusals (a port taken on the hub, no room, a stack the
-  hub lists already), the two ways back (a copy that breaks off, a start that fails), the move, and the expiry of the
-  VM's copy; `tests/smoke.sh` the port check, the route policy and the VM side's arguments.
+- **Retry of a VM build reuses a VM that already joined.** When a build (or a move into a VM) stopped after the VM had
+  installed DCS and joined, Retry ran the VM's setup again with a join code that may have expired. It now reuses the
+  VM as it is and goes on from the stack step.
 
 ## [4.0.47] - 2026-10-09
 
