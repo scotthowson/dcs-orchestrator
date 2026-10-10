@@ -85,3 +85,6 @@ GET /dns/technitium/groups
 # groups that already list the devices; every change to them is the admin's
 GET /dns/technitium/devices
 GET /dns/technitium/dhcp
+# the local names (route hosts and the hub's LAN address, the devices' .home names): what the DNS & routes page and the
+# device rows show a viewer; switching them is the admin's
+GET /dns/technitium/local

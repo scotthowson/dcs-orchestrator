@@ -10794,6 +10794,82 @@ tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((M
 check "technitium: …the hub's vendor is known now (a quoted name)" "Lab Vendor, Inc." "$(_dev 192.168.2.233 '' .vendor)"
 kill "$OUI_PID" 2>/dev/null; wait "$OUI_PID" 2>/dev/null
 
+# local names: the routes resolve to the hub inside the house (a zone per route host, never the domain's), the devices' .home names
+printf 'PROXY_DOMAIN=example.org\n' >> "$TW/.env"
+TRD="$TW/App-Data/Traefik/custom_routes"; mkdir -p "$TRD/media" "$TRD/dcs-maintenance" "$TRD/web"
+printf 'http:\n  routers:\n    jellyfin:\n      rule: "Host(`jellyfin.example.org`)"\n      service: jellyfin\n  services:\n    jellyfin:\n      loadBalancer:\n        servers:\n          - url: "http://jellyfin:8096"\n' > "$TRD/media/jellyfin.yml"
+printf 'http:\n  routers:\n    home:\n      rule: "Host(`example.org`)"\n      service: home\n' > "$TRD/web/apex.yml"
+printf 'http:\n  routers:\n    other:\n      rule: "Host(`app.other.test`)"\n      service: other\n' > "$TRD/web/other.yml"
+printf 'http:\n  routers:\n    photos:\n      rule: "Host(`photos.example.org`)"\n      service: photos\n' > "$TRD/web/photos.yml"
+printf 'http:\n  routers:\n    cloud:\n      rule: "Host(`cloud.example.net`)"\n      service: cloud\n' > "$TRD/web/cloud.yml"
+printf '{"http":{"routers":{"m1-vmapp":{"rule":"Host(`vmapp.example.org`)","service":"m1-vmapp"}},"services":{"m1-vmapp":{"loadBalancer":{"servers":[{"url":"http://192.168.2.40:8080"}]}}}}}\n' > "$TRD/fleet-members.yml"
+printf '{"http":{"routers":{"dcs-maint-x":{"rule":"Host(\\"jellyfin.example.org\\")","service":"dcs-ui@file"}}}}\n' > "$TRD/dcs-maintenance/jellyfin.example.org.yml"
+# a zone of the owner's own under a route's name: DCS leaves it alone
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode zone=photos.example.org --data-urlencode type=Primary "$M1/api/zones/create" >/dev/null
+_tz() { jq -r --arg z "$2" "$3" "$TW/$1.json"; }    # _tz m1|m2 ZONE FILTER (on .zones[ZONE])
+_tw() { local i; for i in $(seq 1 50); do [[ "$(eval "$1")" == "$2" ]] && return 0; sleep 0.2; done; return 1; }   # wait for a background kick
+_tlt() { ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_lib; PATH="$TFB:$PATH" _tt_local_tick ) >/dev/null 2>&1; }
+_wr() { jq -s '[.[].writes] | add' "$TW/m1.json" "$TW/m2.json"; }
+_lz() { jq -r '[.zones | to_entries[] | select(.value.type == "Primary") | .key] | sort | join(",")' "$TW/$1.json"; }
+_tl=$(tt_req "$TU" GET /dns/technitium/local '' "$TFP" | body_of)
+check "technitium local: a viewer reads it: off, the hub's LAN address" "false 192.168.2.233 true" "$(jq -r '"\(.routes) \(.address) \(.available)"' <<< "$_tl")"
+check "technitium local: a viewer cannot switch it"  403 "$(tt_req "$TU" POST /dns/technitium/local '{"routes":true}' "$TFP" | status_of)"
+check "technitium local: the switch is true or false" 400 "$(tt_req "$TA" POST /dns/technitium/local '{"routes":"yes"}' "$TFP" | status_of)"
+_tl=$(tt_req "$TA" POST /dns/technitium/local '{"routes":true}' "$TFP" | body_of)
+check "technitium local: on: a zone per route host (a VM's too); the owner's zone of that name is said" "true 2 yes" \
+    "$(jq -r '"\(.routes) \(.zones)"' <<< "$_tl") $(jq -r '.warning' <<< "$_tl" | grep -q 'zone photos.example.org of its own' && echo yes || echo no)"
+check "technitium local: …the primary's zones" "home,jellyfin.example.org,photos.example.org,vmapp.example.org" "$(_lz m1)"
+check "technitium local: …the secondary's (it has no zone of the owner's of that name)" "jellyfin.example.org,photos.example.org,vmapp.example.org" "$(_lz m2)"
+check "technitium local: …the apex is an A record to the hub, TTL 60, DCS's tag" '[{"name":"jellyfin.example.org","type":"A","ttl":60,"rData":{"ipAddress":"192.168.2.233"},"comments":"dcs-local"}]' \
+    "$(_tz m2 jellyfin.example.org '.zones[$z].records | tojson')"
+check "technitium local: …never the domain itself, a domain DCS does not serve, a maintenance file" "null null null" \
+    "$(_tz m1 example.org '.zones[$z].type') $(_tz m1 app.other.test '.zones[$z].type') $(jq -r '.zones.primary["example.org"]' "$TW/.data/technitium/local-zones.json")"
+check "technitium local: …the owner's own zone is left as it is, not tracked" "0 null" "$(_tz m1 photos.example.org '.zones[$z].records | length') $(jq -r '.zones.primary["photos.example.org"]' "$TW/.data/technitium/local-zones.json")"
+_tr=$(tt_req "$TU" GET /routes '' "$TFP" | body_of)
+check "technitium local: GET /routes: on, each route's LAN address" "true 192.168.2.233 192.168.2.233 null null" \
+    "$(jq -r '"\(.local.on) \(.local.address)"' <<< "$_tr") $(jq -r '[.routes[] | select(.subdomain == "jellyfin.example.org" or .subdomain == "vmapp.example.org") | .lan] | join(" ")' <<< "$_tr") $(jq -r '[.routes[] | select(.subdomain == "app.other.test" or .subdomain == "example.org") | .lan // "null"] | join(" ")' <<< "$_tr")"
+check "technitium local: the minute clock writes nothing when nothing changed" "$(_wr)" "$(_tlt; _tlt; _wr)"
+# a route renamed, deleted, added; a domain added: the zones follow
+tt_req "$TA" PUT /routes/media/jellyfin '{"subdomain":"tv"}' "$TFP" >/dev/null
+check "technitium local: a route renamed: its zone follows (at once, both)" "ok" \
+    "$(_tw '_lz m1; _lz m2' "$(printf 'home,photos.example.org,tv.example.org,vmapp.example.org\nphotos.example.org,tv.example.org,vmapp.example.org')" && echo ok || { _lz m1; _lz m2; })"
+tt_req "$TA" DELETE /routes/media/jellyfin '' "$TFP" >/dev/null
+check "technitium local: a route deleted: its zone goes" "ok" "$(_tw '_lz m2' 'photos.example.org,vmapp.example.org' && echo ok || _lz m2)"
+printf 'http:\n  routers:\n    sonarr:\n      rule: "Host(`sonarr.example.org`)"\n      service: sonarr\n' > "$TRD/media/sonarr.yml"
+_tlt
+check "technitium local: a route added: the minute clock makes its zone" "photos.example.org,sonarr.example.org,vmapp.example.org" "$(_lz m2)"
+check "technitium local: a domain added: its routes resolve here too" "ok" \
+    "$(tt_req "$TA" POST /domains '{"domain":"example.net"}' "$TFP" >/dev/null; _tw '_lz m2' 'cloud.example.net,photos.example.org,sonarr.example.org,vmapp.example.org' && echo ok || _lz m2)"
+# the devices' names: a nickname is <slug>.home; the secondary transfers the zone
+_h() { jq -r '[.zones.home.records[]? | select(.type == "A") | "\(.name)=\(.rData.ipAddress)=\(.comments)"] | sort | join(",")' "$TW/m1.json"; }
+tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"nickname":"Tom'"'"'s tablet"}' "$TFP" >/dev/null
+check "technitium local: a nickname is a name: <slug>.home → its address" "tom-s-tablet.home=192.168.2.55=dcs-name" "$(_h)"
+check "technitium local: …the device row says so" "tom-s-tablet.home" "$(_dev 192.168.2.55 '' .home_name)"
+check "technitium local: …the secondary transfers the zone from the primary" "Secondary 127.0.0.1 UseSpecifiedNetworkACL 127.0.0.1 SpecifiedNameServers" \
+    "$(_tz m2 home '.zones[$z] | "\(.type) \(.primary)"') $(_tz m1 home '.zones[$z].options | "\(.zoneTransfer) \(.zoneTransferNetworkACL) \(.notify)"')"
+tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"nickname":"Tablet 2"}' "$TFP" >/dev/null
+check "technitium local: a new nickname: the old name goes" "tablet-2.home=192.168.2.55=dcs-name" "$(_h)"
+check "technitium local: \"Also answer\" off: no name"  "200 false " "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"home_answer":false}' "$TFP"); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .device.home_answer)") $(_h)"
+check "technitium local: …it is true or false"      400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"home_answer":"no"}' "$TFP" | status_of)"
+tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"home_answer":true}' "$TFP" >/dev/null
+check "technitium local: …on again"                 "tablet-2.home=192.168.2.55=dcs-name" "$(_h)"
+# DHCP registers its leases: the scope DCS makes says so; one that does not is turned on by the clock
+check "technitium local: the house's scope registers its leases" "true" "$(m1 .dhcp.scopes.LAN.dnsUpdates)"
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode name=LAN --data-urlencode dnsUpdates=false "$M1/api/dhcp/scopes/set" >/dev/null
+tt_req "$TA" POST /dns/technitium/dhcp/enable '{}' >/dev/null; _tlt
+check "technitium local: …a scope that hands out addresses without it is turned on" "true" "$(m1 .dhcp.scopes.LAN.dnsUpdates)"
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode scope=LAN --data-urlencode hardwareAddress=02-42-AC-1E-00-02 --data-urlencode address=192.168.2.130 --data-urlencode hostName=toms-ipad.home "$M1/api/_mock/lease" >/dev/null
+check "technitium local: the DHCP tab: names on, zone home, a lease and a nickname" "true home 1 1 2" "$(tt_req "$TU" GET /dns/technitium/dhcp '' "$TFP" | body_of | jq -r '.names | "\(.on) \(.zone) \(.leases) \(.nicknames) \(.count)"')"
+check "technitium local: the minute clock writes nothing when nothing changed (names too)" "$(_wr)" "$(_tlt; _tlt; _wr)"
+check "technitium local: forget the device: its name goes" "200 " "$(tt_req "$TA" DELETE /dns/technitium/devices/$TABLET '' "$TFP" | status_of) $(_h)"
+# off: exactly the zones DCS made go; the owner's zone, the forced names and the house's names stay
+_tfz=$(jq -r '[.zones | to_entries[] | select(.value.type == "Forwarder") | .key] | length' "$TW/m1.json")
+check "technitium local: off: DCS's zones go, on both" "200 home,photos.example.org " "$(tt_req "$TA" POST /dns/technitium/local '{"routes":false}' "$TFP" | status_of) $(_lz m1) $(_lz m2)"
+check "technitium local: …the forced names stay, nothing tracked" "$_tfz {}" "$(jq -r '[.zones | to_entries[] | select(.value.type == "Forwarder") | .key] | length' "$TW/m1.json") $(jq -c '.zones.primary' "$TW/.data/technitium/local-zones.json")"
+check "technitium local: …GET /routes says off, no LAN address" "false null" "$(tt_req "$TU" GET /routes '' "$TFP" | body_of | jq -r '"\(.local.on) \(.routes[0].lan)"')"
+check "technitium local: docs: a viewer reads it, the admin switches it" "user admin" \
+    "$(for r in 'GET /dns/technitium/local' 'POST /dns/technitium/local'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+
 # the tokens: never in an answer, a log, .env or an address; always a Bearer header
 check "technitium: no token in any answer"         0 "$(grep -c -e "$TT1" -e "$TT2" "$TANS" || true)"
 check "technitium: no token in the logs or .data"  "" "$(grep -rl -e "$TT1" -e "$TT2" "$TW/logs" "$TW/.api-auth" "$TW/.data" "$TW/.env" 2>/dev/null)"

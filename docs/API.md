@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `484` in total.
+Every endpoint below is `486` in total.
 
 ## Access levels
 
@@ -257,6 +257,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/dns/technitium/groups` | user | The kids' groups (devices, category lists, bedtime), which are in bedtime now and until when a bedtime is paused, the categories, the house's SafeSearch and YouTube setting |
 | GET | `/dns/technitium/devices` | user | The device directory: every device seen (address, MAC and vendor, its name on the network, the nickname and icon given, notes, its kids' group, whether its address is reserved, a block until when, first and last seen, queries and blocked in the last 24 hours, which sources saw it), the last scan, whether Technitium hands out addresses, the icons to pick from |
 | GET | `/dns/technitium/dhcp` | user | Technitium's DHCP: its scopes (range, gateway, DNS servers, lease time, exclusions, reservations, enabled), the leases it gave (with the DNS servers each device was told), whether it hands out addresses, the hub's network and a scope made from it, and how many of the devices seen ask Technitium |
+| GET | `/dns/technitium/local` | user | The local names: whether the routes resolve to the hub inside the house (routes), the hub's LAN address, each route host DCS answers (with the instances that have its zone), the devices' names (the zone, whether DHCP registers its leases, DCS's nickname names) and the last update |
 | GET | `/homarr/status` | user | Check if Homarr is deployed and has an API key configured |
 | POST | `/traefik/feed/token` | admin | Mint a new feed token (paste the new one into the remote Traefik) |
 | POST | `/traefik/routes/rebuild` | admin | Write the missing routes for the services of one stack {stack} or of every stack: services that publish a port and have no route file yet get Host(service.domain) → the container, like a fresh deploy (a domain is needed: TRAEFIK_DOMAIN or PROXY_DOMAIN); routes written before Authelia arrived go behind it (answer: routes_written, authelia_protected) |
@@ -280,9 +281,10 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/dns/technitium/dhcp/scope` | admin | Make or change the house's DHCP scope in Technitium: {name: "LAN", start, end, mask, router, dns: [the primary, the secondary], domain: "home", lease_hours: 24, exclusions: [{start, end}], ping_check: true (an address that answers a ping is not offered), reserve_known: true (every device of the directory with a MAC keeps its current address: a reservation each, so nothing moves when DHCP does; false leaves them)}. A new scope is left off: POST /dns/technitium/dhcp/enable turns it on |
 | POST | `/dns/technitium/dhcp/enable` | admin | Technitium hands out addresses from now on: {name} (the house's scope when left out). Turn the router's DHCP off first |
 | POST | `/dns/technitium/dhcp/disable` | admin | Technitium stops handing out addresses: {name} (the house's scope when left out) |
+| POST | `/dns/technitium/local` | admin | Resolve my routes locally: {routes: true\|false}. On: every route host under this server's domains gets a zone of its own on both Technitiums whose answer is the hub's LAN address (TTL 60); the other names of the domain still resolve publicly. Off: exactly the zones DCS made go |
 | POST | `/dns/technitium/groups/{id}/pause-bedtime` | admin | Pause a group's bedtime: {minutes: 30 (1 to 240), or 0 to end the pause} |
 | POST | `/routes/reconcile` | admin | Probe the routes and restart Traefik once if they are dead |
-| PUT | `/dns/technitium/devices/{id}` | admin | Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it)} |
+| PUT | `/dns/technitium/devices/{id}` | admin | Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it), home_answer (true, the default: a device with a nickname also answers <nickname>.home; false: it does not)} |
 | PUT | `/dns/records/*` | admin | Change a record's type, name, content, TTL, proxy status, priority or comment |
 | PUT | `/routes/{host}/maintenance` | admin | Turn maintenance on or off for a route {on, message?}: Traefik answers its host with a 503 holding page (admin) |
 | PUT | `/routes/{stack}/{service}` | admin | Update a route file's subdomain |

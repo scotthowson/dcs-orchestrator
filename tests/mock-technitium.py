@@ -8,6 +8,9 @@ Usage: mock-technitium.py PORTFILE STATEFILE TOKEN NAME
   DHCP behaves as Technitium 15's does: a stock "Default" scope that is off, a scope made by scopes/set is on at once (renaming
   one with newName keeps it as it was), a reservation is not a lease, a MAC is reserved once a scope. A lease is put in with
   the stand-in's own POST /api/_mock/lease {scope, hardwareAddress, address, hostName} (the token is needed as for any call).
+  "writes" counts the calls that change something (every call but the reads: */get, */list, */export, logs/query, …), so a test
+  can tell that a run wrote nothing. Zones: Primary, Forwarder and Secondary (primaryNameServerAddresses kept), their options
+  (zones/options/set), A records with their comments (records/add overwrite, records/delete by ipAddress).
 """
 import json
 import os
@@ -27,6 +30,7 @@ DEFAULT_CONFIG = {
     "Query Logs (Sqlite)": {"enableLogging": True, "maxQueueSize": 200000, "maxLogDays": 7, "maxLogRecords": 10000, "sqliteDbPath": "querylogs.db"},
 }
 ARRAYS = {"forwarders", "blockListUrls"}
+READS = ("/get", "/list", "/export", "/query", "/resolve", "/getTop", "/listStoreApps")
 INTS = {"forwarderConcurrency", "blockListUpdateIntervalHours", "cacheMaximumEntries"}
 BOOLS = {"dnssecValidation", "preferIPv6", "concurrentForwarding", "serveStale", "enableBlocking"}
 
@@ -36,10 +40,10 @@ state = {
                  "concurrentForwarding": True, "dnssecValidation": True, "preferIPv6": False, "blockListUrls": None,
                  "blockListUpdateIntervalHours": 24, "blockListNextUpdatedOn": "2026-10-10T08:00:00.000Z", "cacheMaximumEntries": 10000,
                  "serveStale": True, "blockingType": "NxDomain"},
-    "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [],
+    "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [], "writes": 0,
     "dhcp": {"scopes": {"Default": {"enabled": False, "startingAddress": "192.168.1.1", "endingAddress": "192.168.1.254", "subnetMask": "255.255.255.0",
                                     "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "home", "routerAddress": "192.168.1.1",
-                                    "useThisDnsServer": True, "dnsServers": [], "exclusions": [{"startingAddress": "192.168.1.1", "endingAddress": "192.168.1.10"}],
+                                    "useThisDnsServer": True, "dnsServers": [], "dnsUpdates": False, "exclusions": [{"startingAddress": "192.168.1.1", "endingAddress": "192.168.1.10"}],
                                     "reservedLeases": []}},
              "leases": []},
 }
@@ -121,6 +125,8 @@ class H(BaseHTTPRequestHandler):
         q.update({k: v[-1] for k, v in parse_qs(raw.decode(), keep_blank_values=True).items()})
         auth = self.headers.get("Authorization", "")
         state["calls"].append([u.path, auth.startswith("Bearer "), TOKEN in self.path])
+        if not u.path.startswith("/api/_mock/") and not u.path.endswith(READS):
+            state["writes"] += 1
         if auth != "Bearer " + TOKEN:
             save()
             return self.answer({"status": "invalid-token", "errorMessage": "Invalid token or session expired."})
@@ -204,7 +210,7 @@ class H(BaseHTTPRequestHandler):
             return ok(scope_view(q["name"], d["scopes"][q["name"]], True))
         if p == "/api/dhcp/scopes/set":
             new = q["name"] not in d["scopes"]
-            sc = d["scopes"].get(q["name"]) or {"enabled": True, "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "",
+            sc = d["scopes"].get(q["name"]) or {"enabled": True, "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "", "dnsUpdates": False,
                                                 "routerAddress": None, "useThisDnsServer": True, "dnsServers": [], "exclusions": [], "reservedLeases": []}
             for k in ("startingAddress", "endingAddress", "subnetMask", "routerAddress"):
                 if k in q:
@@ -215,6 +221,8 @@ class H(BaseHTTPRequestHandler):
                     sc[k] = int(q[k])
             if "domainName" in q:
                 sc["domainName"] = q["domainName"]
+            if "dnsUpdates" in q:
+                sc["dnsUpdates"] = q["dnsUpdates"] == "true"
             if "pingCheckEnabled" in q:
                 sc["pingCheckEnabled"] = q["pingCheckEnabled"] == "true"
             if "useThisDnsServer" in q:
@@ -276,8 +284,14 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/zones/create":
             if q["zone"] in state["zones"]:
                 raise ValueError("Zone already exists: " + q["zone"])
-            state["zones"][q["zone"]] = {"type": q["type"], "records": []}
+            state["zones"][q["zone"]] = {"type": q["type"], "records": [], "options": {}}
+            if q["type"] == "Secondary":
+                state["zones"][q["zone"]]["primary"] = q.get("primaryNameServerAddresses")
             return ok({"domain": q["zone"]})
+        if p == "/api/zones/options/set":
+            z = state["zones"][q["zone"]]
+            z["options"].update({k: v for k, v in q.items() if k != "zone"})
+            return ok()
         if p == "/api/zones/delete":
             if q["zone"] not in state["zones"]:
                 raise ValueError("No such zone was found: " + q["zone"])
@@ -290,7 +304,19 @@ class H(BaseHTTPRequestHandler):
             z = state["zones"][q["zone"]]
             if q["type"] == "CNAME" and q["domain"] == q["zone"]:
                 raise ValueError("Cannot set CNAME record at zone apex.")
-            z["records"].append({"name": q["domain"], "type": q["type"], "ttl": int(q.get("ttl", 3600)), "rData": {"aname": q.get("aname")}})
+            if z["type"] == "Secondary":
+                raise ValueError("Cannot add record in a secondary zone.")
+            rd = {"ipAddress": q["ipAddress"]} if q["type"] == "A" else {"aname": q.get("aname")}
+            if q.get("overwrite") == "true":
+                z["records"] = [r for r in z["records"] if not (r["name"] == q["domain"] and r["type"] == q["type"])]
+            z["records"].append({"name": q["domain"], "type": q["type"], "ttl": int(q.get("ttl", 3600)), "rData": rd, "comments": q.get("comments")})
+            return ok()
+        if p == "/api/zones/records/delete":
+            zn = q.get("zone") or max((n for n in state["zones"] if q["domain"] == n or q["domain"].endswith("." + n)), key=len, default=None)
+            if zn not in state["zones"]:
+                raise ValueError("No such zone was found: " + str(zn))
+            z = state["zones"][zn]
+            z["records"] = [r for r in z["records"] if not (r["name"] == q["domain"] and r["type"] == q["type"] and r["rData"].get("ipAddress") == q.get("ipAddress"))]
             return ok()
         raise ValueError("Invalid API call: " + p)
 

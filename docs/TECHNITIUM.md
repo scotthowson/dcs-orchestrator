@@ -125,11 +125,43 @@ addresses from a downloaded list, never with another name. So it is a switch for
 other name under it resolves as usual. Turning it off removes those zones (a zone of the same name you made
 yourself, of another type, is left alone). For the kids, add *Search engines without SafeSearch* to their group.
 
+## Local names: your routes inside the house, devices by name
+
+**Resolve my routes locally** (DNS & routes, and the Technitium page; `POST /dns/technitium/local {routes: true}`, off
+by default). Your public services go Cloudflare → Traefik on the hub, so from inside the house every request leaves
+for the internet and comes back. With the switch on, each route host under a domain this server serves
+(`jellyfin.howson.dev`, and the hosts of every extra domain) answers the hub's LAN address (its default route's) on
+both Technitiums, with a TTL of 60. A VM's route answers the hub's address too: the hub's Traefik fronts it.
+
+- **One zone per route host, never one for the domain.** A Primary zone is authoritative: a `howson.dev` zone would
+  answer NXDOMAIN for every name DCS does not route. So `jellyfin.howson.dev` is a zone of its own whose apex is an A
+  record (comment `dcs-local`), and `anything-else.howson.dev` still goes to the forwarders. The domain's own apex is
+  never made local. A name under a routed host (`x.jellyfin.howson.dev`) answers NXDOMAIN inside the house.
+- **Kept in step**: a route renamed, deleted or deployed, a domain added or removed, a VM's routes changing: at once;
+  anything else within a minute (the minute clock compares and writes nothing when nothing changed).
+- **Switching off removes exactly the zones DCS made** (tracked per server in `.data/technitium/local-zones.json`). A
+  zone of that name you made yourself is left alone (and said in the answer).
+- Sign-in (Authelia) and the certificates work as before: the name is the same and Traefik serves the same
+  certificate. What LAN clients skip is Cloudflare (its WAF, its bans): that is the point.
+
+**Devices by name.** The DHCP scope DCS makes registers every lease as `<hostname>.home` (Technitium's dynamic DNS,
+`dnsUpdates`; Technitium makes the `home` zone with the first lease; a scope that hands out addresses without it is
+turned on by the minute clock). A device's nickname is a name too: *Tom's tablet* answers `tom-s-tablet.home` (an A
+record DCS owns, comment `dcs-name`; DCS makes the `home` zone when DHCP has not). It follows a new nickname, goes when
+the device is forgotten, and the device drawer's *Also answer* switch (`home_answer`, on by default) turns it off for
+one device. A static machine gets its name the same way. No reverse (PTR) records: a reverse zone here would hide the
+router's own reverse names, which the device scan reads.
+
+**The secondary gets the zone by transfer.** It does no DHCP, so the lease names exist only on the primary. DCS makes
+`home` a *Secondary* zone on the secondary, transferred from the primary, and lets the primary transfer it to the
+secondary's address and NOTIFY it on every change. That is simpler than copying records: the lease names follow with
+no work from DCS (copying would need a diff every minute). It needs both Technitiums connected by their IPv4 address.
+
 ## Keeping the secondary in step
 
 After every change DCS makes, and on **Sync now**, the secondary gets the primary's forwarders and their
 settings, blocklists, cache size, the allowed and blocked names, the apps (installed when missing) with their
-configs, and the forced SafeSearch zones. The status compares a fingerprint of all of that on both
+configs, the forced SafeSearch zones and the local names above. The status compares a fingerprint of all of that on both
 (`in_sync`). DHCP scopes and anything else made in Technitium's console are not copied.
 
 ## API

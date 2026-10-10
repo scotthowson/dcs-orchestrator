@@ -3,6 +3,25 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Resolve my routes locally** (Technitium, split horizon; `GET`/`POST /dns/technitium/local {routes: true|false}`,
+  off by default). Inside the house each route host under a domain this server serves answers the hub's LAN address
+  (TTL 60) on both Technitiums, so `jellyfin.<domain>` no longer goes out to Cloudflare and back. One Primary zone per
+  route host (its apex an A record, comment `dcs-local`), never a zone for the domain: a domain zone would be
+  authoritative and blackhole every name DCS does not route. Kept in step at once on a route rename, delete or deploy,
+  a domain change and a VM's routes changing, and by the minute clock (which writes nothing when nothing changed);
+  switching off removes exactly the zones DCS made (`.data/technitium/local-zones.json`), never a zone of the owner's.
+  `GET /routes` says `local: {available, on, address}` and each route's `lan` address.
+- **Devices by name**: the DHCP scope DCS makes registers its leases as `<hostname>.home` (`dnsUpdates`; a scope that
+  hands out addresses without it is turned on), and a device's nickname answers `<slug>.home` (an A record DCS owns,
+  following renames and forgets; `home_answer: false` on `PUT /dns/technitium/devices/{id}` turns it off for one
+  device). The devices list carries `home_name`, `GET /dns/technitium/dhcp` says `names: {on, zone, leases, nicknames,
+  count}`. The secondary holds the zone as a Secondary zone transferred from the primary (NOTIFY on every change), so
+  the lease names reach it too.
+
 ## [4.0.49] - 2026-10-10
 
 ### Added

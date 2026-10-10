@@ -393,6 +393,7 @@ _tt_sync() {
     fi
     _tt_forced_apply primary || { _tt_sync_fail "$TT_ERR"; return 1; }
     _tt_forced_apply secondary || { _tt_sync_fail "$TT_ERR"; return 1; }
+    _tt_local_apply || { _tt_sync_fail "$TT_ERR"; return 1; }   # the routes' local zones, the devices' names (.lib/technitium-local.sh)
     _tt_state_set --argjson at "$(date +%s)" '.last_sync = {at: $at, ok: true, message: "The secondary has what the primary has"}'
     TT_SYNC_MSG="The secondary has what the primary has"
 }
@@ -1079,11 +1080,11 @@ _tt_scan_tick() { _tt_scan scheduler >/dev/null 2>&1 || true; }
 handle_technitium_devices() {
     local now
     now=$(_tt_now)
-    _api_success "$(jq -c --argjson now "$now" --argjson m "$(_tt_model)" --argjson st "$(_tt_state)" --argjson icons "$TT_ICONS" '
+    _api_success "$(jq -c --argjson now "$now" --argjson m "$(_tt_model)" --argjson st "$(_tt_state)" --argjson icons "$TT_ICONS" --argjson names "$(_tt_local_device_names)" '
         ([$m.groups[] as $g | $g.devices[] | select((.id // null) != null) | {key: .id, value: {id: $g.id, name: $g.name}}] | from_entries) as $gid
         | ([$m.groups[] as $g | $g.devices[] | {key: .ip, value: {id: $g.id, name: $g.name}}] | from_entries) as $gip
         | {devices: ([.devices[] | ($gid[.id] // $gip[.ip // ""] // null) as $g
-              | . + {group_id: ($g.id // null), group_name: ($g.name // null), blocked: ((.blocked_until // 0) > $now)}]
+              | . + {group_id: ($g.id // null), group_name: ($g.name // null), blocked: ((.blocked_until // 0) > $now), home_name: ($names[.id] // null)}]
               | sort_by(-(.queries_today // 0), ((.nickname // .hostname // .ip) | ascii_downcase))),
            forgotten: (.forgotten | length), last_scan, dhcp: ($st.dhcp // null), icons: $icons, now: $now}' <<< "$(_tt_dir)")"
 }
@@ -1119,7 +1120,7 @@ handle_technitium_oui_update() {
     _api_success "$(jq -nc --argjson n "$n" '{success: true, prefixes: $n, message: "The vendors of \($n) MAC prefixes are known now"}')"
 }
 
-# PUT /dns/technitium/devices/{id} — Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it)}
+# PUT /dns/technitium/devices/{id} — Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it), home_answer (true, the default: a device with a nickname also answers <nickname>.home; false: it does not)}
 handle_technitium_device_update() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     local id="$1" body d now bad ip mac scope need_apply=0 model gid sync warn="" did=()
@@ -1130,13 +1131,14 @@ handle_technitium_device_update() {
     bad=$(jq -r --argjson icons "$TT_ICONS" --argjson now "$now" '
         def txt($n): type == "string" and length <= $n and (test("[\\x00-\\x1f\\x7f]") | not);
         def note: type == "string" and length <= 280 and (test("[\\x00-\\x08\\x0b-\\x1f\\x7f]") | not);
-        (keys - ["nickname", "icon", "notes", "group_id", "static", "blocked_until"]) as $extra
+        (keys - ["nickname", "icon", "notes", "group_id", "static", "blocked_until", "home_answer"]) as $extra
         | if ($extra | length) > 0 then "Not a field of a device: \($extra | join(", "))"
           elif has("nickname") and .nickname != null and ((.nickname | txt(40)) | not) then "A nickname is 40 characters at most, on one line"
           elif has("icon") and ((.icon as $i | $icons | index($i)) == null) then "icon is one of: \($icons | join(", "))"
           elif has("notes") and .notes != null and ((.notes | note) | not) then "Notes are 280 characters at most"
           elif has("group_id") and .group_id != null and ((.group_id | type) != "string" or (.group_id | test("^[A-Za-z0-9_-]{1,40}$") | not)) then "group_id is a kids group id, or null"
           elif has("static") and (.static | type) != "boolean" then "static is true or false"
+          elif has("home_answer") and (.home_answer | type) != "boolean" then "home_answer is true or false"
           elif has("blocked_until") and .blocked_until != null and ((.blocked_until | type) != "number" or .blocked_until <= $now or .blocked_until > $now + 31622400)
             then "blocked_until is a moment within the next year (epoch seconds), or null to lift the block"
           else "" end' <<< "$body")
@@ -1181,11 +1183,13 @@ handle_technitium_device_update() {
               + (if $b | has("icon") then {icon: $b.icon, icon_guessed: false} else {} end)
               + (if $b | has("static") then {static: $b.static, reserved_ip: (if $b.static then .ip else null end)} else {} end)
               + (if $b | has("blocked_until") then {blocked_until: $b.blocked_until} else {} end)
+              + (if $b | has("home_answer") then {home_answer: $b.home_answer} else {} end)
               + {sources: ((.sources // {}) + {manual: $now})} end)' || { _api_error 500 "Could not write $TT_DEVICES"; return; }
     d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' "$TT_DEVICES")
     jq -e 'has("nickname")' >/dev/null <<< "$body" && did+=("nickname $(jq -r '.nickname // "cleared"' <<< "$d")")
     jq -e 'has("icon")' >/dev/null <<< "$body" && did+=("icon $(jq -r .icon <<< "$d")")
     jq -e 'has("notes")' >/dev/null <<< "$body" && did+=("notes")
+    jq -e 'has("home_answer")' >/dev/null <<< "$body" && did+=("name $(jq -r 'if .home_answer == false then "off" else "on" end' <<< "$d")")
     # its kids' group: out of every group (by id or address), into the one asked for
     if jq -e 'has("group_id")' >/dev/null <<< "$body"; then
         model=$(jq -c --argjson d "$d" --arg g "$gid" '
@@ -1203,11 +1207,15 @@ handle_technitium_device_update() {
         _tt_groups_apply "${AUTH_USERNAME:-}" || warn="Saved in DCS, but Technitium did not take it: $TT_APPLY_MSG (it is tried again by the minute clock)"
     fi
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "$(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id): ${did[*]:-nothing}"
+    # its name (<nickname>.home): the primary now, the secondary by the zone transfer
+    if jq -e 'has("nickname") or has("home_answer")' >/dev/null <<< "$body" && _tt_configured primary; then
+        _tt_local_apply || warn="${warn:+$warn; }Saved in DCS, but its name did not reach Technitium: $TT_ERR (the minute clock tries again)"
+    fi
     sync=null; (( need_apply == 1 )) && [[ -z "$warn" ]] && sync=$(_tt_after_write)
     _api_cache_clear 2>/dev/null || true
-    _api_success "$(jq -nc --argjson d "$d" --argjson sync "${sync:-null}" --arg w "$warn" --argjson m "$(_tt_model)" '
+    _api_success "$(jq -nc --argjson d "$d" --argjson sync "${sync:-null}" --arg w "$warn" --argjson m "$(_tt_model)" --argjson names "$(_tt_local_device_names)" '
         ([$m.groups[] | select(any(.devices[]; (.id // null) == $d.id or .ip == $d.ip))][0] // null) as $g
-        | {success: true, device: ($d + {group_id: ($g.id // null), group_name: ($g.name // null)}), sync: $sync, warning: (if $w == "" then null else $w end)}')"
+        | {success: true, device: ($d + {group_id: ($g.id // null), group_name: ($g.name // null), home_name: ($names[$d.id] // null)}), sync: $sync, warning: (if $w == "" then null else $w end)}')"
 }
 
 # DELETE /dns/technitium/devices/{id} — Forget a device: it comes back when it is seen again, with the nickname, icon and notes it had (until the forgotten ones are cleared)
@@ -1221,7 +1229,9 @@ handle_technitium_device_forget() {
           then .forgotten[$id] = {nickname: $d.nickname, notes: $d.notes, icon: (if $d.icon_guessed then null else $d.icon end)} else . end' \
         || { _api_error 500 "Could not write $TT_DEVICES"; return; }
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "forgot $(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id)"
-    _api_success "$(jq -nc --arg id "$id" '{success: true, forgotten: $id}')"
+    local warn=""
+    if [[ "$(jq -r '.nickname != null' <<< "$d")" == true ]] && _tt_configured primary; then _tt_local_apply || warn="Its name stays in Technitium for now: $TT_ERR"; fi
+    _api_success "$(jq -nc --arg id "$id" --arg w "$warn" '{success: true, forgotten: $id, warning: (if $w == "" then null else $w end)}')"
 }
 
 # DELETE /dns/technitium/devices/forgotten — Clear what DCS keeps of forgotten devices (their nicknames, icons and notes)
@@ -1257,7 +1267,7 @@ handle_technitium_dhcp() {
                dns: ([$d1, $d2] | map(select(. != ""))), domain: "home", lease_hours: 24, exclusions: [], ping_check: true, reserve_known: true}')
     fi
     _api_success "$(jq -c -n --argjson scopes "$TT_SCOPES" --argjson leases "$leases" --argjson hub "$hub" --argjson sug "$sug" --argjson dir "$(_tt_dir)" \
-        --argjson now "$(_tt_now)" --arg d1 "$(_tt_url_ip4 primary)" --arg d2 "$(_tt_url_ip4 secondary)" '
+        --argjson now "$(_tt_now)" --arg d1 "$(_tt_url_ip4 primary)" --arg d2 "$(_tt_url_ip4 secondary)" --argjson ln "$(_tt_local_state)" '
         def mac: ascii_downcase | gsub("-"; ":");
         ($dir.devices | map(select(.mac != null) | {key: .mac, value: .}) | from_entries) as $bymac
         | ($scopes | map({key: .name, value: (.dnsServers // [])}) | from_entries) as $sdns
@@ -1272,6 +1282,10 @@ handle_technitium_dhcp() {
                     | {scope, type, mac: $m, ip: .address, hostname: .hostName, obtained: .leaseObtained, expires: .leaseExpires, dns: ($sdns[.scope] // []),
                        device_id: ($bymac[$m].id // null), nickname: ($bymac[$m].nickname // null), icon: ($bymac[$m].icon // null)}],
            hub: $hub, suggested: $sug, resolvers: {primary: (if $d1 == "" then null else $d1 end), secondary: (if $d2 == "" then null else $d2 end)},
+           names: (([$scopes[] | select(.enabled == true)][0] // null) as $s
+                   | {on: (($s.dnsUpdates // false) == true), zone: ($s.domainName // $ln.zone),
+                      leases: ([$leases[] | select(.scope == $s.name and (.hostName // "") != "")] | length), nicknames: ($ln.names | length),
+                      secondary: ($ln.transfer != "")} | .count = .leases + .nicknames),
            devices: {seen: ($recent | length), asking: ($recent | map(select((.queries_today // 0) > 0)) | length),
                      silent: [$recent[] | select((.queries_today // 0) == 0) | {id, ip, nickname, hostname, icon}]}}')"
 }
@@ -1308,7 +1322,7 @@ handle_technitium_dhcp_scope() {
     while IFS= read -r row; do args+=("$row"); done < <(jq -r '
         "startingAddress=\(.start)", "endingAddress=\(.end)", "subnetMask=\(.mask // "255.255.255.0")", "routerAddress=\(.router)",
         "leaseTimeDays=\(((.lease_hours // 24) / 24) | floor)", "leaseTimeHours=\((.lease_hours // 24) % 24)", "leaseTimeMinutes=0",
-        "useThisDnsServer=false", "dnsServers=\(.dns | join(","))", "domainName=\(.domain // "home")", "pingCheckEnabled=\(.ping_check != false)",
+        "useThisDnsServer=false", "dnsServers=\(.dns | join(","))", "domainName=\(.domain // "home")", "dnsUpdates=true", "pingCheckEnabled=\(.ping_check != false)",
         "exclusions=\((.exclusions // []) | map("\(.start)|\(.end)") | join("|"))"' <<< "$body")
     _tt_api primary dhcp/scopes/set "${args[@]}" || { _api_error 502 "$TT_ERR"; return; }
     if [[ "$exists" != true && -z "$dflt" ]]; then
@@ -1384,3 +1398,7 @@ handle_technitium_dhcp_lease_delete() {
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DHCP" "${AUTH_USERNAME:-}" "lease of $mac ended ($scope)"
     _api_success "$(jq -nc --arg m "$mac" --arg s "$scope" '{success: true, mac: $m, scope: $s}')"
 }
+
+# Local names (the routes resolved to the hub inside the house, the devices' .home names) live in .lib/technitium-local.sh
+# shellcheck source=technitium-local.sh
+source "$BASE_DIR/.lib/technitium-local.sh"
