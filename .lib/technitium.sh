@@ -425,10 +425,12 @@ _tt_body() {
     [[ "$TT_REQ" == \{* ]] && jq -e . >/dev/null 2>&1 <<< "$TT_REQ" || { _api_error 400 "Send a JSON object"; return 1; }
 }
 
-# GET /dns/technitium/status — Both Technitium instances: reachable, version, uptime, blocking and its pause, forwarders, lists, zones, apps; whether the secondary has what the primary has (in_sync), the last sync, the groups in bedtime, the house's SafeSearch
+# GET /dns/technitium/status — Both Technitium instances: reachable, version (and update_available: Technitium has a newer one), uptime, blocking and its pause, forwarders, lists, zones, apps; whether the secondary has what the primary has (in_sync), the last sync, the groups in bedtime, the house's SafeSearch; per instance its blocklists' health (lists: each list's entries, last update and error, the total) and the primary's DHCP pool (dhcp: leases, pool_size, pct); the alerts in force (alerts)
 handle_technitium_status() {
     local p s st in_sync=null model
     p=$(_tt_instance_status primary); s=$(_tt_instance_status secondary)
+    # the safety net (technitium-alerts.sh): the version and its update, each blocklist's health, the DHCP pool; the alerts in force
+    p=$(_tta_more "$p"); s=$(_tta_more "$s")
     st=$(_tt_state); model=$(_tt_model)
     if [[ "$(jq -r '.reachable' <<< "$p")" == true && "$(jq -r '.reachable' <<< "$s")" == true ]]; then
         in_sync=$(jq -n --argjson p "$p" --argjson s "$s" --argjson st "$st" '$p.hash == $s.hash and (($st.last_sync.ok // true) == true)')
@@ -437,8 +439,8 @@ handle_technitium_status() {
     fi
     _tt_state_set --argjson p "$p" --argjson s "$s" --argjson now "$(date +%s)" \
         '.reachable = {primary: {ok: $p.reachable, error: ($p.error // null), at: $now}, secondary: {ok: $s.reachable, error: ($s.error // null), at: $now}}'
-    _api_success "$(jq -c -n --argjson p "$p" --argjson s "$s" --argjson st "$st" --argjson m "$model" --argjson in "$in_sync" '
-        {configured: $p.configured, primary: $p, secondary: (if $s.configured or $s.url != null then $s else null end), in_sync: $in,
+    _api_success "$(jq -c -n --argjson p "$p" --argjson s "$s" --argjson st "$st" --argjson m "$model" --argjson in "$in_sync" --argjson al "$(_tta_active)" '
+        {configured: $p.configured, primary: $p, alerts: $al, secondary: (if $s.configured or $s.url != null then $s else null end), in_sync: $in,
          last_sync: ($st.last_sync // null), house: $m.house, groups: ($m.groups | length),
          bedtime_active: ($st.bedtime_active // []), bedtime_paused: ($st.bedtime_paused // {})}')"
 }

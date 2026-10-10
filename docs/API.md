@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `486` in total.
+Every endpoint below is `490` in total.
 
 ## Access levels
 
@@ -250,7 +250,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/traefik/feed/status` | admin | The Traefik feed: on or off, token, target host, what it serves and skips, what the members offered and the hub refused or renamed (member_skipped), when it was last pulled, and the provider snippet to paste |
 | GET | `/dns/zones` | admin | Zones the Cloudflare token can manage |
 | GET | `/dns/records` | admin | DNS records of the zone (all types) with their DCS route links |
-| GET | `/dns/technitium/status` | user | Both Technitium instances: reachable, version, uptime, blocking and its pause, forwarders, lists, zones, apps; whether the secondary has what the primary has (in_sync), the last sync, the groups in bedtime, the house's SafeSearch |
+| GET | `/dns/technitium/status` | user | Both Technitium instances: reachable, version (and update_available: Technitium has a newer one), uptime, blocking and its pause, forwarders, lists, zones, apps; whether the secondary has what the primary has (in_sync), the last sync, the groups in bedtime, the house's SafeSearch; per instance its blocklists' health (lists: each list's entries, last update and error, the total) and the primary's DHCP pool (dhcp: leases, pool_size, pct); the alerts in force (alerts) |
 | GET | `/dns/technitium/stats` | user | Queries, blocked and clients over the range for both instances together: the totals, the series, the top clients (named by their nickname in the device directory or a group's label, else Technitium's name for them; with the device and its icon), domains and blocked domains, the query types |
 | GET | `/dns/technitium/activity` | admin | A device's recent queries from the Query Logs (Sqlite) app of both instances, newest first: client (an address), q (part of a name), blocked=1 for the blocked ones alone, limit (100, at most 500) |
 | GET | `/dns/technitium/lists` | user | The primary's blocklist URLs, the custom allowed and blocked names, the categories a group can block and the baseline lists |
@@ -258,6 +258,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/dns/technitium/devices` | user | The device directory: every device seen (address, MAC and vendor, its name on the network, the nickname and icon given, notes, its kids' group, whether its address is reserved, a block until when, first and last seen, queries and blocked in the last 24 hours, which sources saw it), the last scan, whether Technitium hands out addresses, the icons to pick from |
 | GET | `/dns/technitium/dhcp` | user | Technitium's DHCP: its scopes (range, gateway, DNS servers, lease time, exclusions, reservations, enabled), the leases it gave (with the DNS servers each device was told), whether it hands out addresses, the hub's network and a scope made from it, and how many of the devices seen ask Technitium |
 | GET | `/dns/technitium/local` | user | The local names: whether the routes resolve to the hub inside the house (routes), the hub's LAN address, each route host DCS answers (with the instances that have its zone), the devices' names (the zone, whether DHCP registers its leases, DCS's nickname names) and the last update |
+| GET | `/dns/technitium/backups` | admin | The Technitium backups kept in .data/technitium/backups, newest first: the server, the file, when, its size, the Technitium version and what the note next to it holds (blocklists, apps); the nightly hour |
 | GET | `/homarr/status` | user | Check if Homarr is deployed and has an API key configured |
 | POST | `/traefik/feed/token` | admin | Mint a new feed token (paste the new one into the remote Traefik) |
 | POST | `/traefik/routes/rebuild` | admin | Write the missing routes for the services of one stack {stack} or of every stack: services that publish a port and have no route file yet get Host(service.domain) → the container, like a fresh deploy (a domain is needed: TRAEFIK_DOMAIN or PROXY_DOMAIN); routes written before Authelia arrived go behind it (answer: routes_written, authelia_protected) |
@@ -269,6 +270,9 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/dns/technitium/connect` | admin | Connect an instance: {url: "http://192.168.2.53:5380", token (a Technitium API token; kept as the secret TECHNITIUM_TOKEN or TECHNITIUM_SECONDARY_TOKEN; leave it out to keep the stored one), role: primary\|secondary}. Saves, then tests it; url "" disconnects |
 | POST | `/dns/technitium/bootstrap` | admin | Apply the house's baseline to an instance (role: primary, secondary, or both by default): Quad9 and Mullvad over TLS, one at a time, DNSSEC validation, no IPv6 preference, Hagezi Pro + TIF + DoH bypass lists updated daily (lists already there stay), the query log for 30 days (Query Logs (Sqlite)), the Advanced Blocking app, dns1/dns2 as its name, a 20000-entry cache. Changes only what differs: a second run changes nothing |
 | POST | `/dns/technitium/sync` | admin | Make the secondary what the primary is: settings (forwarders, lists, cache), the allowed and blocked names, the apps and their configs, the forced SafeSearch names |
+| POST | `/dns/technitium/backup` | admin | Back up every connected Technitium now: its own zip (settings, zones, allowed and blocked names, DHCP scopes; not its accounts and tokens, the logs, the stats, the downloaded lists or the apps) into .data/technitium/backups/<server>-<date>.zip, with a note of the blocklists and the apps' configs; 14 kept per server |
+| POST | `/dns/technitium/restore` | admin | Restore a backup onto a server: {server: primary\|secondary, file, confirm: true}. Technitium takes its zip (its own accounts and tokens stay as they are, so DCS stays connected; DHCP scopes only onto the primary), reloads and restarts its DNS service (a few seconds without answers); DCS then puts back the blocklists and the apps with their configs, and a restored primary is copied to the secondary |
+| POST | `/dns/technitium/lists/update` | admin | Every connected Technitium downloads its blocklists again now |
 | POST | `/dns/technitium/block` | admin | Block a name for everyone (Technitium's blocked zone): {domain, remove?: true to take it off}; the secondary follows |
 | POST | `/dns/technitium/allow` | admin | Allow a name for everyone (Technitium's allowed zone, over every blocklist): {domain, remove?: true to take it off}; the secondary follows |
 | POST | `/dns/technitium/blocklists` | admin | Add or remove a blocklist URL on the primary: {url, remove?: true}; the secondary follows |
