@@ -3,6 +3,30 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+Push bans to Cloudflare, from two Settings saves a minute apart on a real server (community list on, then off):
+
+- **Turning the community list off sent its 10,000 addresses anyway, every 30 s.** The items file was reused when the key in the
+  state matched, but that key was written only after a push that succeeded: the community list's push was refused, so its file stayed
+  beside the local list's key, and turning the list off reused it. The key now lives in the items file itself, and a Settings save
+  removes the file.
+- **Cloudflare's "you have been ratelimited" is no longer a full list.** HTTP 429 or a message about a rate limit is `rate_limited`:
+  nothing is asked of Cloudflare for 2 minutes, then 5, then 15 if it happens again in a row; the page shows it as a note with the next
+  try, never as a problem or with the capacity advice, and it is not on the dashboard's "Needs your attention". `list_full` is kept for
+  Cloudflare's own quota answers ("maximum", "quota").
+- **An error on a list that is in step clears by itself**: when the items are the ones Cloudflare was last given and it holds as many,
+  a tick clears the error without sending anything.
+- **A Settings save sends nothing from the request**: the next tick (within seconds) works the items out afresh and sends one change,
+  only if they differ from what Cloudflare holds.
+- **At most one replacement of the list a minute** (`CLOUDFLARE_BOUNCER_PUSH_GAP`, 60 s): a change within the minute waits for the next
+  tick; *Sync now* within the minute compares without reading the list back and answers "Already synced N s ago", or when the change
+  goes.
+- No jq call gets the bans or the items as an argument (the old per-row code passed 103,594 rows as one and failed with "Argument list too
+  long"); the smoke check of 100,850 bans says so.
+
 ## [4.0.46] - 2026-10-09
 
 ### Fixed

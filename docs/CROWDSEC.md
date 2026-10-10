@@ -347,6 +347,12 @@ is done. One sync runs at a time, under a lock that knows its holder (`.data/cro
 kind): a lock whose holder is gone is taken over, and a sync that has held it for 10 minutes is stopped and the next one starts afresh.
 Every skip and every first failure is one line in `logs/api-server.log` ("push bans to Cloudflare: …"), with the reason.
 
+Cloudflare takes one change of a list at a time and not too many of them: DCS replaces the items at most once a minute
+(`CLOUDFLARE_BOUNCER_PUSH_GAP`), and only when they differ from what Cloudflare was last given. A Settings save sends nothing itself;
+the next sync, a few seconds later, does. When Cloudflare answers "slow down" (HTTP 429, "you have been ratelimited"), DCS leaves it
+alone for 2 minutes, then 5, then 15 if it happens again in a row; the panel shows it as a note with the next try, Cloudflare keeps the
+list it holds, and it is not a problem on the dashboard.
+
 **Why not CrowdSec's own Cloudflare bouncer.** `crowdsecurity/cloudflare-bouncer`, the one that kept an IP list, is archived and CrowdSec
 lists it as deprecated: it writes Cloudflare's Firewall Rules and Filters APIs, which Cloudflare stopped supporting on 2025-06-15. Its
 successor, `crowdsecurity/cloudflare-worker-bouncer`, puts a Cloudflare Worker in front of every request: on the free plan that is 100,000

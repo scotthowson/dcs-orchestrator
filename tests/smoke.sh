@@ -9300,6 +9300,8 @@ CURL
               {"id": 107, "value": "45.155.205.1", "origin": "CAPI", "scope": "Ip"},
               {"id": 108, "value": "198.51.100.9", "origin": "crowdsec", "scope": "Ip", "type": "captcha"},
               {"id": 109, "value": "DE", "origin": "cscli", "scope": "Country"}]'
+    # the minute between two replacements of the list would make most checks below wait: off here, on in cst_cloudflare_slowdown
+    cst_env CLOUDFLARE_BOUNCER_PUSH_GAP 0
     [[ -n "$CFB_PORT" ]]
 }
 cst_cloudflare_teardown() {
@@ -9450,15 +9452,15 @@ cst_cloudflare_sync() {
     check "cloudflare/sync: the list follows CrowdSec" "198.51.100.10 198.51.100.7 203.0.113.77" "$(cfb_items)"
     cst_j "cloudflare/sync" '.sync.items' 3 '.health' ok
     # capacity: the newest bans first
-    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 2}'
+    cfb_settings '{"capacity": 2}'
     cst_is "cloudflare: capacity 2" 200
     check "cloudflare/capacity: the two newest" "198.51.100.10 203.0.113.77" "$(cfb_items)"
     cst_j "cloudflare/capacity" '.settings.capacity' 2 '.sync.dropped' 1
     # the community blocklist: only when asked, local bans first
     cfb_dec '[{"id": 101, "value": "198.51.100.7", "origin": "crowdsec"}, {"id": 900, "value": "45.155.205.1", "origin": "CAPI"}, {"id": 901, "value": "45.155.205.2", "origin": "lists"}]'
-    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 2, "community": true}'
+    cfb_settings '{"capacity": 2, "community": true}'
     check "cloudflare/community: local first, then the newest community entry" "198.51.100.7 45.155.205.2" "$(cfb_items)"
-    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 10000, "community": false}'
+    cfb_settings '{"capacity": 10000, "community": false}'
     check "cloudflare/community off: local only" "198.51.100.7" "$(cfb_items)"
     # an empty ban list empties the list (the rule stays)
     cfb_dec '[]'
@@ -9572,7 +9574,7 @@ json.dump(rows, open(sys.argv[1], "w"))
 PY2
     cfb_fake /_mock/decisions -X POST -H 'Content-Type: application/json' --data-binary "@$CST/cfb-big.json" >/dev/null
     t0=$(date +%s%N)
-    cst_call admin POST /crowdsec/cloudflare/settings '{"community": true, "capacity": 10000}'
+    cfb_settings '{"community": true, "capacity": 10000}'
     took=$(( ($(date +%s%N) - t0) / 1000000 ))
     cst_is "cloudflare/scale: 100,850 bans with the community blocklist" 200
     check "cloudflare/scale: the sync takes seconds, not hours (${took} ms)" yes "$( (( took < 180000 )) && echo yes || echo no)"
@@ -9583,10 +9585,11 @@ PY2
     cst_t "cloudflare/scale: the rest is left out and counted" '.sync.dropped > 90000 and .sync.skipped >= 1'
     # off again: the local bans only, at once
     t0=$(date +%s%N)
-    cst_call admin POST /crowdsec/cloudflare/settings '{"community": false}'
+    cfb_settings '{"community": false}'
     took=$(( ($(date +%s%N) - t0) / 1000000 ))
     cst_j "cloudflare/scale: community off" '.sync.items' 850 '.settings.community' false
     check "cloudflare/scale: …in seconds too (${took} ms)" yes "$( (( took < 30000 )) && echo yes || echo no)"
+    check "cloudflare/scale: no command got 100k rows as an argument" 0 "$(cat "$CST/logs/api-server.log" "$CST/api-stderr.log" 2>/dev/null | grep -c 'Argument list too long')"
     rm -f "$CST/cfb-big.json"
     cfb_dec '[{"id": 140, "value": "198.51.100.40", "origin": "crowdsec"}]'
     cst_call admin POST /crowdsec/cloudflare/sync ''
@@ -9654,6 +9657,144 @@ cst_cloudflare_listener() {
     check "cloudflare/listener: …and last_sync with it" yes "$( (( $(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json") > before_sync )) && echo yes || echo no)"
     [[ "$(jq -r '.last_sync // 0' "$CST/.data/crowdsec/cloudflare.json")" -gt "$before_sync" ]] || { jq -c '{last_sync, last_attempt, error, running}' "$CST/.data/crowdsec/cloudflare.json"; grep 'Cloudflare' "$CST/logs/api-server.log" | tail -5; }
     kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+}
+
+# cfb_settings BODY — a Settings save (it sends nothing itself), then the sync that applies it (what the next tick does)
+cfb_settings() {
+    cst_call admin POST /crowdsec/cloudflare/settings "$1"
+    [[ "$CST_ST" == 200 ]] || return 0
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+}
+cfb_puts() { cfb_calls '^PUT /client/v4/accounts/acc-lab/rules/lists/.*/items'; }
+cfb_stset() { jq "$1" "$CST/.data/crowdsec/cloudflare.json" > "$CST/cfb.tmp" && mv "$CST/cfb.tmp" "$CST/.data/crowdsec/cloudflare.json"; }
+
+cst_cloudflare_slowdown() {
+    local p0 until now
+    cfb_dec '[{"id": 150, "value": "198.51.100.50", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/slowdown: a list to start from" "198.51.100.50" "$(cfb_items)"
+    # -- Cloudflare says "you have been ratelimited": a wait, a note, never the capacity advice
+    for mode in http bulk; do
+        cfb_cfg "{\"ratelimit_puts\": 1, \"ratelimit_mode\": \"$mode\"}"
+        cfb_dec '[{"id": 151, "value": "198.51.100.51", "origin": "crowdsec"}]'
+        now=$(date +%s)
+        cst_call admin POST /crowdsec/cloudflare/sync ''
+        cst_j "cloudflare/slowdown ($mode)" '.error.code' rate_limited '.health' ok
+        cst_t "cloudflare/slowdown ($mode): the note says when, not what to lower" '(.error.message | test("slow down") and test("2 min")) and (.error.message | test("CAPACITY") | not)'
+        until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
+        check "cloudflare/slowdown ($mode): the next try in 2 minutes" yes "$( (( until >= now + 119 && until <= now + 125 )) && echo yes || echo no)"
+        cst_call admin GET /crowdsec/status
+        cst_t "cloudflare/slowdown ($mode): no issue on the CrowdSec page" '[.issues[] | select(.code == "cloudflare_sync")] | length == 0'
+        # while it waits, Cloudflare is not asked
+        p0=$(cfb_puts)
+        cst_call admin POST /crowdsec/cloudflare/sync ''
+        check "cloudflare/slowdown ($mode): nothing is sent while it waits" "$p0" "$(cfb_puts)"
+        cst_j "cloudflare/slowdown ($mode): still waiting" '.error.code' rate_limited
+        # the wait is over: the change goes, the note goes
+        cfb_stset '.backoff.until = 0'
+        cst_call admin POST /crowdsec/cloudflare/sync ''
+        cst_j "cloudflare/slowdown ($mode): sent after the wait" '.error' null '.sync.backoff' null
+        check "cloudflare/slowdown ($mode): …the list follows" "198.51.100.51" "$(cfb_items)"
+        cfb_dec '[{"id": 150, "value": "198.51.100.50", "origin": "crowdsec"}]'
+        cst_call admin POST /crowdsec/cloudflare/sync ''
+    done
+    # twice in a row: 2 minutes, then 5
+    cfb_cfg '{"ratelimit_puts": 2, "ratelimit_mode": "http"}'
+    cfb_dec '[{"id": 152, "value": "198.51.100.52", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cfb_stset '.backoff.until = 0'
+    now=$(date +%s)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
+    check "cloudflare/slowdown: a second time in a row waits 5 minutes" yes "$( (( until >= now + 299 && until <= now + 305 )) && echo yes || echo no)"
+    cst_t "cloudflare/slowdown: …and says so" '.error.message | test("5 min")'
+    cfb_stset '.backoff.until = 0'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/slowdown: then it goes" '.error' null
+    # a real quota answer is still a full list
+    cfb_cfg '{"max_items": 0, "max_lists": 2}'
+    cfb_dec '[{"id": 153, "value": "198.51.100.53", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/slowdown: a full list is still a full list" '.error.code' list_full '.health' error
+    cfb_cfg '{"max_items": 10000, "max_lists": 1}'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/slowdown: …and clears once sent" '.error' null
+
+    # -- a stale error on a list that is in step (the same items, as many at Cloudflare) clears without a push
+    cfb_stset '.error = {code: "list_full", message: "old", at: 1, since: 1} | .last_verify = (now | floor)'
+    p0=$(cfb_puts)
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_crowdsec_cf_lib; _cfb_tick'
+    cst_call admin GET /crowdsec/cloudflare
+    cst_j "cloudflare/in step: an old error clears by itself" '.error' null '.health' ok
+    check "cloudflare/in step: …without a push" "$p0" "$(cfb_puts)"
+
+    # -- the Settings save itself sends nothing (the next tick does), and says so
+    p0=$(cfb_puts)
+    cst_call admin POST /crowdsec/cloudflare/settings '{"capacity": 5}'
+    cst_is "cloudflare/settings: saved" 200
+    cst_t "cloudflare/settings: …the answer says the next sync applies it" '.message | test("next sync applies it")'
+    check "cloudflare/settings: …and the request sent nothing" "$p0" "$(cfb_puts)"
+    check "cloudflare/settings: …the next tick comes at once (the stamp is put back)" yes "$( (( $(date +%s) - $(stat -c %Y "$CST/.data/crowdsec/.cloudflare.stamp") > 30 )) && echo yes || echo no)"
+    cfb_settings '{"capacity": 10000}'
+
+    # -- community on, its push refused by a "slow down", community off: the next sync works out the local set afresh (the items file
+    #    of the community list must not be reused under the local list's key)
+    cfb_dec '[{"id": 160, "value": "198.51.100.60", "origin": "crowdsec"}, {"id": 161, "value": "198.51.100.61", "origin": "cscli"},
+              {"id": 162, "value": "45.155.205.10", "origin": "CAPI"}, {"id": 163, "value": "45.155.205.11", "origin": "CAPI"}, {"id": 164, "value": "45.155.205.12", "origin": "lists"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/cache: the local list" "198.51.100.60 198.51.100.61" "$(cfb_items)"
+    cfb_cfg '{"ratelimit_puts": 1, "ratelimit_mode": "http"}'
+    cfb_settings '{"community": true}'
+    cst_j "cloudflare/cache: the community list was refused for now" '.error.code' rate_limited
+    check "cloudflare/cache: …Cloudflare still holds the local list" "198.51.100.60 198.51.100.61" "$(cfb_items)"
+    cfb_settings '{"community": false}'
+    cfb_stset '.backoff.until = 0'
+    p0=$(cfb_puts)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/cache: community off computes the local set" '.sync.items' 2 '.error' null '.health' ok
+    check "cloudflare/cache: …which Cloudflare holds already: nothing sent" "$p0" "$(cfb_puts)"
+    check "cloudflare/cache: …and the list is the local one" "198.51.100.60 198.51.100.61" "$(cfb_items)"
+
+    # -- a Settings save that changes nothing sends nothing; a change sends once
+    p0=$(cfb_puts)
+    cfb_settings '{"capacity": 10000, "community": false}'
+    check "cloudflare/settings: the same settings send nothing" "$p0" "$(cfb_puts)"
+    cfb_settings '{"capacity": 10000, "community": false}'
+    check "cloudflare/settings: …twice" "$p0" "$(cfb_puts)"
+    cfb_dec '[{"id": 153, "value": "198.51.100.53", "origin": "crowdsec"}, {"id": 154, "value": "198.51.100.54", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    p0=$(cfb_puts)
+    cfb_settings '{"capacity": 1}'
+    check "cloudflare/settings: a new capacity sends once (by the sync after it)" "$((p0 + 1))" "$(cfb_puts)"
+    check "cloudflare/settings: …the newest one" "198.51.100.54" "$(cfb_items)"
+    cfb_settings '{"capacity": 10000}'
+
+    # -- at most one replacement a minute (the real gap here)
+    cst_env CLOUDFLARE_BOUNCER_PUSH_GAP 60
+    cfb_stset '.last_push = (now | floor)'
+    p0=$(cfb_puts)
+    cfb_dec '[{"id": 155, "value": "198.51.100.55", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/gap: a change within the minute waits" "$p0" "$(cfb_puts)"
+    cst_t "cloudflare/gap: …and says until when" '.sync.push_waiting.until > now and (.message | test("^The change goes to Cloudflare in [0-9]+ s"))'
+    cfb_stset '.last_push = (now - 61 | floor)'
+    touch -d '2 minutes ago' "$CST/.data/crowdsec/.cloudflare.stamp"
+    cfb_src eval '_crowdsec_cf_lib; _cfb_tick'
+    check "cloudflare/gap: the next tick after the minute sends it" "$((p0 + 1))" "$(cfb_puts)"
+    check "cloudflare/gap: …the list follows" "198.51.100.55" "$(cfb_items)"
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_is "cloudflare/gap: Sync now right after a sync" 200
+    cst_t "cloudflare/gap: …answers that it is in step" '.message | test("^Already synced [0-9]+ s ago")'
+    check "cloudflare/gap: …and sends nothing" "$((p0 + 1))" "$(cfb_puts)"
+    # the bouncer re-registered while a change waits for the minute: the key error does not stay behind
+    cfb_stset '.last_push = (now | floor)'
+    cst_cs bouncers delete dcs-cloudflare-bouncer >/dev/null 2>&1
+    cfb_dec '[{"id": 156, "value": "198.51.100.56", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/gap: a healed key while the change waits" '.error' null '.bouncer.registered' true
+    cst_t "cloudflare/gap: …the change still waits" '.sync.push_waiting.until > now'
+    cst_env CLOUDFLARE_BOUNCER_PUSH_GAP 0
 }
 
 cst_cloudflare_offswitch() {
@@ -9725,6 +9866,7 @@ cst_part_cloudflare() {
     cst_cloudflare_on
     cst_cloudflare_sync
     cst_cloudflare_errors
+    cst_cloudflare_slowdown
     cst_cloudflare_scale
     cst_cloudflare_locks
     cst_cloudflare_listener

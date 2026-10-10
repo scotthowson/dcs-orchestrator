@@ -241,6 +241,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 if method == 'GET':
                     return env(200, [{'id': i['id'], 'ip': i['ip'], 'comment': i.get('comment', '')} for i in l['items']], info={'cursors': {}})
                 if method == 'PUT':
+                    # Cloudflare's "slow down": the next ratelimit_puts replacements are refused, as an HTTP 429 or as a failed bulk operation
+                    if S['config'].get('ratelimit_puts', 0) > 0:
+                        S['config']['ratelimit_puts'] -= 1
+                        if S['config'].get('ratelimit_mode', 'http') == 'http':
+                            return err(429, 971, 'you have been ratelimited please wait and try again')
+                        op = hexid(); S['ops'][op] = {'polls': 0, 'error': 'you have been ratelimited please wait and try again'}
+                        return env(200, {'operation_id': op})
                     if not isinstance(body, list):
                         return err(400, 10026, 'the body must be an array of items')
                     for it in body:

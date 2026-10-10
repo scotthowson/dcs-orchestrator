@@ -868,7 +868,7 @@ handle_crowdsec_status() {
     _api_success "$(jq -c --arg ip "$client" --argjson banned "$banned" --argjson trusted "$trusted" --argjson wl "$state" --argjson cfb "$cfb" \
         '. + {client_ip: $ip, client_banned: $banned, trusted: $trusted, whitelist: $wl, decision_count: ((.decisions // []) | length), cloudflare: $cfb,
               message: (if .state == "not_deployed" then "CrowdSec is not running. Deploy it from the CrowdSec page to enable protection." else .title end)}
-         | if $cfb.enabled and ($cfb.health == "stale" or $cfb.health == "error") then .issues = ((.issues // []) + [{code: "cloudflare_sync", severity: "warning",
+         | if $cfb.enabled and ($cfb.health == "stale" or $cfb.health == "error") and (($cfb.error.code // "") != "rate_limited") then .issues = ((.issues // []) + [{code: "cloudflare_sync", severity: "warning",
               title: (if $cfb.health == "error" then "Cloudflare is not getting the bans" else "The bans at Cloudflare are not up to date" end),
               detail: ((if $cfb.health == "error" then ($cfb.error.message // "The last sync failed.") else "The last sync with Cloudflare succeeded more than 10 minutes ago." end)
                 + " Cloudflare keeps refusing the addresses it holds; new bans reach it once the sync works again."),

@@ -60,7 +60,8 @@ echo "DCS against it"
 mkdir -p "$WORK/dcs"/{.scripts,.lib,.config,.data,logs,.api-auth,Stacks}
 cp "$ROOT/.scripts/api-server.sh" "$WORK/dcs/.scripts/"; cp -r "$ROOT/.lib/." "$WORK/dcs/.lib/"; cp -r "$ROOT/.config/." "$WORK/dcs/.config/"; cp "$ROOT/VERSION" "$WORK/dcs/"
 grep -vE '^(API_BIND|API_AUTH_ENABLED|API_INSECURE_NO_AUTH|API_TRUSTED_PROXIES|API_IP_WHITELIST|API_PORT|PROXY_DOMAIN)=' "$ROOT/.env.example" > "$WORK/dcs/.env"
-printf 'API_PORT=9876\nMETRICS_ENABLED=false\nPROXY_DOMAIN=lab.example.test\n' >> "$WORK/dcs/.env"
+# (no minute between two changes of the list here: the checks below change the bans and sync at once; tests/smoke.sh checks the minute)
+printf 'API_PORT=9876\nMETRICS_ENABLED=false\nPROXY_DOMAIN=lab.example.test\nCLOUDFLARE_BOUNCER_PUSH_GAP=0\n' >> "$WORK/dcs/.env"
 API="$WORK/dcs/.scripts/api-server.sh"
 python3 "$ROOT/tests/mock-cloudflare-waf.py" "$WORK/cf.port" "$WORK/cf.json" >/dev/null 2>&1 &
 RIP=$!
