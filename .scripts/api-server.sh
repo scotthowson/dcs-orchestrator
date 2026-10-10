@@ -30323,6 +30323,12 @@ _fleet_move_hub_run() {
         sed -i -E "s|^[[:space:]]*(export[[:space:]]+)?APP_DATA_DIR=.*$|# App-Data was at $vad in the VM before the move to the hub\nAPP_DATA_DIR=./App-Data|" "$COMPOSE_DIR/$stack/.env"
         _job_log "$id" "its App-Data was at $vad in the VM: on the hub it is Stacks/$stack/App-Data"
     fi
+    # the compose policy, as for a push into a VM: the hub runs nothing from a VM it would refuse in its own editor
+    if ! _compose_policy_check "$COMPOSE_DIR/$stack/docker-compose.yml" "$stack"; then
+        _api_policy_audit "the move of $stack from $mname to the hub"
+        _fmh_fail "$id" files "the compose policy refuses Stacks/$stack/docker-compose.yml: $(_compose_policy_brief | cut -c1-400) — nothing was stopped or changed in the VM"; return 1
+    fi
+    _api_policy_audit "the move of $stack from $mname to the hub"
     _job_step "$id" files "done" "the VM's compose, .env and configuration"
 
     # 3. its images, before anything stops: the downtime is the copy, not a download
