@@ -10869,9 +10869,11 @@ check "technitium local: …the forced names stay, nothing tracked" "$_tfz {}" "
 check "technitium local: …GET /routes says off, no LAN address" "false null" "$(tt_req "$TU" GET /routes '' "$TFP" | body_of | jq -r '"\(.local.on) \(.routes[0].lan)"')"
 check "technitium local: docs: a viewer reads it, the admin switches it" "user admin" \
     "$(for r in 'GET /dns/technitium/local' 'POST /dns/technitium/local'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
-# the local names' part leaves the house as it found it: DHCP off, no lease of its own (the safety net counts both)
+# the local names' part leaves the house as it found it: DHCP off, no lease of its own, the forgotten tablet seen again
+# (the safety net counts the leases, and its first look learns the house: a device back later would be "new")
 tt_req "$TA" POST /dns/technitium/dhcp/disable '{"name":"LAN"}' >/dev/null
 curl -s -H "Authorization: Bearer $TT1" --data-urlencode name=LAN --data-urlencode hardwareAddress=02-42-AC-1E-00-02 "$M1/api/dhcp/leases/remove" >/dev/null
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" >/dev/null
 # the safety net (.lib/technitium-alerts.sh): what the status adds, the alerts (raised once, cleared once) and their rules, the backups
 # and a restore. The minute clock's part runs with the notifier stubbed: every event it fires is a line in $TW/fired.
 rm -f "$TW/.data/technitium/alerts.json"; : > "$TW/fired"
