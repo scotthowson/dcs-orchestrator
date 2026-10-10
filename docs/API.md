@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `442` in total.
+Every endpoint below is `446` in total.
 
 ## Access levels
 
@@ -507,6 +507,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/proxmox/vms` | user | Every VM and LXC container with status, CPU, memory, disk, uptime and tags |
 | GET | `/proxmox/self` | user | The Proxmox guest this DCS runs in (found by its SMBIOS id, addresses or name) with the tags it has and the ones it should have: dcs, and hub on the hub of a fleet |
 | GET | `/proxmox/tasks` | user | Recent Proxmox tasks (starts, stops, backups, migrations): who ran them and how they ended |
+| GET | `/proxmox/vms/{vmid}/snapshots` | user | A guest's snapshots (name, note, when, with its RAM or not, the one it runs from now) and whether it runs |
 | GET | `/proxmox/vms/{node}/{type}/{vmid}` | user | One VM or container: live status and its configuration (cores, memory, OS, boot, description) |
 | GET | `/fleet/status` | user | What this server is in the fleet: a hub (members, join codes), a member (its hub), or standalone; plus a pending join and how others reach this API |
 | GET | `/fleet/members` | user | The members this hub manages, with the guest each one runs in and when it last answered |
@@ -540,6 +541,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/ssh/keys` | admin | Make a key of your own and put its public half on the VMs you tick {name, members: [member ids], hub_access?, password}: the private half is in the answer once, and only after your dashboard password was typed again (admin, not with an API key) |
 | POST | `/ssh/keys/*/vms` | admin | Put an existing key on more VMs {members: [ids]}: the private half is not needed, the hub holds the public one (admin) |
 | POST | `/proxmox/test` | admin | Try a Proxmox connection with the given url, token_id, token_secret and verify_tls without saving them |
+| POST | `/proxmox/vms/{vmid}/snapshots` | admin | Take a snapshot of a guest: {name, description?, vmstate?} (vmstate: a running VM's RAM too); waits for Proxmox and answers what it made. The API token needs VM.Snapshot |
+| POST | `/proxmox/vms/{vmid}/snapshots/{name}/rollback` | admin | Return a guest to a snapshot ({confirm: true}; start?: false leaves a VM that was running stopped). Everything since is lost; a fleet member's DCS goes back too and the hub checks it again. Refused for the VM this DCS runs in. The API token needs VM.Snapshot.Rollback |
 | POST | `/proxmox/vms/{node}/{type}/{vmid}/{action}` | admin | Power action on a VM or container: start, shutdown, stop, reboot, reset (VMs only), balloon (VMs only: a memory balloon whose floor keeps the guest three quarters of its memory, so Proxmox reports the guest's real usage and can take a little back; reboot afterwards), suspend, resume — audited and sent to the webhooks |
 | POST | `/fleet/members` | admin | Add a member by address and an account on it {url, username, password, name?, vmid?, node?, type?, insecure?}; the hub logs in, learns who it is and matches it to a guest |
 | POST | `/fleet/join-tokens` | admin | Mint a join code {ttl_hours?: 24}: node_command is the one line that installs DCS as a node of this hub on any Debian, Ubuntu, Fedora or Arch VM and joins it; a VM that already runs DCS joins with ./setup.sh --join (or ./setup.sh with DCS_HUB_URL and DCS_JOIN_TOKEN) |
@@ -591,6 +594,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | DELETE | `/domains/*` | admin | Take a domain off this server: no VM may still use it (admin) |
 | DELETE | `/fleet/members/{id}` | admin | Forget a member (its dcs-hub account is removed there when it answers) |
 | DELETE | `/fleet/templates/{vmid}` | admin | Forget a DCS template and destroy the template VM on Proxmox |
+| DELETE | `/proxmox/vms/{vmid}/snapshots/{name}` | admin | Delete a guest's snapshot (the guest itself stays as it is now). The API token needs VM.Snapshot |
 | DELETE | `/fleet/jobs/{id}` | admin | Forget a finished or failed job; ?destroy=true also destroys the VM a failed build (or a by-hand install that never joined) left behind |
 | DELETE | `/fleet/join-tokens/{token}` | admin | Revoke a join code |
 | DELETE | `/fleet/hub` | admin | Leave the hub: forget it and remove its dcs-hub account here (the hub drops this member when it next fails to answer, or when removed there) |

@@ -1888,7 +1888,7 @@ check "proxmox: vms need config"        503 "$(auth_request GET /proxmox/vms | s
 check "proxmox: environment reported"   yes "$(auth_request GET /proxmox/status | body_of | jq -e '.environment | has("guest")' >/dev/null 2>&1 && echo yes || echo no)"
 check "setup defaults: environment"     yes "$(request GET /setup/defaults '' "${NOAUTH[@]}" | body_of | jq -e '.system.proxmox | has("guest")' >/dev/null 2>&1 && echo yes || echo no)"
 _PVE_PORT=$(_rport)
-MOCK_DENY_ARGS_FILE="$WORK/.data/deny-args" python3 "$ROOT/tests/mock-proxmox.py" "$_PVE_PORT" 'dcs@pve!smoke' 'smoke-secret' "$WORK/.data/pve-mock.json" >/dev/null 2>&1 &
+MOCK_DENY_ARGS_FILE="$WORK/.data/deny-args" MOCK_DENY_SNAPSHOT_FILE="$WORK/.data/deny-snap" python3 "$ROOT/tests/mock-proxmox.py" "$_PVE_PORT" 'dcs@pve!smoke' 'smoke-secret' "$WORK/.data/pve-mock.json" >/dev/null 2>&1 &
 _PVE_PID=$!
 timeout 10 bash -c "until curl -s -o /dev/null http://127.0.0.1:$_PVE_PORT/api2/json/version; do sleep 0.2; done" 2>/dev/null
 _envset PROXMOX_URL "http://127.0.0.1:$_PVE_PORT"; _envset PROXMOX_TOKEN_ID 'dcs@pve!smoke'; _envset PROXMOX_TOKEN_SECRET 'smoke-secret'; _envset API_RESPONSE_CACHE false
@@ -1984,6 +1984,68 @@ check "proxmox: bad token hint"         yes "$(auth_request POST /proxmox/test "
 check "proxmox: viewer may look"        200 "$(viewer_request GET /proxmox/status | status_of)"
 check "proxmox: viewer may not power"   403 "$(viewer_request POST /proxmox/vms/pve/lxc/200/stop '{}' | status_of)"
 check "proxmox: bot may power"          0 "$(_lib _api_bot_allowed POST /proxmox/vms/pve/lxc/200/stop; echo $?)"
+# --- a guest's snapshots: list, take (name rules, a duplicate, with RAM), roll back (confirm, the VM DCS runs in, a
+# fleet member), delete; the privilege a 403 lacks, a storage without snapshots, who may do what -------------------
+check "snapshots: none yet"                    "0 null true" "$(auth_request GET /proxmox/vms/101/snapshots | body_of | jq -r '"\(.total) \(.current) \(.can_save_ram)"' 2>/dev/null)"
+check "snapshots: an unknown guest"            404 "$(auth_request GET /proxmox/vms/4242/snapshots | status_of)"
+check "snapshots: a template is not a guest"   404 "$(auth_request GET /proxmox/vms/900/snapshots | status_of)"
+check "snapshots: a bad VMID"                  400 "$(auth_request GET /proxmox/vms/abc/snapshots | status_of)"
+check "snapshots: a viewer may look"           200 "$(viewer_request GET /proxmox/vms/101/snapshots | status_of)"
+check "snapshots: a name starts with a letter" 400 "$(auth_request POST /proxmox/vms/101/snapshots '{"name":"1st"}' | status_of)"
+check "snapshots: no spaces in a name"         400 "$(auth_request POST /proxmox/vms/101/snapshots '{"name":"before upgrade"}' | status_of)"
+check "snapshots: a name is 40 at most"        400 "$(auth_request POST /proxmox/vms/101/snapshots "{\"name\":\"a$(printf 'b%.0s' {1..40})\"}" | status_of)"
+check "snapshots: current is Proxmox's"        400 "$(auth_request POST /proxmox/vms/101/snapshots '{"name":"current"}' | status_of)"
+check "snapshots: a viewer may not take one"   403 "$(viewer_request POST /proxmox/vms/101/snapshots '{"name":"viewer1"}' | status_of)"
+check "snapshots: nor may a bot"               1 "$(_lib _api_bot_allowed POST /proxmox/vms/101/snapshots; echo $?)"
+check "snapshots: …or roll back"               1 "$(_lib _api_bot_allowed POST /proxmox/vms/101/snapshots/a/rollback; echo $?)"
+_SN=$(auth_request POST /proxmox/vms/101/snapshots '{"name":"before-upgrade","description":"before the 4.1 update","vmstate":true}')
+check "snapshots: taken"                       200 "$(printf '%s' "$_SN" | status_of)"
+check "snapshots: …it says what it made"       "Snapshot before-upgrade of VM 101 (networking-security) taken, with its RAM" "$(printf '%s' "$_SN" | body_of | jq -r '.message' 2>/dev/null)"
+check "snapshots: …and answers the snapshot"   "before-upgrade true before the 4.1 update" "$(printf '%s' "$_SN" | body_of | jq -r '.snapshot | "\(.name) \(.vmstate) \(.description)"' 2>/dev/null)"
+check "snapshots: a duplicate name refused"    409 "$(auth_request POST /proxmox/vms/101/snapshots '{"name":"before-upgrade"}' | status_of)"
+check "snapshots: a second one, disks only"    false "$(auth_request POST /proxmox/vms/101/snapshots '{"name":"after_config"}' | body_of | jq -r '.vmstate' 2>/dev/null)"
+_SL=$(auth_request GET /proxmox/vms/101/snapshots | body_of)
+check "snapshots: listed oldest first"         "before-upgrade after_config" "$(jq -r '[.snapshots[].name] | join(" ")' <<< "$_SL" 2>/dev/null)"
+check "snapshots: the one it runs from"        "after_config true before-upgrade" "$(jq -r '"\(.current) \(.snapshots[1].current) \(.snapshots[1].parent)"' <<< "$_SL" 2>/dev/null)"
+check "snapshots: a time and the RAM flag"     "yes true false" "$(jq -r '"\(if (.snapshots[0].created_at // 0) > 1700000000 then "yes" else "no" end) \(.snapshots[0].vmstate) \(.snapshots[1].vmstate)"' <<< "$_SL" 2>/dev/null)"
+check "snapshots: a container saves no RAM"    "false yes" "$(auth_request POST /proxmox/vms/200/snapshots '{"name":"ct1","vmstate":true}' | body_of | jq -r '"\(.vmstate) \(if (.message | test("taken")) then "yes" else "no" end)"' 2>/dev/null)"
+check "snapshots: audited"                     yes "$(grep -q '"action":"proxmox_snapshot"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+_SF=$(auth_request POST /proxmox/vms/101/snapshots '{"name":"failing"}')
+check "snapshots: a storage without snapshots" "502 yes" "$(printf '%s' "$_SF" | status_of) $(printf '%s' "$_SF" | body_of | jq -r '.message' 2>/dev/null | grep -q 'storage that cannot take snapshots' && echo yes || echo no)"
+check "rollback: needs confirm"                400 "$(auth_request POST /proxmox/vms/101/snapshots/before-upgrade/rollback '{}' | status_of)"
+check "rollback: an unknown snapshot"          404 "$(auth_request POST /proxmox/vms/101/snapshots/nothere/rollback '{"confirm":true}' | status_of)"
+check "rollback: a viewer may not"             403 "$(viewer_request POST /proxmox/vms/101/snapshots/before-upgrade/rollback '{"confirm":true}' | status_of)"
+_envset FLEET_IDENTITY_UUID 22222222-3333-4444-5555-666666666666        # this server "is" VM 101
+_SR=$(auth_request POST /proxmox/vms/101/snapshots/before-upgrade/rollback '{"confirm":true}')
+check "rollback: never the VM DCS runs in"     "409 yes" "$(printf '%s' "$_SR" | status_of) $(printf '%s' "$_SR" | body_of | jq -r '.message' 2>/dev/null | grep -q 'This DCS runs inside VM 101' && echo yes || echo no)"
+check "rollback: …nothing happened"            after_config "$(auth_request GET /proxmox/vms/101/snapshots | body_of | jq -r '.current' 2>/dev/null)"
+_envset FLEET_IDENTITY_UUID 11111111-2222-3333-4444-555555555555        # VM 100 now: 101 may go back
+_FJ_SAVED=""; [[ -f "$WORK/.data/fleet.json" ]] && { _FJ_SAVED="$WORK/.data/fleet.json.snapsave"; command cp -f "$WORK/.data/fleet.json" "$_FJ_SAVED"; }
+printf '{"members":[{"id":"netsec","name":"netsec","url":"http://127.0.0.1:9","vmid":101,"node":"pve","reachable":true}]}\n' > "$WORK/.data/fleet.json"
+touch "$WORK/.data/fleet-watch.stamp"
+_SR=$(auth_request POST /proxmox/vms/101/snapshots/after_config/rollback '{"confirm":true}')
+check "rollback: done"                         200 "$(printf '%s' "$_SR" | status_of)"
+check "rollback: a running VM starts again"    "running yes" "$(printf '%s' "$_SR" | body_of | jq -r '"\(.status) \(if (.message | test("started again")) then "yes" else "no" end)"' 2>/dev/null)"
+check "rollback: a member's DCS went back too" "true yes" "$(printf '%s' "$_SR" | body_of | jq -r '"\(.member) \(if (.note | test("netsec is a member.*checks it again")) then "yes" else "no" end)"' 2>/dev/null)"
+check "rollback: …the hub asks it again"       no "$([[ -e "$WORK/.data/fleet-watch.stamp" ]] && echo yes || echo no)"
+check "rollback: it runs from that snapshot"   after_config "$(auth_request GET /proxmox/vms/101/snapshots | body_of | jq -r '.current' 2>/dev/null)"
+check "rollback: start false leaves it off"    "stopped true" "$(auth_request POST /proxmox/vms/101/snapshots/after_config/rollback '{"confirm":true,"start":false}' | body_of | jq -r '"\(.status) \(.message | test("left stopped"))"' 2>/dev/null)"
+auth_request POST /proxmox/vms/pve/qemu/101/start '{}' >/dev/null
+rm -f "$WORK/.data/fleet.json"; [[ -n "$_FJ_SAVED" ]] && mv -f "$_FJ_SAVED" "$WORK/.data/fleet.json"
+check "rollback: audited"                      yes "$(grep -q '"action":"proxmox_snapshot_rollback"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+touch "$WORK/.data/deny-snap"
+_SD=$(auth_request POST /proxmox/vms/101/snapshots '{"name":"denied"}')
+check "snapshots: 403 names the privilege"     "403 yes" "$(printf '%s' "$_SD" | status_of) $(printf '%s' "$_SD" | body_of | jq -r '.message' 2>/dev/null | grep -q 'lacks the privilege VM.Snapshot on VM 101' && echo yes || echo no)"
+check "rollback: 403 names its privilege"      yes "$(auth_request POST /proxmox/vms/101/snapshots/before-upgrade/rollback '{"confirm":true}' | body_of | jq -r '.message' 2>/dev/null | grep -q 'VM.Snapshot.Rollback' && echo yes || echo no)"
+check "snapshots: a delete refused too"        403 "$(auth_request DELETE /proxmox/vms/101/snapshots/before-upgrade | status_of)"
+rm -f "$WORK/.data/deny-snap"
+check "snapshots: delete, viewer denied"       403 "$(viewer_request DELETE /proxmox/vms/101/snapshots/before-upgrade | status_of)"
+check "snapshots: delete an unknown one"       404 "$(auth_request DELETE /proxmox/vms/101/snapshots/nothere | status_of)"
+check "snapshots: deleted"                     "Snapshot before-upgrade of VM 101 (networking-security) deleted" "$(auth_request DELETE /proxmox/vms/101/snapshots/before-upgrade | body_of | jq -r '.message' 2>/dev/null)"
+check "snapshots: …the rest stays"             "after_config null" "$(auth_request GET /proxmox/vms/101/snapshots | body_of | jq -r '"\([.snapshots[].name] | join(" ")) \(.snapshots[0].parent)"' 2>/dev/null)"
+check "snapshots: delete audited"              yes "$(grep -q '"action":"proxmox_snapshot_delete"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+auth_request DELETE /proxmox/vms/101/snapshots/after_config >/dev/null; auth_request DELETE /proxmox/vms/200/snapshots/ct1 >/dev/null
+_envdel FLEET_IDENTITY_UUID
 
 echo "Fleet: a hub and a member (two real listeners on loopback)"
 # The hub is this WORK copy, also started as a listener; the member is a second copy. Both
