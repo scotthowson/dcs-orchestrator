@@ -203,6 +203,11 @@ happens in the dashboard only, so no server reads, stores or relays another's me
 needed. Settings → Chat → "Show rooms of every server I'm signed in to" turns it off on a device. A web dashboard
 reaches another server's room only when that server lets its address in (`API_CORS_ORIGINS`).
 
+Each message and each person online shows the picture they set in Settings → Profile (an uploaded picture is served
+to signed-in people by `GET /users/{name}/avatar`; an emoji is passed as it is; a picture at an address on another site
+is shown only to its owner, never to the room). Pressing a picture opens the person's card, `GET /users/{name}/profile`:
+display name, status (80 characters) and bio (280), as plain text. The e-mail and time zone of a profile stay private.
+
 ## Notifications
 
 | Key | Default | Meaning |
