@@ -1,0 +1,1 @@
+{"services": {"app": {"image": "alpine:3", "userns_mode": "host", "ipc": "host"}}}

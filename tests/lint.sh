@@ -157,5 +157,33 @@ for f in .templates/*/template.json; do
     for _gs in $(jq -r '(.gpu // [])[].service' "$f" 2>/dev/null); do grep -qE "^  ${_gs}:[[:space:]]*$" "${f%/template.json}/docker-compose.yml" 2>/dev/null || { echo "  gpu names a service the compose does not have ($_gs): $f"; rc=1; }; done
 done
 
+echo "Compose policy: every template passes as the gallery deploys it (variables at their defaults)"
+# a template the policy refuses is one nobody can deploy: allow what it needs in .config/compose-policy.json, with the reason
+# (docs/SECURITY.md, "Compose policy"). Judged by Docker Compose when it is here, else by the fallback reader.
+if command -v python3 >/dev/null 2>&1 || docker compose version >/dev/null 2>&1; then
+    _pol_out=$(bash -c '
+        ROOT="$1"; work=$(mktemp -d "${TMPDIR:-/tmp}/dcs-lint-policy-XXXXXX") || exit 2
+        trap '"'"'rm -rf "$work"'"'"' EXIT
+        mkdir -p "$work/Stacks/template-check"
+        export BASE_DIR="$ROOT" COMPOSE_DIR="$work/Stacks" COMPOSE_POLICY_CACHE="$work/cache.json" COMPOSE_POLICY_LOCAL="$work/none.json"
+        DOCKER_COMPOSE_CMD="docker compose"; docker compose version >/dev/null 2>&1 || DOCKER_COMPOSE_CMD=""
+        source "$ROOT/.lib/compose-policy.sh"
+        n=0
+        for d in "$ROOT"/.templates/*/; do
+            [[ -f "$d/docker-compose.yml" ]] || continue
+            n=$((n + 1))
+            e=$(_compose_policy_template_env "$d/template.json")
+            rc=0; COMPOSE_POLICY_ENV_FILE="$e" COMPOSE_POLICY_DIR="$work/Stacks/template-check" _compose_policy_check "$d/docker-compose.yml" "" || rc=$?
+            rm -f "$e"
+            (( rc == 0 )) || printf "  .templates/%s: %s\n" "$(basename "$d")" "$(_compose_policy_brief)"
+        done
+        echo "  $n templates judged by $(jq -r .engine <<< "$COMPOSE_POLICY")"
+    ' _ "$ROOT" 2>&1)
+    printf '%s\n' "$_pol_out"
+    grep -q '^  \.templates/' <<< "$_pol_out" && rc=1
+else
+    echo "  neither Docker Compose nor Python 3 here — skipped"
+fi
+
 [[ $rc -eq 0 ]] && echo "lint: clean" || echo "lint: problems found"
 exit $rc

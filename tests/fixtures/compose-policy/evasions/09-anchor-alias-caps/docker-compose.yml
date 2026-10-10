@@ -1,0 +1,5 @@
+x-caps: &caps [SYS_ADMIN]
+services:
+  app:
+    image: alpine:3
+    cap_add: *caps

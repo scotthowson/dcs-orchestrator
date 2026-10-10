@@ -1,0 +1,426 @@
+{
+  "version": 1,
+  "_about": [
+    "What a compose file may ask of the host: the exceptions DCS ships (docs/SECURITY.md, 'Compose policy').",
+    "Every compose file DCS writes or starts is judged by .lib/compose-policy.jq. A finding is refused (root on the host",
+    "in all but name) or warned. An entry below allows the rules it names for an image (by prefix: 'netdata/netdata'",
+    "matches netdata/netdata:stable) or a stack, optionally only for a service name; '*' in a rule matches anything.",
+    "An allowed refusal is still reported as a warning, an allowed warning is listed as allowed. This server's own",
+    "entries go in .data/compose-policy.local.json (GET/PUT /config/compose-policy), never in this file: an update",
+    "replaces it. An image allowed here is trusted not to be pointed elsewhere: its entrypoint and command are not judged."
+  ],
+  "devices": {
+    "ignore": [
+      "/dev/null",
+      "/dev/zero",
+      "/dev/full",
+      "/dev/random",
+      "/dev/urandom",
+      "/dev/tty",
+      "/dev/console",
+      "/dev/stdin",
+      "/dev/stdout",
+      "/dev/stderr",
+      "/dev/shm",
+      "/dev/shm/*"
+    ],
+    "warn": [
+      "/dev/dri",
+      "/dev/dri/*",
+      "/dev/kfd",
+      "/dev/nvidia*",
+      "/dev/nvidia-caps",
+      "/dev/nvidia-caps/*",
+      "/dev/ttyUSB*",
+      "/dev/ttyACM*",
+      "/dev/ttyAMA*",
+      "/dev/ttyS*",
+      "/dev/serial/by-id/*",
+      "/dev/serial/by-path/*",
+      "/dev/hidraw*",
+      "/dev/usb/hiddev*",
+      "/dev/net/tun",
+      "/dev/snd",
+      "/dev/snd/*",
+      "/dev/video*",
+      "/dev/media*",
+      "/dev/dvb",
+      "/dev/dvb/*",
+      "/dev/bus/usb",
+      "/dev/bus/usb/*",
+      "/dev/apex_*",
+      "/dev/accel/*",
+      "/dev/ppp",
+      "/dev/fuse",
+      "/dev/kvm",
+      "/dev/vhost-net",
+      "/dev/uinput",
+      "/dev/input/*",
+      "/dev/gpiomem",
+      "/dev/i2c-*",
+      "/dev/sg*",
+      "/dev/sr*"
+    ]
+  },
+  "allow": [
+    {
+      "image": "tecnativa/docker-socket-proxy",
+      "rules": [
+        "docker-socket:ro"
+      ],
+      "reason": "the socket proxy is the safe way to the Docker API: it holds the socket so the apps behind it do not"
+    },
+    {
+      "image": "lscr.io/linuxserver/socket-proxy",
+      "rules": [
+        "docker-socket:ro"
+      ],
+      "reason": "the socket proxy is the safe way to the Docker API: it holds the socket so the apps behind it do not"
+    },
+    {
+      "image": "wollomatic/socket-proxy",
+      "rules": [
+        "docker-socket:ro"
+      ],
+      "reason": "the socket proxy is the safe way to the Docker API: it holds the socket so the apps behind it do not"
+    },
+    {
+      "image": "portainer/portainer-ce",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Portainer manages Docker: the Docker API is what it is for"
+    },
+    {
+      "image": "portainer/portainer-ee",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Portainer manages Docker: the Docker API is what it is for"
+    },
+    {
+      "image": "portainer/agent",
+      "rules": [
+        "docker-socket:rw",
+        "bind:/var/lib/docker/volumes:rw"
+      ],
+      "reason": "the Portainer agent manages this machine's Docker for a Portainer elsewhere"
+    },
+    {
+      "image": "containrrr/watchtower",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Watchtower recreates containers on new images: it needs the Docker API"
+    },
+    {
+      "image": "nickfedor/watchtower",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Watchtower recreates containers on new images: it needs the Docker API"
+    },
+    {
+      "image": "acouvreur/sablier",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Sablier starts and stops the on-demand containers: it needs the Docker API"
+    },
+    {
+      "image": "sablierapp/sablier",
+      "rules": [
+        "docker-socket:rw"
+      ],
+      "reason": "Sablier starts and stops the on-demand containers: it needs the Docker API"
+    },
+    {
+      "image": "ghcr.io/pelican-dev/wings",
+      "rules": [
+        "privileged",
+        "docker-socket:rw"
+      ],
+      "reason": "Pelican Wings runs the game servers as containers of its own (its documented setup: privileged, with the Docker API)"
+    },
+    {
+      "image": "ghcr.io/pterodactyl/wings",
+      "rules": [
+        "privileged",
+        "docker-socket:rw"
+      ],
+      "reason": "Pterodactyl Wings runs the game servers as containers of its own (its documented setup: privileged, with the Docker API)"
+    },
+    {
+      "image": "netdata/netdata",
+      "rules": [
+        "bind:/proc:ro",
+        "bind:/sys:ro",
+        "bind:/etc/os-release:ro",
+        "cap:SYS_ADMIN",
+        "cap:SYS_PTRACE",
+        "security_opt:apparmor=unconfined",
+        "docker-socket:ro"
+      ],
+      "reason": "Netdata measures the host: /proc and /sys read-only, and its collectors need SYS_PTRACE and SYS_ADMIN with AppArmor off (Netdata's own install instructions)"
+    },
+    {
+      "image": "gcr.io/cadvisor/cadvisor",
+      "rules": [
+        "privileged",
+        "bind:/:ro",
+        "bind:/sys:ro",
+        "bind:/var/lib/docker*:ro",
+        "docker-socket:ro",
+        "device:/dev/disk",
+        "device:/dev/kmsg"
+      ],
+      "reason": "cAdvisor measures every container from the host's side (its documented setup: privileged, the host's files read-only)"
+    },
+    {
+      "image": "prom/node-exporter",
+      "rules": [
+        "bind:/:ro",
+        "pid:host",
+        "network:host"
+      ],
+      "reason": "the Prometheus node exporter measures the host itself: its file systems (read-only), its processes and its network"
+    },
+    {
+      "image": "quay.io/prometheus/node-exporter",
+      "rules": [
+        "bind:/:ro",
+        "pid:host",
+        "network:host"
+      ],
+      "reason": "the Prometheus node exporter measures the host itself: its file systems (read-only), its processes and its network"
+    },
+    {
+      "image": "mauricenino/dashdot",
+      "rules": [
+        "bind:/proc:ro",
+        "bind:/sys:ro",
+        "privileged"
+      ],
+      "reason": "dash. shows the host's processor, memory, disks and network: it reads /proc and /sys (read-only)"
+    },
+    {
+      "image": "nicolargo/glances",
+      "rules": [
+        "pid:host",
+        "network:host",
+        "bind:/proc:ro",
+        "bind:/sys:ro"
+      ],
+      "reason": "Glances shows the host's processes and network"
+    },
+    {
+      "image": "henrygd/beszel-agent",
+      "rules": [
+        "network:host",
+        "docker-socket:ro"
+      ],
+      "reason": "the Beszel agent measures the host's own network interfaces and its containers"
+    },
+    {
+      "image": "lscr.io/linuxserver/duplicati",
+      "rules": [
+        "bind:/:ro"
+      ],
+      "reason": "Duplicati backs up the host's files: it reads all of them (read-only)"
+    },
+    {
+      "image": "duplicati/duplicati",
+      "rules": [
+        "bind:/:ro"
+      ],
+      "reason": "Duplicati backs up the host's files: it reads all of them (read-only)"
+    },
+    {
+      "image": "ghcr.io/analogj/scrutiny",
+      "rules": [
+        "privileged",
+        "cap:SYS_ADMIN",
+        "cap:SYS_RAWIO",
+        "device:*"
+      ],
+      "reason": "Scrutiny reads the S.M.A.R.T. health of every disk: raw access to the disks is the job"
+    },
+    {
+      "image": "tailscale/tailscale",
+      "rules": [
+        "network:host",
+        "cap:NET_ADMIN",
+        "cap:SYS_MODULE",
+        "device:/dev/net/tun"
+      ],
+      "reason": "Tailscale joins the host itself to the tailnet: its network, a tunnel device and the WireGuard module"
+    },
+    {
+      "image": "ghcr.io/tailscale/tailscale",
+      "rules": [
+        "network:host",
+        "cap:NET_ADMIN",
+        "cap:SYS_MODULE",
+        "device:/dev/net/tun"
+      ],
+      "reason": "Tailscale joins the host itself to the tailnet: its network, a tunnel device and the WireGuard module"
+    },
+    {
+      "image": "ghcr.io/wg-easy/wg-easy",
+      "rules": [
+        "cap:NET_ADMIN",
+        "cap:SYS_MODULE",
+        "device:/dev/net/tun",
+        "sysctl:*"
+      ],
+      "reason": "a WireGuard server: it sets up the tunnel (NET_ADMIN, the WireGuard module) and routes for its clients"
+    },
+    {
+      "image": "lscr.io/linuxserver/wireguard",
+      "rules": [
+        "cap:NET_ADMIN",
+        "cap:SYS_MODULE",
+        "device:/dev/net/tun",
+        "sysctl:*"
+      ],
+      "reason": "a WireGuard server or client: it sets up the tunnel (NET_ADMIN, the WireGuard module)"
+    },
+    {
+      "image": "linuxserver/wireguard",
+      "rules": [
+        "cap:NET_ADMIN",
+        "cap:SYS_MODULE",
+        "device:/dev/net/tun",
+        "sysctl:*"
+      ],
+      "reason": "a WireGuard server or client: it sets up the tunnel (NET_ADMIN, the WireGuard module)"
+    },
+    {
+      "image": "qmcgaw/gluetun",
+      "rules": [
+        "cap:NET_ADMIN",
+        "device:/dev/net/tun"
+      ],
+      "reason": "Gluetun is a VPN client: it makes a tunnel and the firewall around it"
+    },
+    {
+      "image": "ghcr.io/qdm12/gluetun",
+      "rules": [
+        "cap:NET_ADMIN",
+        "device:/dev/net/tun"
+      ],
+      "reason": "Gluetun is a VPN client: it makes a tunnel and the firewall around it"
+    },
+    {
+      "image": "pihole/pihole",
+      "rules": [
+        "cap:NET_ADMIN",
+        "network:host"
+      ],
+      "reason": "Pi-hole's DHCP server needs NET_ADMIN (and the host's network to answer DHCP on the LAN)"
+    },
+    {
+      "image": "crowdsecurity/cs-firewall-bouncer",
+      "rules": [
+        "network:host",
+        "cap:NET_ADMIN",
+        "cap:NET_RAW"
+      ],
+      "reason": "the CrowdSec firewall bouncer writes the host's firewall rules"
+    },
+    {
+      "image": "ghcr.io/shgew/cs-firewall-bouncer-docker",
+      "rules": [
+        "network:host",
+        "cap:NET_ADMIN",
+        "cap:NET_RAW"
+      ],
+      "reason": "the CrowdSec firewall bouncer writes the host's firewall rules"
+    },
+    {
+      "image": "lscr.io/linuxserver/plex",
+      "rules": [
+        "network:host",
+        "device:/dev/dri*"
+      ],
+      "reason": "Plex finds its players on the LAN (GDM discovery, DLNA) on the host's network, and transcodes on the graphics card"
+    },
+    {
+      "image": "plexinc/pms-docker",
+      "rules": [
+        "network:host",
+        "device:/dev/dri*"
+      ],
+      "reason": "Plex finds its players on the LAN (GDM discovery, DLNA) on the host's network, and transcodes on the graphics card"
+    },
+    {
+      "image": "jellyfin/jellyfin",
+      "rules": [
+        "network:host",
+        "device:/dev/dri*"
+      ],
+      "reason": "Jellyfin's DLNA and client discovery work on the host's network; it transcodes on the graphics card"
+    },
+    {
+      "image": "lscr.io/linuxserver/jellyfin",
+      "rules": [
+        "network:host",
+        "device:/dev/dri*"
+      ],
+      "reason": "Jellyfin's DLNA and client discovery work on the host's network; it transcodes on the graphics card"
+    },
+    {
+      "image": "lscr.io/linuxserver/emby",
+      "rules": [
+        "network:host",
+        "device:/dev/dri*"
+      ],
+      "reason": "Emby's DLNA and client discovery work on the host's network; it transcodes on the graphics card"
+    },
+    {
+      "image": "homeassistant/home-assistant",
+      "rules": [
+        "network:host"
+      ],
+      "reason": "Home Assistant discovers devices on the LAN (mDNS, SSDP, Bluetooth): its documented setup is the host's network"
+    },
+    {
+      "image": "ghcr.io/home-assistant/home-assistant",
+      "rules": [
+        "network:host"
+      ],
+      "reason": "Home Assistant discovers devices on the LAN (mDNS, SSDP, Bluetooth): its documented setup is the host's network"
+    },
+    {
+      "image": "lscr.io/linuxserver/homeassistant",
+      "rules": [
+        "network:host"
+      ],
+      "reason": "Home Assistant discovers devices on the LAN (mDNS, SSDP, Bluetooth): its documented setup is the host's network"
+    },
+    {
+      "image": "photoprism/photoprism",
+      "rules": [
+        "security_opt:seccomp=unconfined",
+        "security_opt:apparmor=unconfined"
+      ],
+      "reason": "PhotoPrism's own compose file turns seccomp and AppArmor off (its TensorFlow and video tools need it)"
+    },
+    {
+      "image": "mariadb",
+      "service": "photoprism-db",
+      "rules": [
+        "security_opt:seccomp=unconfined",
+        "security_opt:apparmor=unconfined"
+      ],
+      "reason": "the database of PhotoPrism's own compose file runs with seccomp and AppArmor off"
+    },
+    {
+      "image": "lscr.io/linuxserver/webtop",
+      "rules": [
+        "security_opt:seccomp=unconfined"
+      ],
+      "reason": "Webtop is a desktop in the browser: the sandboxes of the browsers in it need system calls Docker's default profile blocks"
+    }
+  ]
+}
