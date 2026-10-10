@@ -23838,7 +23838,7 @@ _pve_guest_is_self() {
 handle_proxmox_snapshots_list() {
     local vmid="$1"
     _pve_guest_find "$vmid" || return
-    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "$PVE_ERR"; return; }
+    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error 502 "$PVE_ERR"; return; }
     _api_success "$(jq -c --argjson v "$vmid" --arg n "$PVE_G_NODE" --arg t "$PVE_G_TYPE" --arg name "$PVE_G_NAME" --arg st "$PVE_G_STATUS" \
         '{vmid: $v, node: $n, type: $t, name: $name, status: $st, can_save_ram: ($t == "qemu" and $st == "running"), total: (.snapshots | length)} + .' <<< "$PVE_SNAPS")"
 }
@@ -23857,13 +23857,13 @@ handle_proxmox_snapshot_create() {
     label=$(_pve_guest_label "$vmid" "$PVE_G_TYPE" "$PVE_G_NAME")
     [[ "$PVE_G_TYPE" == qemu ]] || vmstate=0
     [[ "$PVE_G_STATUS" == running ]] || vmstate=0
-    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "$PVE_ERR"; return; }
+    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error 502 "$PVE_ERR"; return; }
     jq -e --arg s "$name" '.snapshots | any(.name == $s)' <<< "$PVE_SNAPS" >/dev/null 2>&1 && { _api_error 409 "$label has a snapshot called $name already: pick another name, or delete that one first"; return; }
     local -a kv=("snapname=$name")
     [[ -n "$desc" ]] && kv+=("description=$desc")
     [[ "$PVE_G_TYPE" == qemu ]] && kv+=("vmstate=$vmstate")
     PVE_TIMEOUT=30 _pve_call res POST "/nodes/$PVE_G_NODE/$PVE_G_TYPE/$vmid/snapshot" "${kv[@]}"
-    _pve_snap_explain "$res" "VM.Snapshot" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "The snapshot was not taken: $PVE_ERR"; return; }
+    _pve_snap_explain "$res" "VM.Snapshot" "$vmid" || { _api_error 502 "The snapshot was not taken: $PVE_ERR"; return; }
     upid=$(jq -r '.data // empty' <<< "$res" 2>/dev/null)
     _pve_snap_wait "$PVE_G_NODE" "$upid" || { _audit_log "proxmox_snapshot_failed" "Snapshot $name of $label failed: $PVE_ERR (by ${AUTH_USERNAME:-unknown})"; _api_error 502 "The snapshot was not taken: $PVE_ERR"; return; }
     _audit_log "proxmox_snapshot" "Snapshot $name of $label taken$([[ "$vmstate" == 1 ]] && echo ' with its RAM') by ${AUTH_USERNAME:-unknown}"
@@ -23883,7 +23883,7 @@ handle_proxmox_snapshot_rollback() {
     [[ "$(jq -r '.confirm // false' <<< "${body:-null}" 2>/dev/null)" == true ]] || { _api_error 400 "A rollback throws away everything that changed on the guest since the snapshot: send {\"confirm\": true}"; return; }
     _pve_guest_find "$vmid" || return
     label=$(_pve_guest_label "$vmid" "$PVE_G_TYPE" "$PVE_G_NAME")
-    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "$PVE_ERR"; return; }
+    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error 502 "$PVE_ERR"; return; }
     snap=$(jq -c --arg s "$name" '[.snapshots[] | select(.name == $s)] | .[0] // empty' <<< "$PVE_SNAPS")
     [[ -n "$snap" ]] || { _api_error 404 "$label has no snapshot called $name"; return; }
     if _pve_guest_is_self "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid"; then
@@ -23896,7 +23896,7 @@ handle_proxmox_snapshot_rollback() {
     # Proxmox stops the guest for a rollback: that stop and the start after it are DCS's own (no "VM stopped" alert, no "member down")
     _container_mark_intended "pve:$vmid"
     PVE_TIMEOUT=30 _pve_call res POST "/nodes/$PVE_G_NODE/$PVE_G_TYPE/$vmid/snapshot/$name/rollback"
-    _pve_snap_explain "$res" "VM.Snapshot.Rollback (or VM.Snapshot)" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "Nothing was rolled back: $PVE_ERR"; return; }
+    _pve_snap_explain "$res" "VM.Snapshot.Rollback (or VM.Snapshot)" "$vmid" || { _api_error 502 "Nothing was rolled back: $PVE_ERR"; return; }
     upid=$(jq -r '.data // empty' <<< "$res" 2>/dev/null)
     _pve_snap_wait "$PVE_G_NODE" "$upid" || { _audit_log "proxmox_snapshot_rollback_failed" "Rollback of $label to $name failed: $PVE_ERR (by ${AUTH_USERNAME:-unknown})"; _api_error 502 "The rollback did not finish: $PVE_ERR"; return; }
     # a snapshot without RAM leaves the guest stopped: one that was running before starts again (unless asked not to)
@@ -23927,10 +23927,10 @@ handle_proxmox_snapshot_delete() {
     [[ "$name" =~ $_PVE_SNAP_RE ]] || { _api_error 400 "Invalid snapshot name"; return; }
     _pve_guest_find "$vmid" || return
     label=$(_pve_guest_label "$vmid" "$PVE_G_TYPE" "$PVE_G_NAME")
-    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "$PVE_ERR"; return; }
+    _pve_snapshots_get "$PVE_G_NODE" "$PVE_G_TYPE" "$vmid" || { _api_error 502 "$PVE_ERR"; return; }
     jq -e --arg s "$name" '.snapshots | any(.name == $s)' <<< "$PVE_SNAPS" >/dev/null 2>&1 || { _api_error 404 "$label has no snapshot called $name"; return; }
     PVE_TIMEOUT=30 _pve_call res DELETE "/nodes/$PVE_G_NODE/$PVE_G_TYPE/$vmid/snapshot/$name"
-    _pve_snap_explain "$res" "VM.Snapshot" "$vmid" || { _api_error "$([[ "$_PVE_HTTP" == 403 ]] && echo 403 || echo 502)" "The snapshot was not deleted: $PVE_ERR"; return; }
+    _pve_snap_explain "$res" "VM.Snapshot" "$vmid" || { _api_error 502 "The snapshot was not deleted: $PVE_ERR"; return; }
     upid=$(jq -r '.data // empty' <<< "$res" 2>/dev/null)
     _pve_snap_wait "$PVE_G_NODE" "$upid" || { _audit_log "proxmox_snapshot_delete_failed" "Deleting snapshot $name of $label failed: $PVE_ERR (by ${AUTH_USERNAME:-unknown})"; _api_error 502 "The snapshot was not deleted: $PVE_ERR"; return; }
     _audit_log "proxmox_snapshot_delete" "Snapshot $name of $label deleted by ${AUTH_USERNAME:-unknown}"

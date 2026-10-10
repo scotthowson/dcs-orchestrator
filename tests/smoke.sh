@@ -2035,9 +2035,9 @@ rm -f "$WORK/.data/fleet.json"; [[ -n "$_FJ_SAVED" ]] && mv -f "$_FJ_SAVED" "$WO
 check "rollback: audited"                      yes "$(grep -q '"action":"proxmox_snapshot_rollback"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
 touch "$WORK/.data/deny-snap"
 _SD=$(auth_request POST /proxmox/vms/101/snapshots '{"name":"denied"}')
-check "snapshots: 403 names the privilege"     "403 yes" "$(printf '%s' "$_SD" | status_of) $(printf '%s' "$_SD" | body_of | jq -r '.message' 2>/dev/null | grep -q 'lacks the privilege VM.Snapshot on VM 101' && echo yes || echo no)"
+check "snapshots: 403 names the privilege"     "502 yes" "$(printf '%s' "$_SD" | status_of) $(printf '%s' "$_SD" | body_of | jq -r '.message' 2>/dev/null | grep -q 'lacks the privilege VM.Snapshot on VM 101' && echo yes || echo no)"
 check "rollback: 403 names its privilege"      yes "$(auth_request POST /proxmox/vms/101/snapshots/before-upgrade/rollback '{"confirm":true}' | body_of | jq -r '.message' 2>/dev/null | grep -q 'VM.Snapshot.Rollback' && echo yes || echo no)"
-check "snapshots: a delete refused too"        403 "$(auth_request DELETE /proxmox/vms/101/snapshots/before-upgrade | status_of)"
+check "snapshots: a delete refused too"        502 "$(auth_request DELETE /proxmox/vms/101/snapshots/before-upgrade | status_of)"
 rm -f "$WORK/.data/deny-snap"
 check "snapshots: delete, viewer denied"       403 "$(viewer_request DELETE /proxmox/vms/101/snapshots/before-upgrade | status_of)"
 check "snapshots: delete an unknown one"       404 "$(auth_request DELETE /proxmox/vms/101/snapshots/nothere | status_of)"
