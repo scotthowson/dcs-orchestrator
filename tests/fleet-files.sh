@@ -799,6 +799,14 @@ check "rollback (start): the VM's stack again"      "web " "$(_placed) $(_hubds)
 check "rollback (start): no container on the hub"   0 "$(ls "$DKH/containers/web" 2>/dev/null | wc -l)"
 check "rollback (start): the hub's own data is back" "stale old" "$(cat "$H2/Stacks/web/App-Data/www/index.html" 2>/dev/null) $(cat "$DKH/volumes/web_webdata/_data/old" 2>/dev/null)"
 rm -f "$DKH/fail-up"
+# a compose file the policy refuses: the hub starts nothing from the VM and nothing stops there
+sleep 1; cp -f "$M2/Stacks/web/docker-compose.yml" "$F2/web-compose.keep"
+jq -c '.services.web.privileged = true' "$F2/web-compose.keep" > "$M2/Stacks/web/docker-compose.yml"
+J=$(hub2 POST "$MV" '{"confirm":true}' | jq -r '.job // empty')
+check "policy: a privileged stack fails at its files"  "failed files" "$(_job_wait "$J") $(hub2 GET "/fleet/jobs/$J" | jq -r '[.steps[] | select(.state == "failed") | .id] | join(",")' 2>/dev/null)"
+check "policy: the job says the policy refused it"     yes "$(hub2 GET "/fleet/jobs/$J" | jq -r '.error' 2>/dev/null | grep -q 'compose policy refuses' && echo yes || echo no)"
+check "policy: the VM still runs it, its stack"        "running web web " "$(cat "$DKV/containers/web/web" 2>/dev/null) $(sed -n 's/^DOCKER_STACKS="\(.*\)"/\1/p' "$M2/.env") $(_placed) $(_hubds)"
+cp -f "$F2/web-compose.keep" "$M2/Stacks/web/docker-compose.yml"
 # the move itself
 sleep 1
 R=$(curl -s -m 90 -w '\n%{http_code}' -X POST "http://127.0.0.1:$HP2$MV" -H "Authorization: Bearer $HT2" -H 'Content-Type: application/json' -d '{"confirm":true,"start":true}')
