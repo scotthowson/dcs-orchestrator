@@ -1122,7 +1122,7 @@ handle_technitium_oui_update() {
 # PUT /dns/technitium/devices/{id} — Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it)}
 handle_technitium_device_update() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
-    local id="$1" body d now bad ip mac scope need_apply=0 model gid sync warn="" what=()
+    local id="$1" body d now bad ip mac scope need_apply=0 model gid sync warn="" did=()
     _tt_body "${2:-}" || return; body="$TT_REQ"
     d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' <<< "$(_tt_dir)")
     [[ -n "$d" ]] || { _api_error 404 "No device $id: scan the network, or it was forgotten"; return; }
@@ -1167,10 +1167,10 @@ handle_technitium_device_update() {
                 [[ -n "$hn" ]] && rargs+=("hostName=$hn")
                 _tt_api primary dhcp/scopes/addReservedLease "${rargs[@]}" || { _api_error 502 "$TT_ERR"; return; }
             fi
-            what+=("reserved $ip in $scope")
+            did+=("reserved $ip in $scope")
         elif [[ -n "$cur" ]]; then
             _tt_api primary dhcp/scopes/removeReservedLease "name=$scope" "hardwareAddress=$(_tt_mac_dash "$mac")" || { _api_error 502 "$TT_ERR"; return; }
-            what+=("reservation removed")
+            did+=("reservation removed")
         fi
     fi
     # the directory's own fields
@@ -1183,9 +1183,9 @@ handle_technitium_device_update() {
               + (if $b | has("blocked_until") then {blocked_until: $b.blocked_until} else {} end)
               + {sources: ((.sources // {}) + {manual: $now})} end)' || { _api_error 500 "Could not write $TT_DEVICES"; return; }
     d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' "$TT_DEVICES")
-    jq -e 'has("nickname")' >/dev/null <<< "$body" && what+=("nickname $(jq -r '.nickname // "cleared"' <<< "$d")")
-    jq -e 'has("icon")' >/dev/null <<< "$body" && what+=("icon $(jq -r .icon <<< "$d")")
-    jq -e 'has("notes")' >/dev/null <<< "$body" && what+=("notes")
+    jq -e 'has("nickname")' >/dev/null <<< "$body" && did+=("nickname $(jq -r '.nickname // "cleared"' <<< "$d")")
+    jq -e 'has("icon")' >/dev/null <<< "$body" && did+=("icon $(jq -r .icon <<< "$d")")
+    jq -e 'has("notes")' >/dev/null <<< "$body" && did+=("notes")
     # its kids' group: out of every group (by id or address), into the one asked for
     if jq -e 'has("group_id")' >/dev/null <<< "$body"; then
         model=$(jq -c --argjson d "$d" --arg g "$gid" '
@@ -1193,16 +1193,16 @@ handle_technitium_device_update() {
             | if $g == "" then . else .groups |= map(if .id == $g then .devices += [{ip: $d.ip, label: (($d.nickname // (($d.hostname // "") | split(".")[0]) // "") | .[0:40]),
                   mac: $d.mac, id: $d.id}] else . end) end' <<< "$model")
         _tt_model_save "$model" || { _api_error 500 "Could not write $TT_GROUPS"; return; }
-        need_apply=1; what+=("group ${gid:-none}")
+        need_apply=1; did+=("group ${gid:-none}")
     fi
     if jq -e 'has("blocked_until")' >/dev/null <<< "$body"; then
         need_apply=1
-        what+=("$(jq -r 'if .blocked_until == null then "block lifted" else "blocked until \(.blocked_until | todate)" end' <<< "$body")")
+        did+=("$(jq -r 'if .blocked_until == null then "block lifted" else "blocked until \(.blocked_until | todate)" end' <<< "$body")")
     fi
     if (( need_apply == 1 )); then
         _tt_groups_apply "${AUTH_USERNAME:-}" || warn="Saved in DCS, but Technitium did not take it: $TT_APPLY_MSG (it is tried again by the minute clock)"
     fi
-    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "$(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id): ${what[*]:-nothing}"
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "$(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id): ${did[*]:-nothing}"
     sync=null; (( need_apply == 1 )) && [[ -z "$warn" ]] && sync=$(_tt_after_write)
     _api_cache_clear 2>/dev/null || true
     _api_success "$(jq -nc --argjson d "$d" --argjson sync "${sync:-null}" --arg w "$warn" --argjson m "$(_tt_model)" '
