@@ -110,6 +110,7 @@ doc_path() {
         "/export/*")                    p="/export/{health|system|config}" ;;
         "/fleet/members/*/api/*")       p="/fleet/members/{id}/api/{path}" ;;
         "/fleet/members/*/backups/*/download") p="/fleet/members/{id}/backups/{file}/download" ;;
+        "/fleet/members/*/stacks/*"*)   p="${p/\*/\{id\}}"; p="${p/\*/\{stack\}}" ;;
         "/fleet/members/*"*)            p="${p/\*/\{id\}}" ;;
         "/fleet/jobs/*"*)               p="${p/\*/\{id\}}" ;;
         "/fleet/templates/*")           p="/fleet/templates/{vmid}" ;;

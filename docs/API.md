@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `442` in total.
+Every endpoint below is `444` in total.
 
 ## Access levels
 
@@ -570,6 +570,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/fleet/members/{id}/api/{path}` | admin | Forward the call (GET, POST, PUT or DELETE) to that member with the hub's account; the caller's own role is checked against the inner path as if it were local (streams and auth are not forwarded) |
 | POST | `/fleet/members/{id}/backups/upload` | admin | Upload a backup archive into a VM's BACKUP_DEST_DIR through the hub (the body and ?filename= as POST /backups/upload takes them): streamed on to the VM as it arrives, nothing of it kept on the hub; the VM's limit and free room are asked first, and the VM checks it as it checks its own uploads |
 | POST | `/fleet/members/{id}/folders` | admin | Share a folder of the Proxmox host with a VM {name, path?, mount?, readonly?, restart?}: the mapping on Proxmox (made from path when name is new), the virtiofs device on the VM, a restart of the VM when it runs (restart: false leaves that to you), the mount in the VM (default /mnt/<name>) and a restart of the stacks that already name the folder. Answers at once (202); GET …/folders?op=1 follows the steps |
+| POST | `/fleet/members/{id}/stacks/{stack}/move-to-hub/preflight` | admin | What moving a VM's stack back to the hub would take, checked on both sides without changing anything: the hub's free ports, cores, memory and disk for its data, its images, folders, devices and secrets, whether the hub runs it already, its routes; {movable, checks: [{id, label, state: ok\|warn\|fail, detail}], …} (admin) |
+| POST | `/fleet/members/{id}/stacks/{stack}/move-to-hub` | admin | Move a VM's stack back to the hub with its data {confirm: true, start?: true}: checked first (409 with the preflight when something fails), then a job (GET /fleet/jobs/{id}) stops it in the VM, copies its App-Data and named volumes, brings its files and routes, lists and starts it on the hub and keeps the VM's copy as a backup for FLEET_MOVE_BACKUP_DAYS days; a failure starts it in the VM again (admin) |
 | POST | `/fleet/members/{id}/folders/*/mount` | admin | Mount a folder the VM was given, in the VM, now {mount?, readonly?}: the line in its /etc/fstab and the mount (after a VM that was off is started, or to change read-only); the stacks that name the folder are restarted |
 | POST | `/fleet/members/{id}/folders/*/use` | admin | Mount a folder the VM was given, in the VM, now {mount?, readonly?}: the line in its /etc/fstab and the mount (after a VM that was off is started, or to change read-only); the stacks that name the folder are restarted |
 | POST | `/power/sample` | admin | Read the UPS right now (also refreshes what GET /power shows) |

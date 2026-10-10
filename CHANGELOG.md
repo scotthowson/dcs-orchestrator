@@ -3,6 +3,31 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A VM's stack moves back to the hub, with its data** — the mirror of the move into a VM. *Move to the hub* on a VM
+  stack's detail (or the VM's menu on the Fleet page) shows the hub's preflight first, every check green, amber or red
+  with its reason: the VM and its folder reachable, the stack not on the hub already, its published ports free here, the
+  cores and memory its limits ask for, room for its data (`FLEET_MOVE_HUB_RESERVE_MB`), its images (pulled before
+  anything stops), the folders, devices and secrets it uses. Confirmed, a job stops it in the VM, copies its App-Data
+  and named volumes over the hub's ssh key (owners kept, counted on both sides), makes the hub's copy of its files the
+  VM's, moves its route files to the hub's proxy, lists it in the hub's `DOCKER_STACKS`, starts it and waits until its
+  containers run and the ones with a health check are healthy (`FLEET_MOVE_SETTLE_SECONDS`). Only then the VM lets go:
+  the stack leaves its `DOCKER_STACKS` and its folder is kept there as a backup with its named volumes for
+  `FLEET_MOVE_BACKUP_DAYS` (14), named in the job's result and removed by the hub afterwards. A failure before the
+  start leaves the VM as it was and starts the stack there again; a start on the hub that fails is undone in reverse
+  (the copy that came over set aside, the VM's routes back, the stack started in the VM). What the hub still had of
+  the stack from before it moved into the VM is set aside, never deleted. Audit: `fleet_stack_move_to_hub`,
+  `fleet_stack_moved_to_hub`, `fleet_stack_move_to_hub_failed`, `fleet_moved_pruned`.
+  API: `POST /fleet/members/{id}/stacks/{stack}/move-to-hub/preflight`, `POST /fleet/members/{id}/stacks/{stack}/move-to-hub`
+  `{confirm: true, start?: true}` (admin). Docs: [Proxmox guide](docs/PROXMOX.md#moving-a-vms-stack-back-to-the-hub).
+- Tests: `tests/fleet-files.sh` moves a stack between two real listeners with a Docker of their own each (stand-ins:
+  containers, volumes and their files): the preflight and its refusals (a port taken on the hub, no room, a stack the
+  hub lists already), the two ways back (a copy that breaks off, a start that fails), the move, and the expiry of the
+  VM's copy; `tests/smoke.sh` the port check, the route policy and the VM side's arguments.
+
 ## [4.0.47] - 2026-10-09
 
 ### Fixed
