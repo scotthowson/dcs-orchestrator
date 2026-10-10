@@ -855,6 +855,51 @@ check "plugin added when missing"          1 "$(_lib _traefik_ensure_plugin sabl
 check "plugin declared under plugins:"     1 "$(grep -c 'github.com/acouvreur/sablier' "$_TAD/Traefik/traefik.yml")"
 check "plugin not added twice"             0 "$(_lib _traefik_ensure_plugin sablier github.com/acouvreur/sablier v1.7.0-beta.15; echo $?)"
 check "plugin yaml still parses"           ok "$(python3 -c "import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); print('ok' if 'sablier' in d['experimental']['plugins'] else 'bad')" "$_TAD/Traefik/traefik.yml" 2>/dev/null || echo ok)"
+
+echo "Maintenance mode per route (a Traefik router in custom_routes/dcs-maintenance, the public 503 page)"
+_MR="$WORK/Stacks/zz-proxy/App-Data/Traefik/custom_routes"; _MF="$_MR/dcs-maintenance/tools.example.test.yml"
+_mroutes() { command rm -f "$WORK/.data/cache/"*.http; auth_request GET /routes | body_of; }
+check "maint: none at first"                 '{}' "$(auth_request GET /routes/maintenance | body_of | jq -c '.routes' 2>/dev/null)"
+check "maint: the routes list says off"      false "$(_mroutes | jq -r '.routes[] | select(.subdomain == "tools.example.test") | .maintenance' 2>/dev/null)"
+rm -f "$_MR/.reload"
+_MP=$(auth_request PUT /routes/tools.example.test/maintenance '{"on":true,"message":"Upgrading the <db> & co"}')
+check "maint: on"                            "200 true" "$(status_of <<< "$_MP") $(body_of <<< "$_MP" | jq -r '.on' 2>/dev/null)"
+check "maint: …answers the message and since" yes "$(body_of <<< "$_MP" | jq -e '.message == "Upgrading the <db> & co" and (.since | type == "string") and .id == "tools.example.test"' >/dev/null 2>&1 && echo yes || echo no)"
+check "maint: the file is written"           yes "$([[ -f "$_MF" ]] && echo yes || echo no)"
+check "maint: …its router: the host, a high priority, the path middleware" 'Host("tools.example.test") 100000 /maintenance/tools.example.test' \
+    "$(jq -r '.http as $h | ($h.routers | to_entries[0].value) as $r | "\($r.rule) \($r.priority) \($h.middlewares[$r.middlewares[0]].replacePath.path)"' "$_MF" 2>/dev/null)"
+check "maint: …no dashboard route here: a service of its own to this API" "http://*:9876 no-tls" \
+    "$(jq -r '.http as $h | ($h.routers | to_entries[0].value) as $r | "\($h.services[$r.service].loadBalancer.servers[0].url | sub("//[^:]*:"; "//*:")) \(if $r.tls then "tls" else "no-tls" end)"' "$_MF" 2>/dev/null)"
+check "maint: …Traefik is told"              yes "$([[ -f "$_MR/.reload" ]] && echo yes || echo no)"
+check "maint: …never read back as a route"   1 "$(_mroutes | jq '[.routes[] | select(.subdomain == "tools.example.test")] | length' 2>/dev/null)"
+check "maint: the routes list says on"       true "$(_mroutes | jq -r '.routes[] | select(.subdomain == "tools.example.test") | .maintenance' 2>/dev/null)"
+check "maint: GET /routes/maintenance"       '{"on":true,"message":"Upgrading the <db> & co"}' "$(auth_request GET /routes/maintenance | body_of | jq -c '.routes["tools.example.test"] | {on, message}' 2>/dev/null)"
+check "maint: audited"                       1 "$(grep -c '"action":"route_maintenance","detail":"tools.example.test maintenance on' "$WORK/.data/audit.jsonl" 2>/dev/null)"
+_MPG=$(request GET /maintenance/tools.example.test '' "${AUTH[@]}" | tr -d '\r')
+check "maint page: 503 without signing in"   503 "$(status_of <<< "$_MPG")"
+check "maint page: Retry-After, no-store, HTML" "Content-Type: text/html; charset=utf-8|Retry-After: 300|Cache-Control: no-store" \
+    "$(grep -E '^(Retry-After|Cache-Control|Content-Type):' <<< "$_MPG" | paste -sd'|')"
+check "maint page: the name and the message, escaped" yes "$(grep -q 'Tools is back soon' <<< "$_MPG" && grep -qF 'Upgrading the &lt;db&gt; &amp; co' <<< "$_MPG" && echo yes || echo no)"
+check "maint page: no script, no version, no API header" "0 0 0" "$(grep -ci '<script' <<< "$_MPG") $(grep -cF "$(cat "$WORK/VERSION")" <<< "$_MPG") $(grep -ci '^X-API-Version' <<< "$_MPG")"
+check "maint page: 404 for a route not in maintenance" 404 "$(request GET /maintenance/other.example.test '' "${AUTH[@]}" | status_of)"
+check "maint page: GET only"                 405 "$(request POST /maintenance/tools.example.test '{}' "${AUTH[@]}" | status_of)"
+check "maint: the list needs a session"      "401 401" "$(request GET /routes/maintenance '' "${AUTH[@]}" | status_of) $(request GET /routes '' "${AUTH[@]}" | status_of)"
+check "maint: /maintenance/report still needs one" 401 "$(request GET /maintenance/report '' "${AUTH[@]}" | status_of)"
+check "maint: a viewer cannot toggle"        403 "$(viewer_request PUT /routes/tools.example.test/maintenance '{"on":false}' | status_of)"
+check "maint: on is required"                400 "$(auth_request PUT /routes/tools.example.test/maintenance '{"message":"x"}' | status_of)"
+check "maint: a bad id"                      400 "$(auth_request PUT /routes/a..b.test/maintenance '{"on":true}' | status_of)"
+check "maint: no route serves the host"      404 "$(auth_request PUT /routes/nobody.example.test/maintenance '{"on":true}' | status_of)"
+# behind the dashboard's route, the router borrows its service (nginx passes /api/* here) and copies the route's TLS
+printf 'http:\n  routers:\n    dcs-ui-router:\n      rule: "Host(`ui.example.test`)"\n      service: "dcs-ui"\n      tls:\n        certResolver: "letsencrypt"\n  services:\n    dcs-ui:\n      loadBalancer:\n        servers:\n          - url: "http://DCS-UI:3000"\n' > "$_MR/core-infrastructure/dcs-ui.yml"
+auth_request PUT /routes/ui.example.test/maintenance '{"on":true}' >/dev/null
+check "maint: through the dashboard's service, TLS like the route" "dcs-ui@file /api/maintenance/ui.example.test letsencrypt null" \
+    "$(jq -r '.http as $h | ($h.routers | to_entries[0].value) as $r | "\($r.service) \($h.middlewares[$r.middlewares[0]].replacePath.path) \($r.tls.certResolver) \($h.services)"' "$_MR/dcs-maintenance/ui.example.test.yml" 2>/dev/null)"
+_MP=$(auth_request PUT /routes/tools.example.test/maintenance '{"on":false}')
+check "maint: off"                           "200 false" "$(status_of <<< "$_MP") $(body_of <<< "$_MP" | jq -r '.on' 2>/dev/null)"
+check "maint: …the file is gone, the message kept" "no Upgrading the <db> & co null" "$([[ -f "$_MF" ]] && echo yes || echo no) $(body_of <<< "$_MP" | jq -r '"\(.message) \(.since)"' 2>/dev/null)"
+check "maint page: 404 once off"             404 "$(request GET /maintenance/tools.example.test '' "${AUTH[@]}" | status_of)"
+check "maint: the routes list says off again" false "$(_mroutes | jq -r '.routes[] | select(.subdomain == "tools.example.test") | .maintenance' 2>/dev/null)"
+rm -rf "$_MR/dcs-maintenance" "$WORK/.data/maintenance.json" "$WORK/.data/maintenance.json.lock" "$_MR/core-infrastructure/dcs-ui.yml"
 sed -i 's/^DOCKER_STACKS=.*/DOCKER_STACKS="demo"/' "$WORK/.env"
 
 echo "Self-update: release channels, user files kept, rollback, restart method"

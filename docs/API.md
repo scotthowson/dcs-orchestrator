@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `444` in total.
+Every endpoint below is `447` in total.
 
 ## Access levels
 
@@ -243,6 +243,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/routes/health` | user | Probe every custom route through Traefik (no changes made) |
 | GET | `/traefik/status` | user | Traefik status |
 | GET | `/routes` | user | Routes |
+| GET | `/routes/maintenance` | user | Which routes are in maintenance: {routes: {<host>: {on, message, since}}} |
 | GET | `/routes/certificates` | user | Reverse-proxy health: domain, ACME challenge and account, certificates held, a live probe of every route through Traefik, the last Traefik errors, and hints |
 | GET | `/routes/check` | user | Check if a subdomain is available |
 | GET | `/dns/status` | user | Cloudflare integration: where the token comes from, whether it is valid, the zone |
@@ -259,6 +260,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/dns/records/sync` | admin | Create the proxied CNAME records that DCS routes are missing |
 | POST | `/routes/reconcile` | admin | Probe the routes and restart Traefik once if they are dead |
 | PUT | `/dns/records/*` | admin | Change a record's type, name, content, TTL, proxy status, priority or comment |
+| PUT | `/routes/{host}/maintenance` | admin | Turn maintenance on or off for a route {on, message?}: Traefik answers its host with a 503 holding page (admin) |
 | PUT | `/routes/{stack}/{service}` | admin | Update a route file's subdomain |
 | DELETE | `/homarr/key` | admin | Forget Homarr's API key (apps then land in the library only) |
 | DELETE | `/dns/records/*` | admin | Delete a record (the zone apex and names DCS routes use need force=true) |
@@ -359,6 +361,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
+| GET | `/maintenance/{host}` | public | The holding page Traefik shows for a route in maintenance: 503, no script, no version (public; 404 when the route is not in maintenance) |
 | GET | `/maintenance/report` | user | Docker disk usage report; ?fleet=1 on a hub adds the VMs' numbers up (totals) with members[] per DCS |
 | GET | `/maintenance/orphans` | user | Containers, volumes and networks no stack references (a game-server panel's containers are its own, never listed); ?fleet=1 on a hub lists every VM's too, each row tagged member, member_name, vmid |
 | GET | `/maintenance/disk` | user | Per-stack App-Data sizes, Docker disk usage and volume sizes; ?fleet=1 on a hub merges every VM's (stacks tagged, docker's table added up per type) |
