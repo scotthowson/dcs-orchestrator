@@ -27,6 +27,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - No false refusals: the ten shipped stacks pass without a warning and all 200 templates pass at their defaults; `tests/lint.sh`
   keeps it that way. Verdicts are cached by the hash of the file, its `.env` and the policy (`.data/compose-policy-cache.json`).
 
+### Added
+
+- **Containers a game-server panel made are the panel's.** Pelican Wings and Pterodactyl Wings create their servers outside compose,
+  named by UUID and labelled `Service=Pelican` / `Service=Pterodactyl`. `GET /containers` (and a container's detail) now says who
+  made each container: `owner` is `pelican`, `pterodactyl`, `dcs` (a `dcs.role` label or the core-infrastructure stack), `compose`
+  or `null`, and `owner_hint` names a panel's server by its image (`steamcmd:proton`), since its name is a UUID. Such a container is
+  never an orphan (`/maintenance/orphans`, `maintenance.sh orphans`), never removed by a prune (it is kept and said), never in the
+  "container stopped" automation for every container, never a "stopped on its own" alert or announcement when its panel turns it off,
+  and a turned-off one stays out of the health score; the topology names its panel (`owner`). Start, stop, restart and remove still
+  act on it, and answer with `warning: "managed by Pelican Wings; use the panel"`.
+
 ## [4.0.47] - 2026-10-09
 
 ### Fixed
