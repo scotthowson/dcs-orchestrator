@@ -340,7 +340,7 @@ TT_SYNC_MSG=""
 _tt_sync() {
     TT_SYNC_MSG=""
     _tt_configured secondary || { TT_SYNC_MSG="No secondary is connected"; return 0; }
-    local s set=() k v pa sa d ok=0 f
+    local s set=() k v pa sa d f
     _tt_sync_fail() { TT_SYNC_MSG="$1"; _tt_state_set --argjson at "$(date +%s)" --arg m "$1" '.last_sync = {at: $at, ok: false, message: $m}'; return 1; }
     _tt_api primary settings/get || { _tt_sync_fail "$TT_ERR"; return 1; }
     s=$(jq -c '.response' <<< "$TT_BODY")
@@ -377,9 +377,7 @@ _tt_sync() {
     _tt_forced_apply primary || { _tt_sync_fail "$TT_ERR"; return 1; }
     _tt_forced_apply secondary || { _tt_sync_fail "$TT_ERR"; return 1; }
     _tt_state_set --argjson at "$(date +%s)" '.last_sync = {at: $at, ok: true, message: "The secondary has what the primary has"}'
-    ok=1
     TT_SYNC_MSG="The secondary has what the primary has"
-    (( ok == 1 ))
 }
 
 # after a write: the secondary follows (the answer says how it went); the cached answers go
