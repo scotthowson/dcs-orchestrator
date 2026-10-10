@@ -334,10 +334,10 @@ cmd_orphans() {
 
     local found_orphans=false
 
-    # Orphaned containers (exited, not part of any compose project)
+    # Orphaned containers (exited, not part of any compose project); a game-server panel's (Pelican / Pterodactyl Wings) are its own
     echo "  ${_MT_BOLD}${_MT_CYAN}Orphaned Containers:${_MT_RESET}"
     local orphaned_containers
-    orphaned_containers="$(docker ps -a --filter 'status=exited' --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.CreatedAt}}' 2>/dev/null)"
+    orphaned_containers="$(docker ps -a --filter 'status=exited' --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.CreatedAt}}|{{.Label "Service"}}' 2>/dev/null | awk -F'|' '$5 != "Pelican" && $5 != "Pterodactyl"')"
 
     if [[ -n "$orphaned_containers" ]]; then
         found_orphans=true

@@ -158,7 +158,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
-| GET | `/containers` | user | All containers with state, health, ports and cached CPU/memory usage |
+| GET | `/containers` | user | All containers with state, health, ports, cached CPU/memory usage and who made each (owner: compose, dcs, pelican, pterodactyl or null; owner_hint names a game-server panel's container by its image) |
 | GET | `/containers/{container}/files` | admin | List directory contents inside a container |
 | GET | `/containers/{container}/files/content` | admin | Read file contents inside a container |
 | GET | `/containers/{container}/logs/live` | user | Fetch recent logs for polling |
@@ -170,11 +170,11 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/containers/{container}/processes` | user | Process list inside a container |
 | GET | `/containers/{container}/reset` | admin | Preview a nuke & reinstall: stack, service, image, App-Data folders that would be emptied (with sizes), named volumes, and folders kept because another container shares them |
 | GET | `/containers/{container}` | user | Container detail |
-| POST | `/containers/{container}/start` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container |
-| POST | `/containers/{container}/stop` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container |
-| POST | `/containers/{container}/restart` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container |
-| POST | `/containers/{container}/recreate` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container |
-| POST | `/containers/{container}/remove` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container |
+| POST | `/containers/{container}/start` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container; one a game-server panel made (Pelican, Pterodactyl) is done too, with a warning to use the panel |
+| POST | `/containers/{container}/stop` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container; one a game-server panel made (Pelican, Pterodactyl) is done too, with a warning to use the panel |
+| POST | `/containers/{container}/restart` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container; one a game-server panel made (Pelican, Pterodactyl) is done too, with a warning to use the panel |
+| POST | `/containers/{container}/recreate` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container; one a game-server panel made (Pelican, Pterodactyl) is done too, with a warning to use the panel |
+| POST | `/containers/{container}/remove` | admin | Start, stop, restart, recreate (Compose-managed only) or remove a container; one a game-server panel made (Pelican, Pterodactyl) is done too, with a warning to use the panel |
 | POST | `/containers/{container}/reset` | admin | Nuke & reinstall {confirm: "<container>", wipe_app_data: true, wipe_volumes: false, pull: true}: remove the container, move its App-Data folders to App-Data/.trash, drop its own named volumes when asked, pull and create it again from the compose file |
 | POST | `/containers/{container}/exec` | admin | Run a command inside a container (30 s limit) |
 | POST | `/containers/{container}/homarr` | admin | Put this container on the Homarr dashboard now: an app with its template's name and icon, plus a tile on the home board when an API key is stored (the app library alone without one); already there answers already: true; ?member=id on a hub adds a VM's container to the hub's Homarr |
@@ -358,7 +358,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | Method | Path | Access | Description |
 |--------|------|--------|-------------|
 | GET | `/maintenance/report` | user | Docker disk usage report; ?fleet=1 on a hub adds the VMs' numbers up (totals) with members[] per DCS |
-| GET | `/maintenance/orphans` | user | Containers, volumes and networks no stack references; ?fleet=1 on a hub lists every VM's too, each row tagged member, member_name, vmid |
+| GET | `/maintenance/orphans` | user | Containers, volumes and networks no stack references (a game-server panel's containers are its own, never listed); ?fleet=1 on a hub lists every VM's too, each row tagged member, member_name, vmid |
 | GET | `/maintenance/disk` | user | Per-stack App-Data sizes, Docker disk usage and volume sizes; ?fleet=1 on a hub merges every VM's (stacks tagged, docker's table added up per type) |
 | GET | `/backups` | admin | Fleet merged |
 | GET | `/backups/status` | admin | Progress of the running backup or restore, or the last result (with what was missing, if anything) |

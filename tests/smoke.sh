@@ -1430,6 +1430,54 @@ check "on demand: no Sablier, it is stuck"       "false 1" "$(jq -r '"\(.summary
 check "on demand: ...each row says so"           false "$(jq -r '.containers[] | select(.name == "Plex") | .sablier_up' <<< "$OH" 2>/dev/null)"
 check "on demand: ...and the score counts it"    "0 3" "$(_od_get /health/score | jq -r '.factors.stacks | "\(.sleeping) \(.total)"' 2>/dev/null)"
 rm -f "$_ODB/.nosab"
+# A game-server panel's containers (Pelican Wings, Pterodactyl Wings): made outside compose, named by UUID, labelled Service=…
+# They are the panel's: an owner and an image hint in the list, never orphans, never pruned, never "stopped on its own",
+# out of the score and of the "every container stopped" automation; an action on one goes through with a warning.
+_PEL=58549ef1-c125-4c65-ace7-6d5af8ae5c4c; _PTE=0f0e0d0c-1111-4222-8333-944445555666
+_PROWS='{"ID":"p1","Names":"'"$_PEL"'","State":"running","Status":"Up 2 hours","RunningFor":"2 hours ago","Image":"ghcr.io/pelican-eggs/steamcmd:proton","CreatedAt":"","Ports":"","Labels":"ContainerType=server_process,Service=Pelican"}
+{"ID":"p2","Names":"'"$_PTE"'","State":"exited","Status":"Exited (0) 1 hour ago","RunningFor":"3 hours ago","Image":"ghcr.io/scotthowson/graalvm-papermc:graalvm25","CreatedAt":"","Ports":"","Labels":"Service=Pterodactyl,ContainerType=server_process"}
+{"ID":"c1","Names":"web","State":"running","Status":"Up 1 hour","RunningFor":"1 hour ago","Image":"nginx","CreatedAt":"","Ports":"","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}
+{"ID":"c2","Names":"DCS-UI","State":"running","Status":"Up 1 hour","RunningFor":"1 hour ago","Image":"dcs-ui","CreatedAt":"","Ports":"","Labels":"com.docker.compose.project=core-infrastructure"}
+{"ID":"c3","Names":"loose","State":"running","Status":"Up 1 hour","RunningFor":"1 hour ago","Image":"alpine","CreatedAt":"","Ports":"","Labels":""}'
+_PCL=$(printf '%s\n' "$_PROWS" | _lib eval 'jq -s --argjson now 0 --argjson sab "{}" --argjson sabup null --slurpfile stats <(echo "{}") "$_CONTAINERS_JQ"' | jq -r '.[] | "\(.owner) \(.owner_hint) \(.stack)"' | tr '\n' ';')
+check "panel: owner and hint in the list" "pelican steamcmd:proton ;pterodactyl graalvm-papermc:graalvm25 ;compose null demo;dcs null core-infrastructure;null null ;" "$_PCL"
+_PB="$WORK/fakebin-pel"; mkdir -p "$_PB"
+cat > "$_PB/docker" <<FAKE
+#!/bin/bash
+d="\$(dirname "\$0")"
+pel=exited; [[ -f "\$d/.pel-up" ]] && pel=running
+case "\$*" in
+  'ps -a --format {{.Names}}\t{{.Label "Service"}}') printf '$_PEL\tPelican\n$_PTE\tPterodactyl\nzz-loose\t\nzz-web\t\n' ;;
+  "ps -a --filter status=exited --filter status=created --filter status=dead --format {{.Names}}") printf '$_PEL\n$_PTE\nzz-loose\n' ;;
+  "ps -a --filter status=exited --format {{.Names}}|{{.Image}}|{{.Status}}") printf '$_PEL|ghcr.io/pelican-eggs/steamcmd:proton|Exited (0)\n$_PTE|graalvm-papermc|Exited (0)\nzz-loose|alpine|Exited (1)\n' ;;
+  'ps -a --filter status=exited --format {{.Names}}\t{{.Status}}') printf '$_PEL\tExited (1) 1 minute ago\nzz-loose\tExited (1) 2 minutes ago\n' ;;
+  'ps -a --format {{.Names}}\t{{.State}}\t{{.Status}}') printf 'zz-web\trunning\tUp 2 hours\n$_PEL\t%s\tExited (0) 1 minute ago\n' "\$pel" ;;
+  "ps -a -q") printf 'c1\nc2\n' ;;
+  "inspect c1 c2")
+    printf '[{"Name":"/zz-web","State":{"Status":"running"},"RestartCount":0,"Config":{"Labels":{"com.docker.compose.project":"demo"}}},'
+    printf '{"Name":"/$_PEL","State":{"Status":"%s"},"RestartCount":0,"Config":{"Labels":{"Service":"Pelican","ContainerType":"server_process"}}}]\n' "\$pel" ;;
+  "inspect $_PEL"|"inspect zz-loose") exit 0 ;;
+  'inspect --format {{index .Config.Labels "Service"}} $_PEL') echo Pelican ;;
+  "stop -- $_PEL"|"stop -- zz-loose") echo "\${@: -1}" ;;
+  *) exit 0 ;;
+esac
+FAKE
+chmod +x "$_PB/docker"
+_pel_get() { command rm -f "$WORK/.data/cache/"*.http; PATH="$_PB:$PATH" auth_request GET "$1" | body_of; }
+check "panel: not an orphan"                 zz-loose "$(_pel_get /maintenance/orphans | jq -r '[.containers[].name] | join(" ")' 2>/dev/null)"
+check "panel: a prune keeps it"              "zz-loose | $_PEL $_PTE" "$(PATH="$_PB:$PATH" _lib eval '_prune_stopped_candidates; echo "${PRUNE_RM[*]} | ${PRUNE_PANEL[*]}"')"
+check "panel: the automation skips it"       zz-loose "$(PATH="$_PB:$PATH" _lib eval '_automation_condition_met container_stopped "*"; echo "${_AC_MATCHED% }"')"
+check "panel: ...unless the rule names it"   matched "$(PATH="$_PB:$PATH" _lib eval "_automation_condition_met container_stopped $_PEL && echo matched || echo none")"
+check "panel: turned off, out of the score"  "1 1" "$(_pel_get /health/score | jq -r '.factors.stacks | "\(.healthy) \(.total)"' 2>/dev/null)"
+check "panel: health counts it stopped"      "1 1" "$(_pel_get /health | jq -r '"\(.summary.healthy) \(.summary.stopped)"' 2>/dev/null)"
+_pc0=$(grep -c "$_PEL stopped on its own" "$WORK/.data/audit.jsonl" 2>/dev/null)
+rm -f "$WORK/.data/health-bad.json"; touch "$_PB/.pel-up"; _pel_get /health >/dev/null; rm -f "$_PB/.pel-up"; _pel_get /health >/dev/null
+check "panel: no 'stopped on its own'"       0 "$(( $(grep -c "$_PEL stopped on its own" "$WORK/.data/audit.jsonl" 2>/dev/null) - _pc0 ))"
+_PA=$(PATH="$_PB:$PATH" auth_request POST "/containers/$_PEL/stop" | body_of)
+check "panel: an action goes through"        true "$(jq -r '.success' <<< "$_PA" 2>/dev/null)"
+check "panel: ...with the panel's warning"   "managed by Pelican Wings; use the panel" "$(jq -r '.warning' <<< "$_PA" 2>/dev/null)"
+check "panel: another container, no warning" null "$(PATH="$_PB:$PATH" auth_request POST /containers/zz-loose/stop | body_of | jq -r '.warning' 2>/dev/null)"
+rm -f "$WORK/.data/health-bad.json"
 # a theme.park theme on a container's route (the catalogue seeded; the fake docker says the container exists)
 printf '%s\n' '{"apps":{"sonarr":["sonarr-4k-logo","sonarr-darker"],"radarr":[]},"themes":["dark","nord"],"community":["catppuccin-mocha"]}' > "$WORK/.data/themepark.json"
 printf 'http:\n  routers:\n    sonarr-router:\n      rule: "Host(`sonarr.example.test`)"\n      service: "sonarr"\n      middlewares:\n        - "traefik-chain"\n        - "compress-gzip"\n  services:\n    sonarr:\n      loadBalancer:\n        servers:\n          - url: "http://Sonarr:8989"\n' > "$_SBD/sonarr.yml"
