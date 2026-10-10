@@ -93,7 +93,8 @@ and `POST /compose/validate` with the findings and their lines), `POST /stacks/{
 is put back when the result is refused), a `.env` save and a container's environment change (refused
 for what they add), a rollback, a snapshot restore, a template deploy (after its variables are filled
 in), a template import or update (at its defaults), and the hub's push of a stack's files into a VM:
-those refuse with 422 and the findings. A start, restart, update or recreate, and the setup wizard,
+those refuse with 422 and the findings. A stack moved from a VM back to the hub is judged on the hub
+before anything stops in the VM; a refusal fails the move at its Files step. A start, restart, update or recreate, and the setup wizard,
 report what a file already on disk would be refused for (in the answer and the audit log) and go on:
 a file an admin wrote by hand is the admin's. Verdicts are cached by the hash of the file, its `.env`,
 the root `.env` and the policy files (`.data/compose-policy-cache.json`, the newest 300).

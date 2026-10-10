@@ -579,7 +579,9 @@ The hub checks first and shows every check green, amber or red with its reason; 
 
 1. **Preflight** again, then **Files**: the hub's copy of the stack becomes the VM's (the VM wins; the version it
    replaces is kept in the compose history). An `APP_DATA_DIR` the VM kept outside the stack's folder becomes the
-   stack's own `./App-Data` on the hub. **Images** missing on the hub are pulled now, while the stack still runs.
+   stack's own `./App-Data` on the hub. The hub's compose policy judges that file as it will run here; a refusal
+   ends the move now, with nothing stopped in the VM (SECURITY.md, "Compose policy"). **Images** missing on the
+   hub are pulled now, while the stack still runs.
 2. **Stop** in the VM (its downtime starts here), then **Data**: App-Data, `data` and the named volumes come over
    with owners and permissions as they are, counted on both sides. What the hub still had of the stack from before
    it moved into the VM is set aside first, never deleted (`.data/moved-to-hub/<stack>-<time>/hub-before`; a
