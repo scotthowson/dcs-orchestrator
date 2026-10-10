@@ -71,3 +71,6 @@ GET /system/metrics
 GET /webhooks
 GET /feed/summary
 GET /feed/crowdsec
+# a person's picture and card (display name, status, bio) for the chat: every signed-in person on purpose; bots and API keys are refused by the handler
+GET /users/*/avatar
+GET /users/*/profile
