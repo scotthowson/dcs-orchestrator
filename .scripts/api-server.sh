@@ -11213,7 +11213,7 @@ _staging_guard() {
 
 # Build a bundle. Sets RCV_FILE (its path), RCV_SIZE, RCV_STACKS, RCV_APPDATA, RCV_WARNINGS (a JSON list), RCV_ERROR.
 # Included: root .env, the secret store with its key, accounts/rules/layouts,
-# schedules, every stack's files (App-Data only for Traefik, Authelia and the
+# schedules, Technitium's state and backups, every stack's files (App-Data only for Traefik, Authelia and the
 # stacks named in $2, wherever it lives: a drive of its own too), templates and plugins. Never sessions, logs or caches.
 _recovery_bundle_create() {
     local pass="$1" include_appdata="${2:-}"
@@ -11250,6 +11250,11 @@ _recovery_bundle_create() {
     for f in crowdsec-whitelist.json automation-state.json; do
         [[ -f "$BASE_DIR/.data/$f" ]] && cp -p "$BASE_DIR/.data/$f" "$b/data/"
     done
+    # Technitium's: the device directory, the kids' groups, the clocks' state, and its own backups (a rebuilt resolver comes back from them)
+    if [[ -d "$BASE_DIR/.data/technitium" ]]; then
+        mkdir -p "$b/data/technitium" && cp -p "$BASE_DIR/.data/technitium/"*.json "$b/data/technitium/" 2>/dev/null
+        [[ -d "$BASE_DIR/.data/technitium/backups" ]] && cp -rp "$BASE_DIR/.data/technitium/backups" "$b/data/technitium/"
+    fi
     mkdir -p "$b/stacks" "$b/appdata"
     _fleet_reader_pick
     for s in "$COMPOSE_DIR"/*/; do

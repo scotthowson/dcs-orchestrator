@@ -51,7 +51,12 @@ leaves Technitium as it is: a bedtime or a device block in force stays until the
 - **Devices**: the device directory (below): a name and an icon for each, its group, its address pinned, a block
   until a time, its latest queries.
 - **DHCP**: Technitium's scope and leases, and the guided move from the router.
-- **Lists**: the blocklists, and the names allowed or blocked for everyone.
+- **Lists**: each blocklist's health on both servers (its names, its last update, why a download failed) with
+  **Update lists now**, the blocklists, and the names allowed or blocked for everyone.
+- **Servers** (admin): each server's address and token, its version (and the command that updates it when Technitium
+  has a newer one), and the backups (**Back up now**, **Restore**).
+- On the **Dashboard**, a Technitium tile (today's queries and blocked, both servers, in sync; add it from the card
+  picker on a dashboard saved before it existed), and its alerts in **Needs your attention**.
 
 A viewer sees the page read-only (the devices and DHCP included) and does not see a device's queries.
 

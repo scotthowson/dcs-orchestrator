@@ -10928,13 +10928,14 @@ check "safety: …a rule that is on sends the alert's own words; bedtime's rule 
 check "safety: a viewer cannot list, make or restore backups" "403 403 403" "$(tt_req "$TU" GET /dns/technitium/backups | status_of) $(tt_req "$TU" POST /dns/technitium/backup '' | status_of) $(tt_req "$TU" POST /dns/technitium/restore '{}' | status_of)"
 _tbk=$(tt_req "$TA" POST /dns/technitium/backup '' DCS_TECHNITIUM_NOW=$SN | body_of)
 TB="$TW/.data/technitium/backups"
+_tbn() { find "$TB" -maxdepth 1 -type f -name "$1" -printf . | wc -c; }
 check "safety: back up now: both servers"           "primary-2026-10-12_1200.zip secondary-2026-10-12_1200.zip" "$(jq -r '.files | join(" ")' <<< "$_tbk")"
 check "safety: …Technitium's zip"                   PK "$(head -c 2 "$TB/primary-2026-10-12_1200.zip")"
 check "safety: …asked without the logs, stats, lists, apps or accounts; with zones and DHCP" "false false false false false true true true" \
     "$(m1 '.backups[-1] | "\(.logs) \(.stats) \(.blockLists) \(.apps) \(.authConfig) \(.zones) \(.scopes) \(.dnsSettings)"')"
 check "safety: …the note keeps the blocklists and the apps' configs" "3 Advanced Blocking,Query Logs (Sqlite) 15.6" "$(jq -r '"\(.block_list_urls | length) \(.apps | map(.name) | sort | join(",")) \(.version)"' "$TB/primary-2026-10-12_1200.json")"
 for _i in $(seq 1 15); do tt_req "$TA" POST /dns/technitium/backup '' DCS_TECHNITIUM_NOW=$((SN + _i * 60)) >/dev/null; done
-check "safety: 14 kept per server, the oldest go with their notes" "14 14 14 no" "$(ls "$TB" | grep -c '^primary-.*\.zip$') $(ls "$TB" | grep -c '^primary-.*\.json$') $(ls "$TB" | grep -c '^secondary-.*\.zip$') $([[ -e "$TB/primary-2026-10-12_1201.zip" ]] && echo yes || echo no)"
+check "safety: 14 kept per server, the oldest go with their notes" "14 14 14 no" "$(_tbn 'primary-*.zip') $(_tbn 'primary-*.json') $(_tbn 'secondary-*.zip') $([[ -e "$TB/primary-2026-10-12_1201.zip" ]] && echo yes || echo no)"
 _tbl=$(tt_req "$TA" GET /dns/technitium/backups | body_of)
 check "safety: the list, newest first, the nightly hour" "28 2026-10-12T12:15:00Z 3 14" "$(jq -r '"\(.backups | length) \(.backups[0].created_at) \(.nightly_hour) \(.keep)"' <<< "$_tbl")"
 F=primary-2026-10-12_1215.zip
@@ -10952,12 +10953,12 @@ check "safety: a primary's backup onto the secondary: no DHCP scopes" false "$(m
 # the nightly one, at TECHNITIUM_BACKUP_HOUR (3 by default), once a day; off = never
 NB=$(date -u -d '2026-10-13 03:05' +%s)
 _tta $((NB - 3600)) _tta_backup_nightly
-check "safety: nightly: nothing before 03:00"      0 "$(ls "$TB" | grep -c '2026-10-13')"
+check "safety: nightly: nothing before 03:00"      0 "$(_tbn '*2026-10-13*')"
 _tta $NB _tta_backup_nightly; _tta $((NB + 60)) _tta_backup_nightly
-check "safety: …at 03:05 both servers, once"        "2 true" "$(ls "$TB" | grep -c '2026-10-13.*\.zip$') $(jq -r .backup.done "$TW/.data/technitium/alerts.json")"
+check "safety: …at 03:05 both servers, once"        "2 true" "$(_tbn '*2026-10-13*.zip') $(jq -r .backup.done "$TW/.data/technitium/alerts.json")"
 printf 'TECHNITIUM_BACKUP_HOUR=off\n' >> "$TW/.env"
 _tta $((NB + 86400)) _tta_backup_nightly
-check "safety: …off: none"                           0 "$(ls "$TB" | grep -c '2026-10-14')"
+check "safety: …off: none"                           0 "$(_tbn '*2026-10-14*')"
 sed -i '/^TECHNITIUM_BACKUP_HOUR=/d' "$TW/.env"
 check "technitium: docs: the safety net is the admin's" "admin admin admin admin" \
     "$(for r in 'GET /dns/technitium/backups' 'POST /dns/technitium/backup' 'POST /dns/technitium/restore' 'POST /dns/technitium/lists/update'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
