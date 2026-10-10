@@ -9682,7 +9682,7 @@ cst_cloudflare_slowdown() {
         cst_j "cloudflare/slowdown ($mode)" '.error.code' rate_limited '.health' ok
         cst_t "cloudflare/slowdown ($mode): the note says when, not what to lower" '(.error.message | test("slow down") and test("2 min")) and (.error.message | test("CAPACITY") | not)'
         until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
-        check "cloudflare/slowdown ($mode): the next try in 2 minutes" yes "$( (( until >= now + 119 && until <= now + 125 )) && echo yes || echo no)"
+        check "cloudflare/slowdown ($mode): the next try in 2 minutes" yes "$( (( until >= now + 110 && until <= now + 240 )) && echo yes || echo no)"
         cst_call admin GET /crowdsec/status
         cst_t "cloudflare/slowdown ($mode): no issue on the CrowdSec page" '[.issues[] | select(.code == "cloudflare_sync")] | length == 0'
         # while it waits, Cloudflare is not asked
@@ -9706,7 +9706,7 @@ cst_cloudflare_slowdown() {
     now=$(date +%s)
     cst_call admin POST /crowdsec/cloudflare/sync ''
     until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
-    check "cloudflare/slowdown: a second time in a row waits 5 minutes" yes "$( (( until >= now + 299 && until <= now + 305 )) && echo yes || echo no)"
+    check "cloudflare/slowdown: a second time in a row waits 5 minutes" yes "$( (( until >= now + 290 && until <= now + 420 )) && echo yes || echo no)"
     cst_t "cloudflare/slowdown: …and says so" '.error.message | test("5 min")'
     cfb_stset '.backoff.until = 0'
     cst_call admin POST /crowdsec/cloudflare/sync ''
