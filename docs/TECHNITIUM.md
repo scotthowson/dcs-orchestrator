@@ -132,6 +132,66 @@ settings, blocklists, cache size, the allowed and blocked names, the apps (insta
 configs, and the forced SafeSearch zones. The status compares a fingerprint of all of that on both
 (`in_sync`). DHCP scopes and anything else made in Technitium's console are not copied.
 
+## The safety net: alerts, Needs your attention, backups
+
+DCS watches both servers from the minute clock (the API's automation loop, in the background: a server that does not
+answer never holds the clock up) and says each problem **once**, when it starts, and once more when it is over. Each
+goes to the activity log, to the Integrations webhooks that subscribe to it, and through a notification rule to Discord
+or ntfy. The rules are made the first time the clock runs, so they are on the **Notifications** page like every other
+event: switch one off, change its priority or its cooldown there (a rule you delete is not made again).
+
+| Event | When | Rule | Fix (Needs your attention) |
+|---|---|---|---|
+| `technitium_down` | a server did not answer two minute checks in a row; over when it answers | on | open the page (Servers) |
+| `technitium_out_of_sync` | the two fingerprints have differed for 10 minutes and the sync DCS then tried failed (it tries every 10 minutes); over when they agree | on | **Sync now** |
+| `technitium_lists_stale` | a server's blocklists were last updated more than 48 hours ago, or the last download of one of them failed (which list, and Technitium's reason) | on | **Update lists now** |
+| `technitium_dhcp_pool` | the primary's DHCP scopes that are on have given out more than 80 % of their addresses | on | open the DHCP tab |
+| `technitium_new_device` | a device with a MAC address is seen for the first time: *New device on the network: Samsung (a4:c3:f0:12:34:56), 192.168.2.142, named galaxy-s24 by DHCP*, with a link to the Devices tab (`DASHBOARD_PUBLIC_URL`). More than 5 at once are one message. The first look learns what is already there and says nothing | on | — |
+| `technitium_bedtime` | a kids' group went into or out of bedtime | off | — |
+| `technitium_device_blocked_expired` | a device's *Block until* ran out (a block lifted by hand is not) | off | — |
+
+`GET /dns/technitium/status` carries the alerts in force (`alerts`: event, server, headline, message, the fix as
+`action`, since when): the dashboard's **Needs your attention** lists them. Its state is `.data/technitium/alerts.json`.
+
+Per server the status also has: `update_available` and `update_version` (Technitium's own update check, asked every 6
+hours; the Servers sheet then shows the command that updates it, run on that machine:
+`curl -sSL https://download.technitium.com/dns/install.sh | sudo bash`), `lists` (each blocklist's `entries`,
+`last_updated` and `error`, and the `total` of names blocked: Technitium says per list only in its log, so the last
+three days of it are read, at most every 2 minutes; when its log says nothing of them, only the total is known and
+`note` says so) and, on the primary, `dhcp` (`enabled`, `leases`, `pool_size`, `pct`). **Update lists now**
+(`POST /dns/technitium/lists/update`) makes both download their lists again.
+
+### Backups
+
+Every night at `TECHNITIUM_BACKUP_HOUR` (3 by default, local time; `off` = never), and on **Back up now**
+(`POST /dns/technitium/backup`), DCS takes each server's own backup (Technitium's `GET /api/settings/backup`) into
+`.data/technitium/backups/<server>-<date>_<time>.zip` and keeps the newest 14 of each. The zip holds the settings, the
+zones, the allowed and blocked names, the DHCP scopes and the log settings. It leaves out what is big or comes back by
+itself: the query logs and stats, the downloaded lists and the apps (with the query log's database). It also leaves
+out Technitium's accounts and API tokens, which have no place in a file that goes into DCS's own backups. Next to each
+zip a `.json` keeps what a restore puts back on top: the blocklist addresses and the apps with their configs. A failed
+nightly backup is tried twice more, 30 minutes apart, and said (`backup_failed`). `.data` is in every DCS backup and
+recovery bundle, so the device directory, the groups, the state and these zips go with them.
+
+**Restore** (`POST /dns/technitium/restore {server, file, confirm: true}`, the Servers sheet) hands the zip to
+Technitium (`POST /api/settings/restore`): its settings, zones and names become the backup's, files the backup does
+not have are removed, its own accounts and tokens stay as they are (so DCS stays connected), and DHCP scopes go back
+onto the primary only (two DHCP servers would hand out the same addresses). Technitium reloads and restarts its DNS
+service: a few seconds without answers. DCS then puts back the blocklists (and asks for a download) and the apps with
+their configs, and a restored primary is copied to the secondary. It is in the audit log.
+
+### Rebuilding a resolver from scratch
+
+1. **Install Technitium** on the new machine (or the rebuilt LXC or Pi): `curl -sSL https://download.technitium.com/dns/install.sh | sudo bash`.
+   Give it the same address as before (the devices and the DHCP scope point at it).
+2. **Sign in** at `http://<ip>:5380`, set the admin password, and **Create API Token** (your name at the top right).
+3. **Connect** it on the Technitium page (Servers: address and the new token, as primary or secondary).
+4. **Apply baseline**: forwarders, DNSSEC, the lists, the query log and the kids' app.
+5. **Restore** its newest backup (Servers → Backups → Restore): its zones, allowed and blocked names, settings and,
+   on the primary, the DHCP scopes and reservations come back; the kids' groups are written again by DCS.
+6. On the primary, check **DHCP**: the scope is on as it was in the backup. A rebuilt secondary is equal to the
+   primary after the restore's sync, or **Sync now**.
+
 ## API
 
 `/dns/technitium/*`: see the [API reference](API.md#routing-and-dns). Reading the status, the numbers, the lists

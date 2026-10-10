@@ -10794,6 +10794,174 @@ tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((M
 check "technitium: …the hub's vendor is known now (a quoted name)" "Lab Vendor, Inc." "$(_dev 192.168.2.233 '' .vendor)"
 kill "$OUI_PID" 2>/dev/null; wait "$OUI_PID" 2>/dev/null
 
+# the safety net (.lib/technitium-alerts.sh): what the status adds, the alerts (raised once, cleared once) and their rules, the backups
+# and a restore. The minute clock's part runs with the notifier stubbed: every event it fires is a line in $TW/fired.
+rm -f "$TW/.data/technitium/alerts.json"; : > "$TW/fired"
+mreq() { local m="$1" p="$2" kv a=(); shift 2; for kv in "$@"; do a+=(--data-urlencode "$kv"); done
+    curl -s -H "Authorization: Bearer $([[ "$m" == "$M1" ]] && printf '%s' "$TT1" || printf '%s' "$TT2")" "${a[@]}" "$m/api/$p" >/dev/null; }
+_tta() { local t="$1" cmd="$2"; ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_lib
+    _fire_notifications() { printf '%s\n' "$*" >> "$TW/fired"; }; export DCS_TECHNITIUM_NOW="$t" TZ=UTC; "$cmd" ) >/dev/null 2>&1; }
+_fired() { grep -c -- "$1" "$TW/fired" 2>/dev/null || true; }
+_tstat() { tt_req "$TU" GET /dns/technitium/status '' "DCS_TECHNITIUM_NOW=$1" | body_of; }
+SN=$((MON1000 + 7200))   # Monday 12:00 UTC
+mreq "$M1" _mock/clock "at=[2026-10-12 11:00:00 UTC]"; mreq "$M2" _mock/clock "at=[2026-10-12 11:00:00 UTC]"
+mreq "$M2" _mock/update version=15.7
+check "safety: a viewer cannot update the lists"   403 "$(tt_req "$TU" POST /dns/technitium/lists/update '' | status_of)"
+check "safety: update the lists now, on both"      "true 1 1" "$(tt_req "$TA" POST /dns/technitium/lists/update '' | body_of | jq -r .success) $(m1 .forced) $(m2 .forced)"
+_tst=$(_tstat $SN)
+check "safety: the version, no update on the primary" "15.6 false null" "$(jq -r '"\(.primary.version) \(.primary.update_available) \(.primary.update_version)"' <<< "$_tst")"
+check "safety: …the secondary has 15.7 waiting"   "true 15.7" "$(jq -r '"\(.secondary.update_available) \(.secondary.update_version)"' <<< "$_tst")"
+check "safety: each list's entries and last update, from Technitium's log, and the total" "1000,2000,3000 2026-10-12T11:00:00Z null true 3000" \
+    "$(jq -r '.primary.lists | "\([.lists[].entries] | join(",")) \(.lists[0].last_updated) \(.lists[0].error) \(.per_list) \(.total)"' <<< "$_tst")"
+check "safety: the primary's DHCP (off), none on the secondary; no alerts" "false 0 null null 0" "$(jq -r '"\(.primary.dhcp.enabled) \(.primary.dhcp.pool_size) \(.primary.dhcp.pct) \(.secondary.dhcp) \(.alerts | length)"' <<< "$_tst")"
+mreq "$M1" _mock/log clear=1
+check "safety: no word in the log: the total, and it says so" "null 3000 yes" "$(tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null; mreq "$M1" _mock/log clear=1; _tstat $SN | jq -r '.primary.lists | "\(.lists[0].entries) \(.total) \(if (.note // "") | test("only the total") then "yes" else "no" end)"')"
+
+# the first look: the events' rules, and the directory, the bedtime and the blocks as they are (nothing said)
+_tta $((SN + 60)) _tta_tick
+check "safety: the events' rules are made once: 7, five on, bedtime and a block running out off" "7 5 false false" \
+    "$(jq -r '[.rules[] | select(.trigger | startswith("technitium_"))] | "\(length) \(map(select(.enabled)) | length) \(map(select(.trigger == "technitium_bedtime"))[0].enabled) \(map(select(.trigger == "technitium_device_blocked_expired"))[0].enabled)"' "$TW/.api-auth/notifications.json")"
+tt_req "$TA" DELETE /notifications/rules/rule_technitium_dhcp_pool '' >/dev/null
+_tta $((SN + 90)) _tta_tick
+check "safety: …a rule deleted stays deleted"       "6 0" "$(jq '[.rules[] | select(.trigger | startswith("technitium_"))] | length' "$TW/.api-auth/notifications.json") $(wc -l < "$TW/fired")"
+check "safety: the directory is learnt without a word" "$(jq '.devices | length' "$TW/.data/technitium/devices.json")" "$(jq '.known_devices | length' "$TW/.data/technitium/alerts.json")"
+
+# blocklists: one fails to download, then all is well, then nothing for three days
+mreq "$M1" _mock/listfail "url=$(m1 '.settings.blockListUrls[1]')"; mreq "$M1" _mock/clock "at=[2026-10-12 11:30:00 UTC]"
+tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
+check "safety: a list that failed says why"         "null yes null" "$(_tstat $((SN + 120)) | jq -r '.primary.lists.lists | "\(.[0].error) \(.[1].error | test("404") | if . then "yes" else "no" end) \(.[2].error)"')"
+_tta $((SN + 120)) _tta_tick; _tta $((SN + 180)) _tta_tick
+check "safety: lists failing: said once, which list and why" "1 yes" "$(_fired 'technitium_lists_stale server=primary') $(grep 'technitium_lists_stale' "$TW/fired" | grep -q 'could not be updated: https://.*tif-onlydomains.txt (Response status code does not indicate success: 404' && echo yes || echo no)"
+check "safety: …in the activity log"               yes "$(grep -q '"action":"technitium_lists_stale"' "$TW/.data/audit.jsonl" && echo yes || echo no)"
+check "safety: …Needs your attention: the alert with its fix" "technitium_lists_stale:primary primary lists" "$(_tstat $((SN + 180)) | jq -r '.alerts[0] | "\(.key) \(.server) \(.action)"')"
+mreq "$M1" _mock/listfail url=; mreq "$M1" _mock/clock "at=[2026-10-12 11:45:00 UTC]"
+tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
+_tta $((SN + 240)) _tta_tick
+check "safety: …the lists update again: said once, the alert gone" "1 0" "$(_fired 'technitium_lists_stale server=primary.*status=resolved') $(_tstat $((SN + 240)) | jq '.alerts | length')"
+mreq "$M1" _mock/log clear=1; mreq "$M1" _mock/clock "at=[2026-10-09 09:00:00 UTC]"
+tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
+_tta $((SN + 300)) _tta_tick
+check "safety: no update for 75 hours: said"        "2 yes" "$(_fired 'technitium_lists_stale server=primary.*status=raised') $(grep 'technitium_lists_stale.*status=raised' "$TW/fired" | tail -1 | grep -q 'last updated 75 hours ago' && echo yes || echo no)"
+mreq "$M1" _mock/clock "at=[2026-10-12 12:04:00 UTC]"; tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
+_tta $((SN + 360)) _tta_tick
+check "safety: …and over once they update"           0 "$(jq '.active | length' "$TW/.data/technitium/alerts.json")"
+
+# a server that does not answer: two checks in a row
+: > "$TW/fired"; touch "$TW/m2.json.down"
+_tta $((SN + 600)) _tta_tick
+check "safety: one missed check is not news"        0 "$(_fired technitium_down)"
+_tta $((SN + 660)) _tta_tick; _tta $((SN + 720)) _tta_tick
+check "safety: two in a row: the secondary is not answering, said once" "1 yes" "$(_fired 'technitium_down server=secondary.*status=raised') $(grep -q 'technitium_down.*has not answered DCS for 2 minutes' "$TW/fired" && echo yes || echo no)"
+check "safety: …Needs your attention"              "technitium_down:secondary page" "$(_tstat $((SN + 720)) | jq -r '.alerts[] | select(.event == "technitium_down") | "\(.key) \(.action)"')"
+command rm -f "$TW/m2.json.down"
+_tta $((SN + 780)) _tta_tick
+check "safety: …it answers again: said once, the alert gone" "1 0" "$(_fired 'technitium_down server=secondary.*status=resolved') $(jq '.active | length' "$TW/.data/technitium/alerts.json")"
+
+# out of step: a fresh difference is left alone; after 10 minutes a sync is tried; when it fails it is said
+mreq "$M2" blocked/add domain=drift.example
+_tta $((SN + 840)) _tta_tick
+check "safety: a fresh difference: no word, no sync yet" "0 true" "$(_fired technitium_out_of_sync) $(m2 '.blocked | index("drift.example") != null')"
+touch "$TW/m2.json.readonly"
+_tta $((SN + 1441)) _tta_tick
+check "safety: 10 minutes on and the sync failed: said" "1 yes" "$(_fired 'technitium_out_of_sync.*status=raised') $(grep 'technitium_out_of_sync' "$TW/fired" | grep -q 'the sync failed: The secondary Technitium said: The disk is read-only' && echo yes || echo no)"
+check "safety: …Needs your attention offers Sync now" "technitium_out_of_sync sync" "$(_tstat $((SN + 1441)) | jq -r '.alerts[] | select(.event == "technitium_out_of_sync") | "\(.key) \(.action)"')"
+command rm -f "$TW/m2.json.readonly"
+_tta $((SN + 1500)) _tta_tick
+check "safety: …not tried again within 10 minutes"  "true" "$(m2 '.blocked | index("drift.example") != null')"
+_tta $((SN + 2050)) _tta_tick; _tta $((SN + 2110)) _tta_tick
+check "safety: …the next try mends it, said once"   "false 1 0" "$(m2 '.blocked | index("drift.example") != null') $(_fired 'technitium_out_of_sync.*status=resolved') $(jq '.active | length' "$TW/.data/technitium/alerts.json")"
+
+# a device seen for the first time (the security signal), and a digest when many come at once
+: > "$TW/fired"
+printf '192.168.2.142 lladdr a0:00:05:12:34:56 REACHABLE\n' >> "$TFB/neigh"
+mreq "$M1" _mock/lease scope=LAN hardwareAddress=A0-00-05-12-34-56 address=192.168.2.142 hostName=galaxy-s24
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((SN + 2400)) >/dev/null
+DASHBOARD_PUBLIC_URL=https://ui.example.test _tta $((SN + 2420)) _tta_tick
+check "safety: a new device: by its vendor, MAC, address and the name DHCP gave it" \
+    "New device on the network: Vendor 5 (a0:00:05:12:34:56), 192.168.2.142, named galaxy-s24 by DHCP. Devices: https://ui.example.test/#/technitium/devices" \
+    "$(grep technitium_new_device "$TW/fired" | head -1 | sed 's/.*message=//; s/ link=.*//')"
+_tta $((SN + 2480)) _tta_tick
+check "safety: …said once"                          1 "$(_fired technitium_new_device)"
+for _i in 1 2 3 4 5 6; do printf '192.168.2.20%d lladdr a0:00:06:00:00:0%d REACHABLE\n' "$_i" "$_i" >> "$TFB/neigh"; done
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((SN + 2500)) >/dev/null
+_tta $((SN + 2520)) _tta_tick
+check "safety: six at once: one message"            "2 1" "$(_fired technitium_new_device) $(_fired 'headline=6 new devices on the network')"
+
+# bedtime (off by default): a group going in and out, even one deleted meanwhile
+_tbg=$(tt_req "$TA" POST /dns/technitium/groups '{"name":"Night owls","bedtime":{"enabled":true,"from":"00:00","to":"23:59"}}' DCS_TECHNITIUM_NOW=$((SN + 2600)) | body_of)
+_tta $((SN + 2620)) _tta_tick
+check "safety: bedtime: a group going in"           1 "$(_fired 'technitium_bedtime group=Night owls headline=Night owls: bedtime message')"
+tt_req "$TA" DELETE "/dns/technitium/groups/$(jq -r .group.id <<< "$_tbg")" '' DCS_TECHNITIUM_NOW=$((SN + 2640)) >/dev/null
+_tta $((SN + 2660)) _tta_tick
+check "safety: …and out (the group is gone, its name stays)" 1 "$(_fired 'Night owls left bedtime')"
+
+# a device's block that runs out (off by default); one lifted by hand is not "ran out"
+tt_req "$TA" PUT /dns/technitium/devices/a00005123456 "{\"blocked_until\":$((SN + 3600))}" DCS_TECHNITIUM_NOW=$((SN + 2700)) >/dev/null
+_tta $((SN + 2720)) _tta_tick; _ttick $((SN + 3601)); _tta $((SN + 3610)) _tta_tick
+check "safety: a block that ran out: said once"     "1 yes" "$(_fired technitium_device_blocked_expired) $(grep -q 'headline=galaxy-s24 can browse again' "$TW/fired" && echo yes || echo no)"
+tt_req "$TA" PUT /dns/technitium/devices/a00005123456 "{\"blocked_until\":$((SN + 7200))}" DCS_TECHNITIUM_NOW=$((SN + 3620)) >/dev/null
+_tta $((SN + 3640)) _tta_tick
+tt_req "$TA" PUT /dns/technitium/devices/a00005123456 '{"blocked_until":null}' DCS_TECHNITIUM_NOW=$((SN + 3660)) >/dev/null
+_tta $((SN + 3680)) _tta_tick
+check "safety: …a block lifted by hand is not"      1 "$(_fired technitium_device_blocked_expired)"
+
+# the DHCP pool over 80 %: 75 leases of the 89 addresses of .100-.199 less .150-.160
+tt_req "$TA" POST /dns/technitium/dhcp/enable '{}' >/dev/null
+for _i in $(seq 100 149) $(seq 161 185); do mreq "$M1" _mock/lease scope=LAN "hardwareAddress=02-00-00-00-01-$(printf '%02X' $((_i - 100)))" "address=192.168.2.$_i"; done
+_tta $((SN + 4000)) _tta_tick
+check "safety: the DHCP pool nearly full: said, with the numbers" "1 yes" "$(_fired 'technitium_dhcp_pool.*status=raised') $(grep -q 'technitium_dhcp_pool.*76 of its 89 addresses are given out (85 %)' "$TW/fired" && echo yes || echo no)"
+check "safety: …the status's DHCP and the alert's fix" "true 76 89 85 dhcp" "$(_tstat $((SN + 4000)) | jq -r '"\(.primary.dhcp.enabled) \(.primary.dhcp.leases) \(.primary.dhcp.pool_size) \(.primary.dhcp.pct) \(.alerts[] | select(.event == "technitium_dhcp_pool") | .action)"')"
+tt_req "$TA" POST /dns/technitium/dhcp/disable '{"name":"LAN"}' >/dev/null
+_tta $((SN + 4060)) _tta_tick
+check "safety: …DHCP off: over"                      "1 0" "$(_fired 'technitium_dhcp_pool.*status=resolved') $(jq '.active | length' "$TW/.data/technitium/alerts.json")"
+
+# the real notifier: the rules made above decide (bedtime's is off), the wording is the alert's, Discord's colour says resolved
+check "safety: Discord: the events' style"          "Technitium not answering|New device on the network" "$( ( set --; source "$TAPI" >/dev/null 2>&1; printf '%s|%s' "$(_discord_event_style technitium_down | cut -d'|' -f3)" "$(_discord_event_style technitium_new_device | cut -d'|' -f3)" ) )"
+check "safety: …a resolved alert is green, its headline is not a field again" "3462041 0 1" "$( ( set --; source "$TAPI" >/dev/null 2>&1; _discord_payload 'The primary answers again' 'x' default technitium_down '{"status":"resolved","headline":"h","server":"primary"}' | jq -r '"\(.embeds[0].color) \([.embeds[0].fields[] | select(.name == "Headline")] | length) \([.embeds[0].fields[] | select(.name == "Server")] | length)"' ) )"
+rm -f "$TW/.data/smoke-notified"
+( set --; source "$TAPI" >/dev/null 2>&1; _ntfy_endpoint() { printf 'http://ntfy.invalid/x'; }; _notify_send() { printf '%s|%s\n' "$1" "$2" >> "$TW/.data/smoke-notified"; printf 200; }
+  _fire_notifications technitium_down server=primary "headline=The primary Technitium is not answering" "message=It has not answered for 2 minutes." status=raised fingerprint=k1
+  _fire_notifications technitium_bedtime "group=Kids" "headline=Kids: bedtime" "message=Kids entered bedtime." status=started; sleep 1 ) >/dev/null 2>&1
+check "safety: …a rule that is on sends the alert's own words; bedtime's rule is off" "The primary Technitium is not answering|It has not answered for 2 minutes." "$(cat "$TW/.data/smoke-notified" 2>/dev/null)"
+
+# backups: Technitium's zip and DCS's note, 14 kept per server; a restore with a confirmation
+check "safety: a viewer cannot list, make or restore backups" "403 403 403" "$(tt_req "$TU" GET /dns/technitium/backups | status_of) $(tt_req "$TU" POST /dns/technitium/backup '' | status_of) $(tt_req "$TU" POST /dns/technitium/restore '{}' | status_of)"
+_tbk=$(tt_req "$TA" POST /dns/technitium/backup '' DCS_TECHNITIUM_NOW=$SN | body_of)
+TB="$TW/.data/technitium/backups"
+check "safety: back up now: both servers"           "primary-2026-10-12_1200.zip secondary-2026-10-12_1200.zip" "$(jq -r '.files | join(" ")' <<< "$_tbk")"
+check "safety: …Technitium's zip"                   PK "$(head -c 2 "$TB/primary-2026-10-12_1200.zip")"
+check "safety: …asked without the logs, stats, lists, apps or accounts; with zones and DHCP" "false false false false false true true true" \
+    "$(m1 '.backups[-1] | "\(.logs) \(.stats) \(.blockLists) \(.apps) \(.authConfig) \(.zones) \(.scopes) \(.dnsSettings)"')"
+check "safety: …the note keeps the blocklists and the apps' configs" "3 Advanced Blocking,Query Logs (Sqlite) 15.6" "$(jq -r '"\(.block_list_urls | length) \(.apps | map(.name) | sort | join(",")) \(.version)"' "$TB/primary-2026-10-12_1200.json")"
+for _i in $(seq 1 15); do tt_req "$TA" POST /dns/technitium/backup '' DCS_TECHNITIUM_NOW=$((SN + _i * 60)) >/dev/null; done
+check "safety: 14 kept per server, the oldest go with their notes" "14 14 14 no" "$(ls "$TB" | grep -c '^primary-.*\.zip$') $(ls "$TB" | grep -c '^primary-.*\.json$') $(ls "$TB" | grep -c '^secondary-.*\.zip$') $([[ -e "$TB/primary-2026-10-12_1201.zip" ]] && echo yes || echo no)"
+_tbl=$(tt_req "$TA" GET /dns/technitium/backups | body_of)
+check "safety: the list, newest first, the nightly hour" "28 2026-10-12T12:15:00Z 3 14" "$(jq -r '"\(.backups | length) \(.backups[0].created_at) \(.nightly_hour) \(.keep)"' <<< "$_tbl")"
+F=primary-2026-10-12_1215.zip
+mreq "$M1" settings/set cacheMaximumEntries=777 "blockListUrls=https://example.org/one.txt"; mreq "$M1" allowed/add domain=after-backup.example
+check "safety: a restore without the confirmation"  400 "$(tt_req "$TA" POST /dns/technitium/restore "{\"server\":\"primary\",\"file\":\"$F\"}" | status_of)"
+check "safety: …a file that is not one, a server that is not one" "404 404 400" "$(tt_req "$TA" POST /dns/technitium/restore '{"server":"primary","file":"primary-2026-01-01_0000.zip","confirm":true}' | status_of) $(tt_req "$TA" POST /dns/technitium/restore '{"server":"primary","file":"../../.env","confirm":true}' | status_of) $(tt_req "$TA" POST /dns/technitium/restore "{\"server\":\"third\",\"file\":\"$F\",\"confirm\":true}" | status_of)"
+_trs=$(tt_req "$TA" POST /dns/technitium/restore "{\"server\":\"primary\",\"file\":\"$F\",\"confirm\":true}" | body_of)
+check "safety: restore: it says Technitium restarts" "true true yes true" "$(jq -r '"\(.success) \(.restarted)"' <<< "$_trs") $(jq -r .message <<< "$_trs" | grep -q 'restarted its DNS service' && echo yes || echo no) $(jq -r .sync.ok <<< "$_trs")"
+check "safety: …the settings and names are the backup's, the lists back from the note" "20000 false 3" "$(m1 .settings.cacheMaximumEntries) $(m1 '.allowed | index("after-backup.example") != null') $(m1 '.settings.blockListUrls | length')"
+check "safety: …its accounts left alone, DHCP onto the primary, files it does not have removed" "false true true" "$(m1 '.restores[-1] | "\(.authConfig) \(.scopes) \(.deleteExistingFiles)"')"
+check "safety: …the secondary followed"             20000 "$(m2 .settings.cacheMaximumEntries)"
+check "safety: …in the audit log"                   yes "$(grep -q "TECHNITIUM_RESTORE.*$F restored onto the primary" "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+tt_req "$TA" POST /dns/technitium/restore "{\"server\":\"secondary\",\"file\":\"$F\",\"confirm\":true}" >/dev/null
+check "safety: a primary's backup onto the secondary: no DHCP scopes" false "$(m2 '.restores[-1].scopes')"
+# the nightly one, at TECHNITIUM_BACKUP_HOUR (3 by default), once a day; off = never
+NB=$(date -u -d '2026-10-13 03:05' +%s)
+_tta $((NB - 3600)) _tta_backup_nightly
+check "safety: nightly: nothing before 03:00"      0 "$(ls "$TB" | grep -c '2026-10-13')"
+_tta $NB _tta_backup_nightly; _tta $((NB + 60)) _tta_backup_nightly
+check "safety: …at 03:05 both servers, once"        "2 true" "$(ls "$TB" | grep -c '2026-10-13.*\.zip$') $(jq -r .backup.done "$TW/.data/technitium/alerts.json")"
+printf 'TECHNITIUM_BACKUP_HOUR=off\n' >> "$TW/.env"
+_tta $((NB + 86400)) _tta_backup_nightly
+check "safety: …off: none"                           0 "$(ls "$TB" | grep -c '2026-10-14')"
+sed -i '/^TECHNITIUM_BACKUP_HOUR=/d' "$TW/.env"
+check "technitium: docs: the safety net is the admin's" "admin admin admin admin" \
+    "$(for r in 'GET /dns/technitium/backups' 'POST /dns/technitium/backup' 'POST /dns/technitium/restore' 'POST /dns/technitium/lists/update'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+
 # the tokens: never in an answer, a log, .env or an address; always a Bearer header
 check "technitium: no token in any answer"         0 "$(grep -c -e "$TT1" -e "$TT2" "$TANS" || true)"
 check "technitium: no token in the logs or .data"  "" "$(grep -rl -e "$TT1" -e "$TT2" "$TW/logs" "$TW/.api-auth" "$TW/.data" "$TW/.env" 2>/dev/null)"

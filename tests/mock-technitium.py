@@ -8,7 +8,16 @@ Usage: mock-technitium.py PORTFILE STATEFILE TOKEN NAME
   DHCP behaves as Technitium 15's does: a stock "Default" scope that is off, a scope made by scopes/set is on at once (renaming
   one with newName keeps it as it was), a reservation is not a lease, a MAC is reserved once a scope. A lease is put in with
   the stand-in's own POST /api/_mock/lease {scope, hardwareAddress, address, hostName} (the token is needed as for any call).
+  The safety net's calls: user/checkForUpdate (POST /api/_mock/update {version} offers a newer one), logs/list and logs/download
+  (Technitium's log: POST /api/_mock/log {line} adds a line, {clear: 1} empties it; settings/forceUpdateBlockLists logs a download and a read of each list,
+  or a failure for a URL in POST /api/_mock/listfail {url}; POST /api/_mock/clock {at: "[2026-10-12 09:00:00 UTC]"} dates those lines), settings/backup (a zip of the settings, the allowed and blocked names,
+  the zones and the DHCP scopes, with what was asked) and settings/restore (multipart: puts back what the flags ask). A file
+  STATEFILE.down makes it drop every connection (a server that does not answer); STATEFILE.readonly makes every change fail.
 """
+import io
+import zipfile
+from email import message_from_bytes
+from email.policy import default as email_policy
 import json
 import os
 import sys
@@ -37,6 +46,7 @@ state = {
                  "blockListUpdateIntervalHours": 24, "blockListNextUpdatedOn": "2026-10-10T08:00:00.000Z", "cacheMaximumEntries": 10000,
                  "serveStale": True, "blockingType": "NxDomain"},
     "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [],
+    "update": None, "log": [], "listfail": [], "backups": [], "restores": [], "forced": 0,
     "dhcp": {"scopes": {"Default": {"enabled": False, "startingAddress": "192.168.1.1", "endingAddress": "192.168.1.254", "subnetMask": "255.255.255.0",
                                     "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "home", "routerAddress": "192.168.1.1",
                                     "useThisDnsServer": True, "dnsServers": [], "exclusions": [{"startingAddress": "192.168.1.1", "endingAddress": "192.168.1.10"}],
@@ -82,7 +92,8 @@ def stats(n):
     """canned numbers, different per server so a merge shows"""
     k = 2 if NAME == "dns1" else 1
     labels = [(datetime(2026, 10, 10, 8, 0, tzinfo=timezone.utc) + timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:00.0000000Z") for i in range(3)]
-    return {"stats": {"totalQueries": 100 * k, "totalBlocked": 10 * k, "totalClients": 3, "totalCached": 40, "totalNxDomain": 5},
+    return {"stats": {"totalQueries": 100 * k, "totalBlocked": 10 * k, "totalClients": 3, "totalCached": 40, "totalNxDomain": 5,
+                      "blockListZones": 1000 * len(state["settings"].get("blockListUrls") or [])},
             "mainChartData": {"labels": labels, "datasets": [{"label": "Total", "data": [10 * k, 20 * k, 70 * k]}, {"label": "Blocked", "data": [1, 2, 10 * k - 3]}]},
             "topClients": [{"name": "192.168.2.50", "domain": "tablet-9.home", "hits": 60 * k}, {"name": "192.168.2.10", "hits": 30 * k}],
             "topDomains": [{"name": "example.com", "hits": 50 * k}, {"name": "youtube.com", "hits": 20}],
@@ -109,6 +120,13 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def answer_bytes(self, data, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         self.handle_call(b"")
 
@@ -116,22 +134,63 @@ class H(BaseHTTPRequestHandler):
         self.handle_call(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
 
     def handle_call(self, raw):
+        if os.path.exists(STATEFILE + ".down"):
+            self.close_connection = True
+            return
         u = urlsplit(self.path)
         q = {k: v[-1] for k, v in parse_qs(u.query, keep_blank_values=True).items()}
-        q.update({k: v[-1] for k, v in parse_qs(raw.decode(), keep_blank_values=True).items()})
+        upload = None
+        if (self.headers.get("Content-Type") or "").startswith("multipart/form-data"):
+            msg = message_from_bytes(b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + raw, policy=email_policy)
+            upload = next((part.get_payload(decode=True) for part in msg.iter_parts() if part.get_filename()), None)
+        else:
+            q.update({k: v[-1] for k, v in parse_qs(raw.decode(), keep_blank_values=True).items()})
         auth = self.headers.get("Authorization", "")
         state["calls"].append([u.path, auth.startswith("Bearer "), TOKEN in self.path])
         if auth != "Bearer " + TOKEN:
             save()
             return self.answer({"status": "invalid-token", "errorMessage": "Invalid token or session expired."})
         try:
-            r = self.route(u.path, q)
+            if os.path.exists(STATEFILE + ".readonly") and any(u.path.endswith(x) for x in ("/set", "/add", "/delete", "/import")):
+                raise ValueError("The disk is read-only.")
+            if u.path == "/api/settings/backup":
+                state["backups"].append(q)
+                save()
+                return self.answer_bytes(self.backup_zip(), "application/zip")
+            if u.path == "/api/settings/restore":
+                r = self.restore(q, upload)
+            else:
+                r = self.route(u.path, q)
         except Exception as e:  # what Technitium does with a bad parameter
             r = {"status": "error", "errorMessage": str(e)}
         save()
         if isinstance(r, str):
             return self.answer(None, r)
         return self.answer(r)
+
+    def backup_zip(self):
+        keep = {k: v for k, v in state["settings"].items() if k not in ("version", "uptimestamp", "blockListUrls", "blockListNextUpdatedOn")}
+        body = {"settings": keep, "allowed": state["allowed"], "blocked": state["blocked"], "zones": state["zones"], "scopes": state["dhcp"]["scopes"]}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("dns.config", json.dumps(body))
+        return buf.getvalue()
+
+    def restore(self, q, upload):
+        if not upload:
+            raise ValueError("Parameter 'file' missing.")
+        with zipfile.ZipFile(io.BytesIO(upload)) as z:
+            body = json.loads(z.read("dns.config"))
+        state["restores"].append(q)
+        on = lambda k: q.get(k) == "true"
+        if on("dnsSettings"):
+            state["settings"].update(body["settings"])
+        for k, key in (("allowedZones", "allowed"), ("blockedZones", "blocked"), ("zones", "zones")):
+            if on(k):
+                state[key] = body[key]
+        if on("scopes"):
+            state["dhcp"]["scopes"] = body["scopes"]
+        return {"response": state["settings"], "server": NAME, "status": "ok"}
 
     def route(self, p, q):
         s = state["settings"]
@@ -292,6 +351,38 @@ class H(BaseHTTPRequestHandler):
                 raise ValueError("Cannot set CNAME record at zone apex.")
             z["records"].append({"name": q["domain"], "type": q["type"], "ttl": int(q.get("ttl", 3600)), "rData": {"aname": q.get("aname")}})
             return ok()
+        if p == "/api/user/checkForUpdate":
+            up = state["update"]
+            return ok({"dnsServerEnableCheckForUpdate": True, "updateAvailable": up is not None, "updateVersion": up or s["version"], "currentVersion": s["version"]})
+        if p == "/api/_mock/update":
+            state["update"] = q.get("version") or None
+            return ok()
+        if p == "/api/_mock/log":
+            state["log"] = [] if q.get("clear") else state["log"] + [q["line"]]
+            return ok()
+        if p == "/api/_mock/clock":
+            state["clock"] = q.get("at") or None
+            return ok()
+        if p == "/api/_mock/listfail":
+            state["listfail"] = [x for x in q.get("url", "").split(",") if x]
+            return ok()
+        if p == "/api/settings/forceUpdateBlockLists":
+            state["forced"] += 1
+            ts = state.get("clock") or datetime.now(timezone.utc).strftime("[%Y-%m-%d %H:%M:%S UTC]")
+            # as Technitium does: the next update is planned an interval after this one
+            s["blockListNextUpdatedOn"] = (datetime.strptime(ts, "[%Y-%m-%d %H:%M:%S UTC]") + timedelta(hours=s["blockListUpdateIntervalHours"])).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+            for i, url in enumerate(s.get("blockListUrls") or []):
+                if url in state["listfail"]:
+                    state["log"] += [f"{ts} DNS Server failed to download block list and will use previously downloaded file (if available): {url}",
+                                     f"System.Net.Http.HttpRequestException: Response status code does not indicate success: 404 (Not Found)."]
+                else:
+                    state["log"] += [f"{ts} DNS Server successfully downloaded block list (1.2 MB): {url}",
+                                     f"{ts} DNS Server read block list file ({1000 * (i + 1)} domain(s) blocked) from: {url}"]
+            return ok()
+        if p == "/api/logs/list":
+            return ok({"logFiles": [{"fileName": "2026-10-10", "size": "1 KB"}] if state["log"] else []})
+        if p == "/api/logs/download":
+            return "".join(x + "\n" for x in state["log"])
         raise ValueError("Invalid API call: " + p)
 
 

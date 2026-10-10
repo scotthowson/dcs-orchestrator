@@ -3,6 +3,31 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Technitium's safety net** (`.lib/technitium-alerts.sh`, from the minute clock in the background). Alerts, each
+  raised once and cleared once (activity log, webhooks, Discord and ntfy through notification rules made the first
+  time, so they switch on the Notifications page): `technitium_down` (a server missed two minute checks in a row),
+  `technitium_out_of_sync` (the fingerprints differ for 10 minutes and the sync DCS then tries fails),
+  `technitium_lists_stale` (blocklists not updated for 48 hours, or a list's last download failed, with Technitium's
+  reason), `technitium_dhcp_pool` (more than 80 % of the primary's DHCP pool given out), `technitium_new_device` (*New
+  device on the network: Samsung (a4:…), 192.168.2.142, named galaxy-s24 by DHCP*, with a link to the Devices tab; one
+  digest when more than 5 come at once; the first look only learns the house), and two whose rules start off:
+  `technitium_bedtime` and `technitium_device_blocked_expired`. `GET /dns/technitium/status` carries the alerts in force
+  (`alerts`, each with the fix: Sync now, Update lists now, open DHCP) for *Needs your attention*, and per server
+  `update_available`/`update_version` (Technitium's update check, every 6 hours), `lists` (each blocklist's entries, last
+  update and error, read from Technitium's own log, and the total) and the primary's `dhcp` (`enabled`, `leases`,
+  `pool_size`, `pct`). `POST /dns/technitium/lists/update` downloads the lists again on both.
+- **Technitium backups**: every night at `TECHNITIUM_BACKUP_HOUR` (3; `off` = never) and on `POST
+  /dns/technitium/backup`, each server's own zip (settings, zones, allowed and blocked names, DHCP scopes; not its
+  accounts and tokens, logs, stats, downloaded lists or apps) into `.data/technitium/backups/<server>-<date>_<time>.zip`
+  with a note of its blocklists and apps' configs, 14 kept per server; `GET /dns/technitium/backups` lists them (admin);
+  `POST /dns/technitium/restore {server, file, confirm: true}` restores one (Technitium restarts its DNS service; its
+  own accounts stay, DHCP scopes only onto the primary; the lists and apps are put back and the secondary follows a
+  restored primary; audited). docs/TECHNITIUM.md: how to rebuild a resolver from scratch.
+
 ## [4.0.49] - 2026-10-10
 
 ### Added
