@@ -196,6 +196,13 @@ dashboard gets them live over its event stream. Bot accounts and API keys stay o
 One edits their own message for 15 minutes and deletes their own; an admin deletes any and clears the room (both
 in the audit log, never with the text). A message is plain text, 1-2000 characters.
 
+A dashboard signed in to several servers shows each server's room in a tab of its own, plus an **Everyone** tab that
+merges them (each message with its server's name) and a strip of who is online on which server. Each room is read and
+written with the session that server issued, over its own `GET /chat/summary` and `GET /stream?only=chat`; the merge
+happens in the dashboard only, so no server reads, stores or relays another's messages and no trust between servers is
+needed. Settings → Chat → "Show rooms of every server I'm signed in to" turns it off on a device. A web dashboard
+reaches another server's room only when that server lets its address in (`API_CORS_ORIGINS`).
+
 ## Notifications
 
 | Key | Default | Meaning |

@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `442` in total.
+Every endpoint below is `445` in total.
 
 ## Access levels
 
@@ -328,7 +328,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/logs/stats` | user | Log file size and per-level counts |
 | GET | `/logs/archives` | user | Rotated log archives |
 | GET | `/events` | user | Fleet merged |
-| GET | `/stream` | user | SSE endpoint: docker events + periodic metrics, and for a signed-in person the chat room's events (event "chat": message, edit, delete, clear, typing, state) while chat is on (on a hub ?fleet=1 adds every VM's docker events, ?member=id one VM's instead; each carries member, member_name, vmid) |
+| GET | `/stream` | user | SSE endpoint: docker events + periodic metrics, and for a signed-in person the chat room's events (event "chat": message, edit, delete, clear, typing, state) while chat is on (on a hub ?fleet=1 adds every VM's docker events, ?member=id one VM's instead; each carries member, member_name, vmid; ?only=chat carries the room's events and the heartbeat alone, for a dashboard that follows this server's room from another server) |
 | GET | `/audit` | admin | Fleet merged |
 | GET | `/logs/live` | user | Stream DCS application log |
 
@@ -479,6 +479,9 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 |--------|------|--------|-------------|
 | GET | `/chat/messages` | user | The server's chat room: messages (?since=<id> for newer ones, or a time in epoch seconds for those sent, edited or deleted after it; ?before=<id> for older, ?limit= up to 500, default 100) and the room (who is online, retention, what the caller may do) |
 | GET | `/chat/presence` | user | Who is in the room now (dashboard open in the last minute), with their role; marks the caller as here |
+| GET | `/chat/summary` | user | The room without its messages, for a dashboard that keeps several servers' rooms (the badge and who is online): latest_id, who is online, what the caller may do; ?after=<id> adds unread, the messages after that id from someone else and not deleted. Marks the caller as here |
+| GET | `/users/{name}/avatar` | user | A person's profile picture (the one uploaded in Settings → Profile), for anyone signed in: the image itself, cacheable; 404 when they have none (or an emoji, or a picture on another site) |
+| GET | `/users/{name}/profile` | user | What a person shows the others (for anyone signed in): their picture (avatar_url or avatar_emoji), display name, status (≤ 80 characters), status emoji and bio (≤ 280), as plain text, set in Settings → Profile; their role, and whether they are in this server's chat room now |
 | POST | `/chat/messages` | user | Send a message to the server's room ({"text": "…"}, 1-2000 characters of plain text; admins and users, CHAT_RATE_LIMIT a minute) |
 | POST | `/chat/typing` | user | Tell the room the caller is typing (one live event per 3 s at most; nothing is stored) |
 | PUT | `/chat/messages/{id}` | user | Edit one's own message ({"text": "…"}) within 15 minutes of sending it |

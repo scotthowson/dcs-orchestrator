@@ -10068,24 +10068,75 @@ check "chat: …in the audit"                      1 "$(grep -c 'scott cleared t
 check "chat: …and live"                          clear "$(tail -1 "$CHD/live.jsonl" | jq -r '.type')"
 check "chat: ids do not start again"             67 "$(ch_post "$CHU" "fresh start" | body_of | jq -r '.message.id')"
 
+# the summary (a dashboard that keeps several servers' rooms: its badge without the messages)
+_sum=$(ch_req "$CHA" GET /chat/summary | body_of)
+check "chat: summary: the room without its messages" "67 server false true" "$(jq -r '"\(.room.latest_id) \(.room.kind) \(has("messages")) \(.room.me.can_moderate)"' <<< "$_sum")"
+check "chat: summary: who is online"              yes "$(jq -r 'if any(.room.members_online[]; .user == "austin") then "yes" else "no" end' <<< "$_sum")"
+check "chat: summary: no unread without ?after="  null "$(jq -r '.unread' <<< "$_sum")"
+check "chat: summary: ?after= counts what others sent" 1 "$(ch_req "$CHA" GET '/chat/summary?after=66' | body_of | jq -r '.unread')"
+check "chat: summary: …never one's own"          0 "$(ch_req "$CHU" GET '/chat/summary?after=66' | body_of | jq -r '.unread')"
+check "chat: summary: …nor a deleted one"        0 "$(_d=$(ch_post "$CHV" "gone soon" | body_of | jq -r '.message.id'); ch_req "$CHV" DELETE "/chat/messages/$_d" >/dev/null; ch_req "$CHU" GET "/chat/summary?after=$((_d - 1))" | body_of | jq -r '.unread')"
+check "chat: summary: a bad after is refused"    400 "$(ch_req "$CHU" GET '/chat/summary?after=x' | status_of)"
+check "chat: summary: a bot stays out"            403 "$(ch_req "$CHB" GET /chat/summary | status_of)"
+check "chat: summary: an API key stays out"      403 "$(ch_req "$CHK" GET /chat/summary | status_of)"
+check "chat: summary: no session, no room"       401 "$(ch_req "" GET /chat/summary | status_of)"
+touch -d '-10 minutes' "$CHD/presence/robin"
+ch_req "$CHV" GET /chat/summary >/dev/null
+check "chat: summary: asking marks the caller as here" yes "$(ch_req "$CHA" GET /chat/presence | body_of | jq -r 'if any(.online[]; .user == "robin") then "yes" else "no" end')"
+
+# profile pictures and cards (what each person set in Settings → Profile), on messages, presence and /users/{name}/…
+_png=$(printf '\x89PNG\r\n\x1a\nIHDRsmoke-avatar' | base64 -w0)
+ch_req "$CHU" POST /settings/profile "{\"profile\":{\"icon\":\"data:image/png;base64,$_png\",\"displayName\":\"Austin\",\"statusText\":\"rebuilding the arr stack\",\"bio\":\"I look after the media VM\",\"email\":\"austin@example.invalid\",\"timezone\":\"Europe/London\"}}" >/dev/null
+ch_req "$CHV" POST /settings/profile '{"profile":{"icon":"🦊","statusText":"   "}}' >/dev/null
+ch_req "$CHA" POST /settings/profile '{"profile":{"icon":"https://tracker.example/me.png","statusText":"on call"}}' >/dev/null
+ch_post "$CHU" "with my picture" >/dev/null
+_pm=$(ch_req "$CHV" GET /chat/messages | body_of)
+check "chat: pictures: a message carries its writer's uploaded picture" yes "$(jq -r '[.messages[] | select(.user == "austin")][-1].avatar_url | if test("^/users/austin/avatar\\?v=[0-9]+$") then "yes" else . end' <<< "$_pm")"
+check "chat: pictures: …or emoji"                  "🦊" "$(jq -r '[.messages[] | select(.user == "robin")][-1].avatar_emoji' <<< "$_pm")"
+check "chat: pictures: a picture on another site is never passed on" "null null" "$(jq -r '[.messages[] | select(.user == "scott")][-1] | "\(.avatar_url) \(.avatar_emoji)"' <<< "$_pm")"
+check "chat: pictures: the live event carries it too" yes "$(grep '"type":"message"' "$CHD/live.jsonl" | tail -1 | jq -r 'if (.message.avatar_url // "") | startswith("/users/austin/avatar") then "yes" else "no" end')"
+check "chat: pictures: the stored message does not" 0 "$(grep -c 'avatar' "$CHD/messages.jsonl" || true)"
+_pp=$(ch_req "$CHV" GET /chat/presence | body_of | jq -c '.online[] | select(.user == "austin")')
+check "chat: cards: presence has the status and bio" "rebuilding the arr stack|I look after the media VM|Austin" "$(jq -r '"\(.status)|\(.bio)|\(.display_name)"' <<< "$_pp")"
+check "chat: cards: never the e-mail or time zone" "false false" "$(jq -r '"\(has("email")) \(has("timezone"))"' <<< "$_pp")"
+_up=$(ch_req "$CHV" GET /users/austin/profile)
+check "chat: GET /users/{name}/profile for anyone signed in" "200 austin user rebuilding the arr stack true" "$(printf '%s ' "$(status_of <<< "$_up")"; body_of <<< "$_up" | jq -r '"\(.user) \(.role) \(.status) \(.avatar_url | startswith("/users/austin/avatar"))"')"
+check "chat: …nothing private in it"              "false false" "$(body_of <<< "$_up" | jq -r '"\(has("email")) \(has("timezone"))"')"
+check "chat: …a blank status is no status"        false "$(ch_req "$CHU" GET /users/robin/profile | body_of | jq -r 'has("status")')"
+check "chat: …an unknown account"                 404 "$(ch_req "$CHU" GET /users/nobody/profile | status_of)"
+check "chat: …a bad name"                         400 "$(ch_req "$CHU" GET '/users/a..%2F/profile' | status_of)"
+check "chat: …not for a bot or an API key"        "403 403" "$(printf '%s %s' "$(ch_req "$CHB" GET /users/austin/profile | status_of)" "$(ch_req "$CHK" GET /users/austin/profile | status_of)")"
+check "chat: …nor without a session"              401 "$(ch_req "" GET /users/austin/profile | status_of)"
+_ua=$(ch_req "$CHA" GET /users/austin/avatar)
+check "chat: GET /users/{name}/avatar is the picture" "200 image/png 1" "$(printf '%s %s %s' "$(status_of <<< "$_ua")" "$(grep -i '^Content-Type:' <<< "$_ua" | head -1 | awk '{print $2}' | tr -d '\r')" "$(grep -c 'IHDRsmoke-avatar' <<< "$_ua")")"
+check "chat: …cacheable, privately"              yes "$(grep -qi '^Cache-Control: private, max-age=' <<< "$_ua" && grep -qi '^ETag: "' <<< "$_ua" && echo yes || echo no)"
+check "chat: …none for an emoji or a picture elsewhere" "404 404" "$(printf '%s %s' "$(ch_req "$CHA" GET /users/robin/avatar | status_of)" "$(ch_req "$CHA" GET /users/scott/avatar | status_of)")"
+printf '{"profile":{"icon":"data:image/png;base64,%s"}}' "$(printf 'GIF89a-not-a-png' | base64 -w0)" > "$CHW/.api-auth/profiles/robin.json"
+check "chat: …nor for a file that is not what it says" 404 "$(ch_req "$CHA" GET /users/robin/avatar | status_of)"
+
 # the live stream (event "chat" over GET /stream): open for 20 s, so the three changes below reach it on a busy machine too
-_sse_out="$CHW/sse-user.out"; _sse_bot="$CHW/sse-bot.out"
+_sse_out="$CHW/sse-user.out"; _sse_bot="$CHW/sse-bot.out"; _sse_only="$CHW/sse-only.out"
 touch -d '-10 minutes' "$CHD/presence/austin"
 { printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHU"; sleep 21; } | timeout 20 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_out" 2>/dev/null &
 _sse_pid=$!
 { printf 'GET /stream?token=%s HTTP/1.1\r\n\r\n' "$CHB"; sleep 21; } | timeout 20 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_bot" 2>/dev/null &
 _sse_bpid=$!
+# ?only=chat: what a dashboard on another server opens to follow this room
+{ printf 'GET /stream?only=chat HTTP/1.1\r\nAuthorization: Bearer %s\r\n\r\n' "$CHV"; sleep 21; } | timeout 20 env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$CHAPI" --handle-request > "$_sse_only" 2>/dev/null &
+_sse_opid=$!
 sleep 2
 ch_post "$CHA" "live from scott" >/dev/null
 _lid=$(ch_req "$CHA" GET /chat/messages | body_of | jq -r '.messages[-1].id')
 ch_req "$CHA" PUT "/chat/messages/$_lid" '{"text":"live, edited"}' >/dev/null
 ch_req "$CHA" DELETE "/chat/messages/$_lid" >/dev/null
-wait "$_sse_pid" "$_sse_bpid" 2>/dev/null
+wait "$_sse_pid" "$_sse_bpid" "$_sse_opid" 2>/dev/null
 check "chat: the stream carries the room's events" "message edit delete" "$(sed -n 's/^data: //p' "$_sse_out" | jq -r 'select(.type? == "message" or .type? == "edit" or .type? == "delete") | .type' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 check "chat: …with the message"                  "live from scott" "$(sed -n 's/^data: //p' "$_sse_out" | jq -r 'select(.type? == "message") | .message.text' 2>/dev/null | head -1)"
 check "chat: …as event: chat"                    3 "$(grep -c '^event: chat' "$_sse_out")"
 check "chat: …never to a bot's stream"           0 "$(grep -c '^event: chat' "$_sse_bot" || true)"
 check "chat: …which still gets its metrics"      yes "$(grep -q '^event: metrics' "$_sse_bot" && echo yes || echo no)"
+check "chat: ?only=chat carries the room's events" "message edit delete" "$(sed -n 's/^data: //p' "$_sse_only" | jq -r 'select(.type? == "message" or .type? == "edit" or .type? == "delete") | .type' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+check "chat: …and the heartbeat, no metrics, no Docker events" "yes 0 0" "$(printf '%s %s %s' "$(grep -q '^: heartbeat' "$_sse_only" && echo yes || echo no)" "$(grep -c '^event: metrics' "$_sse_only" || true)" "$(grep -c '^event: docker-event' "$_sse_only" || true)")"
 check "chat: an open stream keeps its person online" yes "$(ch_req "$CHA" GET /chat/presence | body_of | jq -r 'if any(.online[]; .user == "austin") then "yes" else "no" end')"
 sleep 1
 check "chat: a closed stream leaves no reader behind" 0 "$(pgrep -f "tail -n0 -F --pid=[0-9]+ $CHD/live.jsonl" | wc -l)"
@@ -10110,6 +10161,7 @@ _off=$(ch_req "$CHU" GET /chat/messages)
 check "chat: off: the room answers 404, chat_off" "404 chat_off" "$(printf '%s %s' "$(status_of <<< "$_off")" "$(body_of <<< "$_off" | jq -r '.reason')")"
 check "chat: off: nothing is sent"               404 "$(ch_post "$CHA" "anyone?" | status_of)"
 check "chat: off: no presence"                   404 "$(ch_req "$CHU" GET /chat/presence | status_of)"
+check "chat: off: the summary says so too"       "404 chat_off" "$(_s=$(ch_req "$CHU" GET /chat/summary); printf '%s %s' "$(status_of <<< "$_s")" "$(body_of <<< "$_s" | jq -r '.reason')")"
 check "chat: back on"                            "200 200" "$(printf '%s %s' "$(ch_req "$CHA" POST /config '{"CHAT_ENABLED":"true"}' | status_of)" "$(ch_req "$CHU" GET /chat/messages | status_of)")"
 check "chat: the other settings are saved"       "CHAT_RETENTION_DAYS=14" "$(ch_req "$CHA" POST /config '{"CHAT_RETENTION_DAYS":"14"}' >/dev/null; grep '^CHAT_RETENTION_DAYS=' "$CHW/.env")"
 check "chat: …and read back"                     14 "$(ch_req "$CHU" GET /chat/messages | body_of | jq -r '.room.retention.days')"
@@ -10118,11 +10170,12 @@ check "chat: …and read back"                     14 "$(ch_req "$CHU" GET /chat
 printf '{"hub":{"url":"http://hub.example:9876","member_id":"vm1"},"members":[]}\n' > "$CHW/.data/fleet.json"
 _mem=$(ch_req "$CHA" GET /chat/messages)
 check "chat: a VM of a fleet points at the hub's room" "404 chat_on_hub" "$(printf '%s %s' "$(status_of <<< "$_mem")" "$(body_of <<< "$_mem" | jq -r '.reason')")"
+check "chat: …its summary too"                   "404 chat_on_hub" "$(_s=$(ch_req "$CHA" GET /chat/summary); printf '%s %s' "$(status_of <<< "$_s")" "$(body_of <<< "$_s" | jq -r '.reason')")"
 rm -f "$CHW/.data/fleet.json"
 
 # the route policy as documented
-check "chat: docs: reading and sending are for every account, clearing for admins" "user user user user admin user" \
-    "$(for r in 'GET /chat/messages' 'GET /chat/presence' 'POST /chat/messages' 'PUT /chat/messages/{id}' 'DELETE /chat/messages' 'DELETE /chat/messages/{id}'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+check "chat: docs: reading and sending are for every account, clearing for admins" "user user user user user user user admin user" \
+    "$(for r in 'GET /chat/messages' 'GET /chat/presence' 'GET /chat/summary' 'GET /users/{name}/avatar' 'GET /users/{name}/profile' 'POST /chat/messages' 'PUT /chat/messages/{id}' 'DELETE /chat/messages' 'DELETE /chat/messages/{id}'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 rm -rf "$CHW"
 fi
 # <<< Chat

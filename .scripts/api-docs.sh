@@ -124,6 +124,7 @@ doc_path() {
         "/crowdsec/bouncers/*")         p="/crowdsec/bouncers/{name}" ;;
         "/themes/*")                    p="/themes/{name}" ;;
         "/chat/messages/*")             p="/chat/messages/{id}" ;;
+        "/users/*/"*)                   p="${p/\*/\{name\}}" ;;
     esac
     printf '%s' "$p"
 }
@@ -165,7 +166,7 @@ group_of() {
         automations|automations/*|schedules|schedules/*) printf 'Automation' ;;
         plugins|plugins/*) printf 'Plugins' ;;
         terminal/*) printf 'Terminal' ;;
-        chat/*) printf 'Chat' ;;
+        chat/*|users/*) printf 'Chat' ;;
         *) printf 'Other' ;;
     esac
 }

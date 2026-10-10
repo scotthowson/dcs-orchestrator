@@ -11,6 +11,8 @@
 #   room.json        {cleared_at, cleared_by} once an admin cleared the room
 #   live.jsonl       the live feed: one event per line, read by every open /stream (event "chat");
 #                    {type: message|edit|delete|clear|typing|state, ...}. Emptied in place when it grows long.
+#   (pictures)       a message and a person online carry avatar_url (GET /users/{name}/avatar) or avatar_emoji from the
+#                    person's profile (.api-auth/profiles/<user>.json, Settings → Profile); nothing is stored here
 #   presence/<user>  touched whenever the person's dashboard is connected (its /stream) or asks the chat anything;
 #                    online = touched in the last CHAT_ONLINE_WINDOW seconds. The file holds the role.
 #   rate/<user>      the times of the person's recent sends (the per-minute limit)
@@ -20,6 +22,10 @@
 # reading); bot accounts and API keys stay out. One edits their own message for 15 minutes; one deletes their own, an
 # admin any (audited) and may clear the room (audited). The audit never holds a message's text.
 # A fleet member (a VM) has no room of its own: its hub's room is the server's room.
+#
+# A dashboard signed in to several servers keeps each server's room with that server's own session (GET /chat/summary
+# for its badge, GET /stream?only=chat for its live events) and merges them on screen only: no server ever reads or
+# writes another's room.
 #
 # Loaded on demand by the router (_chat_lib in api-server.sh) and by /stream. Uses the API's helpers
 # (_api_success, _api_error, _api_response, _audit_log, QUERY_PARAMS, AUTH_*).
@@ -114,7 +120,103 @@ _chat_online_json() {
         rows+=("$u"$'\t'"$role"$'\t'"$seen")
     done
     if (( ${#rows[@]} == 0 )); then printf '[]'; return; fi
-    printf '%s\n' "${rows[@]}" | jq -Rnc '[inputs | split("\t") | {user: .[0], role: .[1], seen: (.[2] | tonumber)}] | sort_by(-.seen)'
+    local av
+    # shellcheck disable=SC2046  # one word per user name (safe names only)
+    av=$(_chat_avatars_json card $(printf '%s\n' "${rows[@]}" | cut -f1))
+    printf '%s\n' "${rows[@]}" | jq -Rnc --argjson av "$av" '[inputs | split("\t") | {user: .[0], role: .[1], seen: (.[2] | tonumber)} | . + ($av[.user] // {})] | sort_by(-.seen)'
+}
+
+# ── profile pictures ──────────────────────────────────────────────────────────
+# What a person set as their picture on their profile (Settings → Profile, POST /settings/profile: `icon`): an uploaded
+# picture (a data: URL) is served by GET /users/{name}/avatar and named as avatar_url (with the profile's time, so a new
+# picture is a new address); an emoji is avatar_emoji. A picture at an address on another site is never handed to other
+# people's browsers (it would tell that site who reads the room): those people get the initials instead.
+_chat_profile_file() { printf '%s/%s.json' "${PROFILES_DIR:-$BASE_DIR/.api-auth/profiles}" "$1"; }
+# USER [card]: {avatar_url | avatar_emoji}; with "card" also what the person says of themself in Settings → Profile, as
+# plain text: display_name (≤ 64), status (≤ 80), status_emoji, bio (≤ 280). Nothing else of the profile (e-mail, time
+# zone, looks) ever leaves it.
+_chat_avatar_of() {
+    local u="$1" f
+    f=$(_chat_profile_file "$u")
+    if ! _chat_safe_name "$u" || [[ ! -f "$f" ]]; then printf '{}'; return; fi
+    jq -c --arg u "$u" --arg v "$(stat -c %Y "$f" 2>/dev/null || echo 0)" --argjson card "$([[ "${2:-}" == card ]] && echo true || echo false)" '
+        def txt($k; $n): (.[$k] // "") | if type == "string" then gsub("[\\x{0}-\\x{1F}\\x{7F}\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]"; " ") | sub("^\\s+"; "") | sub("\\s+$"; "") | .[0:$n] else "" end;
+        ((.icon // .avatar // "") | if type == "string" then . else "" end) as $i
+        | (if ($i | test("^data:image/(png|jpeg|webp|gif);base64,")) then {avatar_url: "/users/\($u)/avatar?v=\($v)"}
+           elif ($i != "" and ($i | length) <= 11 and ($i | test("^(https?:|data:|/)") | not) and ($i | test("[<>\"\\\\]") | not)) then {avatar_emoji: $i}
+           else {} end)
+        + (if $card then
+             {display_name: txt("displayName"; 64), status: txt("statusText"; 80), status_emoji: txt("statusEmoji"; 8), bio: txt("bio"; 280)}
+             | with_entries(select(.value != ""))
+           else {} end)' "$f" 2>/dev/null || printf '{}'
+}
+
+# the pictures (or, with CARD=card first, the cards) of several people: {user: {…}}
+_chat_avatars_json() {
+    local u out='{}' a mode=""
+    [[ "${1:-}" == card ]] && { mode=card; shift; }
+    for u in "$@"; do
+        a=$(_chat_avatar_of "$u" "$mode"); [[ "$a" == \{* && "$a" != '{}' ]] || continue
+        out=$(jq -c --arg u "$u" --argjson a "$a" '. + {($u): $a}' <<< "$out")
+    done
+    printf '%s' "$out"
+}
+
+# a person's picture and card are for people signed in to the dashboard (admins and users), not for bots or API keys
+_chat_person_gate() {
+    if [[ "${AUTH_VIA_KEY:-}" == "true" || ( "${AUTH_ROLE:-}" != "admin" && "${AUTH_ROLE:-}" != "user" ) ]]; then
+        _api_error 403 "Profiles are for people signed in to the dashboard"
+        return 1
+    fi
+}
+
+# GET /users/{name}/profile — What a person shows the others (for anyone signed in): their picture (avatar_url or avatar_emoji), display name, status (≤ 80 characters), status emoji and bio (≤ 280), as plain text, set in Settings → Profile; their role, and whether they are in this server's chat room now
+handle_user_profile() {
+    local u="$1" users role card online
+    _chat_person_gate || return
+    _chat_safe_name "$u" || { _api_error 400 "Invalid user name"; return; }
+    users=$(_api_read_auth_file "users.json" 2>/dev/null)
+    role=$(jq -r --arg u "$u" '[.[]? | select(.username == $u) | .role][0] // empty' <<< "${users:-[]}" 2>/dev/null)
+    [[ -n "$role" ]] || { _api_error 404 "No such account"; return; }
+    card=$(_chat_avatar_of "$u" card); [[ "$card" == \{* ]] || card='{}'
+    online=false
+    if _chat_enabled && [[ -f "$CHAT_DIR/presence/$u" ]] && (( $(date +%s) - $(stat -c %Y "$CHAT_DIR/presence/$u" 2>/dev/null || echo 0) <= $(_chat_online_window) )); then online=true; fi
+    _api_success "$(jq -c --arg u "$u" --arg r "$role" --argjson on "$online" '{user: $u, role: $r, online: $on} + .' <<< "$card")"
+}
+
+# GET /users/{name}/avatar — A person's profile picture (the one uploaded in Settings → Profile), for anyone signed in: the image itself, cacheable; 404 when they have none (or an emoji, or a picture on another site)
+handle_user_avatar() {
+    local u="$1" f mime tmp size etag magic
+    _chat_person_gate || return
+    _chat_safe_name "$u" || { _api_error 400 "Invalid user name"; return; }
+    f=$(_chat_profile_file "$u")
+    [[ -f "$f" ]] || { _api_error 404 "No profile picture"; return; }
+    mime=$(jq -r '((.icon // .avatar // "") | if type == "string" then . else "" end) | capture("^data:(?<m>image/(png|jpeg|webp|gif));base64,") | .m' "$f" 2>/dev/null)
+    [[ -n "$mime" ]] || { _api_error 404 "No profile picture"; return; }
+    etag="\"$(stat -c '%Y-%s' "$f" 2>/dev/null)\""
+    tmp=$(mktemp) || { _api_error 500 "No room for the picture"; return; }
+    jq -r '(.icon // .avatar) | sub("^data:[^,]*,"; "")' "$f" 2>/dev/null | base64 -d > "$tmp" 2>/dev/null
+    size=$(stat -c %s "$tmp" 2>/dev/null || echo 0)
+    # what the file starts with must be what it says it is (a picture, at most 4 MiB)
+    magic=$(head -c 12 "$tmp" | od -An -tx1 | tr -d ' \n')
+    case "$mime" in
+        image/png)  [[ "$magic" == 89504e470d0a1a0a* ]] ;;
+        image/jpeg) [[ "$magic" == ffd8ff* ]] ;;
+        image/gif)  [[ "$magic" == 47494638* ]] ;;
+        image/webp) [[ "$magic" == 52494646????????57454250 ]] ;;
+    esac || { rm -f "$tmp"; _api_error 404 "No profile picture"; return; }
+    if (( size < 8 || size > 4194304 )); then rm -f "$tmp"; _api_error 404 "No profile picture"; return; fi
+    printf 'HTTP/1.1 200 OK\r\n'
+    printf 'Content-Type: %s\r\n' "$mime"
+    printf 'Content-Length: %s\r\n' "$size"
+    printf 'Cache-Control: private, max-age=3600\r\n'
+    printf 'ETag: %s\r\n' "$etag"
+    printf 'X-Content-Type-Options: nosniff\r\n'
+    printf "Content-Security-Policy: default-src 'none'\r\n"
+    _api_cors_lines
+    printf 'Connection: close\r\n\r\n'
+    cat "$tmp"
+    rm -f "$tmp"
 }
 
 # ── gate ──────────────────────────────────────────────────────────────────────
@@ -220,6 +322,11 @@ handle_chat_messages() {
         map(select(($sid == null or .id > $sid) and ($sts == null or .ts > $sts or (.edited // 0) > $sts or (.deleted_at // 0) > $sts) and ($bid == null or .id < $bid))) as $m
         | {messages: (if ($sid != null or $sts != null) then $m[:$limit] else $m[-$limit:] end), has_more: (($m | length) > $limit)}')
     [[ "$msgs" == \{* ]] || msgs='{"messages": [], "has_more": false}'
+    # each message with its writer's picture (read now: a new picture shows on the old messages too)
+    local av
+    # shellcheck disable=SC2046  # one word per user name (safe names only)
+    av=$(_chat_avatars_json $(jq -r '[.messages[].user] | unique | .[]' <<< "$msgs" 2>/dev/null))
+    [[ "$av" != '{}' ]] && msgs=$(jq -c --argjson av "$av" '.messages |= map(. + ($av[.user] // {}))' <<< "$msgs")
     room=$(_chat_room_json)
     _api_success "$(jq -c --argjson room "$room" '. + {room: $room}' <<< "$msgs")"
 }
@@ -233,6 +340,8 @@ _chat_append_locked() {   # USER ROLE TEXT_JSON -> the message
     printf '%s' "$seq" > "$CHAT_DIR/seq.tmp" && mv -f "$CHAT_DIR/seq.tmp" "$CHAT_DIR/seq"
     printf '%s\n' "$msg" >> "$CHAT_DIR/messages.jsonl"
     _chat_rotate_locked
+    # the live event and the answer carry the writer's picture (the stored line does not: it is read with each answer)
+    msg=$(jq -c --argjson a "$(_chat_avatar_of "$1")" '. + $a' <<< "$msg")
     _chat_live_locked "$(jq -c '{type: "message", message: .}' <<< "$msg")"
     rm -f "$CHAT_DIR/typing/$1" 2>/dev/null
     printf '%s' "$msg"
@@ -341,6 +450,20 @@ handle_chat_clear() {
     _chat_locked _chat_clear_locked "$AUTH_USERNAME" "$now" || { _api_error 500 "The room could not be cleared"; return; }
     _audit_log "chat_room_cleared" "${AUTH_USERNAME} cleared the chat room ($n messages)"
     _api_success "{\"success\": true, \"cleared_at\": $now, \"removed\": ${n:-0}}"
+}
+
+# GET /chat/summary — The room without its messages, for a dashboard that keeps several servers' rooms (the badge and who is online): latest_id, who is online, what the caller may do; ?after=<id> adds unread, the messages after that id from someone else and not deleted. Marks the caller as here
+handle_chat_summary() {
+    _chat_gate || return
+    _chat_touch
+    local after="${QUERY_PARAMS[after]:-}" room unread=null
+    if [[ -n "$after" ]]; then
+        [[ "$after" =~ ^[0-9]{1,12}$ ]] || { _api_error 400 "after is a message id"; return; }
+        unread=$(_chat_all | jq --argjson a "$after" --arg me "${AUTH_USERNAME:-}" 'map(select(.id > $a and .user != $me and .deleted != true)) | length' 2>/dev/null)
+        [[ "$unread" =~ ^[0-9]+$ ]] || unread=0
+    fi
+    room=$(_chat_room_json)
+    _api_success "$(jq -c --argjson u "$unread" '{room: .} + (if $u == null then {} else {unread: $u} end)' <<< "$room")"
 }
 
 # GET /chat/presence — Who is in the room now (dashboard open in the last minute), with their role; marks the caller as here
