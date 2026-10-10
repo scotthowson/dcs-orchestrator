@@ -592,7 +592,8 @@ rm -rf "$WORK/hookplug" "$WORK/hook-ctx.json"
 # shows the later action running until it really ended
 _QS="$WORK/Stacks/queued"; mkdir -p "$_QS"; printf 'services:\n  q:\n    image: alpine:3\n' > "$_QS/docker-compose.yml"
 _QC="$WORK/queued-compose.sh"; _QL="$WORK/queued-compose.log"; : > "$_QL"
-printf '#!/bin/bash\ncase " $* " in *" version "*) exit 0;; esac\necho "begin $*" >> %q; sleep 2; echo end >> %q\n' "$_QL" "$_QL" > "$_QC"; chmod +x "$_QC"
+# (`config`, the compose policy's read of the file, changes nothing on the project: not counted)
+printf '#!/bin/bash\ncase " $* " in *" version "*|*" config "*) exit 0;; esac\necho "begin $*" >> %q; sleep 2; echo end >> %q\n' "$_QL" "$_QL" > "$_QC"; chmod +x "$_QC"
 auth_request POST /stacks/queued/restart '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null; sleep 0.5
 auth_request POST /stacks/queued/stop '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null
 check "stack actions in a row: the later one is shown running" "stop|true" "$(auth_request GET /stacks/queued/activity | body_of | jq -r '"\(.action)|\(.active)"' 2>/dev/null)"
