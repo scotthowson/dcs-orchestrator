@@ -70,3 +70,10 @@ GET /system/metrics
 GET /webhooks
 GET /feed/summary
 GET /feed/crowdsec
+
+# Technitium DNS: a viewer sees the page read-only (the instances, the numbers, the lists, the kids' groups); a
+# device's own queries (GET /dns/technitium/activity) stay the admin's
+GET /dns/technitium/status
+GET /dns/technitium/stats
+GET /dns/technitium/lists
+GET /dns/technitium/groups

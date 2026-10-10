@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `442` in total.
+Every endpoint below is `459` in total.
 
 ## Access levels
 
@@ -247,6 +247,11 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/traefik/feed/status` | admin | The Traefik feed: on or off, token, target host, what it serves and skips, what the members offered and the hub refused or renamed (member_skipped), when it was last pulled, and the provider snippet to paste |
 | GET | `/dns/zones` | admin | Zones the Cloudflare token can manage |
 | GET | `/dns/records` | admin | DNS records of the zone (all types) with their DCS route links |
+| GET | `/dns/technitium/status` | user | Both Technitium instances: reachable, version, uptime, blocking and its pause, forwarders, lists, zones, apps; whether the secondary has what the primary has (in_sync), the last sync, the groups in bedtime, the house's SafeSearch |
+| GET | `/dns/technitium/stats` | user | Queries, blocked and clients over the range for both instances together: the totals, the series, the top clients (named after a group's device, else Technitium's name for it), domains and blocked domains, the query types |
+| GET | `/dns/technitium/activity` | admin | A device's recent queries from the Query Logs (Sqlite) app of both instances, newest first: client (an address), q (part of a name), blocked=1 for the blocked ones alone, limit (100, at most 500) |
+| GET | `/dns/technitium/lists` | user | The primary's blocklist URLs, the custom allowed and blocked names, the categories a group can block and the baseline lists |
+| GET | `/dns/technitium/groups` | user | The kids' groups (devices, category lists, bedtime), which are in bedtime now and until when a bedtime is paused, the categories, the house's SafeSearch and YouTube setting |
 | GET | `/homarr/status` | user | Check if Homarr is deployed and has an API key configured |
 | POST | `/traefik/feed/token` | admin | Mint a new feed token (paste the new one into the remote Traefik) |
 | POST | `/traefik/routes/rebuild` | admin | Write the missing routes for the services of one stack {stack} or of every stack: services that publish a port and have no route file yet get Host(service.domain) → the container, like a fresh deploy (a domain is needed: TRAEFIK_DOMAIN or PROXY_DOMAIN); routes written before Authelia arrived go behind it (answer: routes_written, authelia_protected) |
@@ -255,11 +260,23 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/homarr/register` | admin | Put an app on the Homarr dashboard now {name, url, icon, description} |
 | POST | `/dns/records` | admin | Create a record {type, name, content, ttl, proxied, priority, comment, zone} |
 | POST | `/dns/records/sync` | admin | Create the proxied CNAME records that DCS routes are missing |
+| POST | `/dns/technitium/connect` | admin | Connect an instance: {url: "http://192.168.2.53:5380", token (a Technitium API token; kept as the secret TECHNITIUM_TOKEN or TECHNITIUM_SECONDARY_TOKEN; leave it out to keep the stored one), role: primary\|secondary}. Saves, then tests it; url "" disconnects |
+| POST | `/dns/technitium/bootstrap` | admin | Apply the house's baseline to an instance (role: primary, secondary, or both by default): Quad9 and Mullvad over TLS, one at a time, DNSSEC validation, no IPv6 preference, Hagezi Pro + TIF + DoH bypass lists updated daily (lists already there stay), the query log for 30 days (Query Logs (Sqlite)), the Advanced Blocking app, dns1/dns2 as its name, a 20000-entry cache. Changes only what differs: a second run changes nothing |
+| POST | `/dns/technitium/sync` | admin | Make the secondary what the primary is: settings (forwarders, lists, cache), the allowed and blocked names, the apps and their configs, the forced SafeSearch names |
+| POST | `/dns/technitium/block` | admin | Block a name for everyone (Technitium's blocked zone): {domain, remove?: true to take it off}; the secondary follows |
+| POST | `/dns/technitium/allow` | admin | Allow a name for everyone (Technitium's allowed zone, over every blocklist): {domain, remove?: true to take it off}; the secondary follows |
+| POST | `/dns/technitium/blocklists` | admin | Add or remove a blocklist URL on the primary: {url, remove?: true}; the secondary follows |
+| POST | `/dns/technitium/pause` | admin | Pause blocking on every instance for {minutes: 5, 15 or 60}; it comes back by itself |
+| POST | `/dns/technitium/resume` | admin | Blocking back on now, on every instance |
+| POST | `/dns/technitium/safesearch` | admin | SafeSearch and YouTube's restricted mode for the whole house: {safe_search: true\|false, youtube: off\|moderate\|strict}. Google, Bing and DuckDuckGo answer their safe names; Technitium cannot do it per group |
+| POST | `/dns/technitium/groups` | admin | Add a group, or change one ({id} of an existing one): {name, devices: [{ip, label, mac?}], lists: [adult, gambling, social, proxy-vpn, nosafesearch], bedtime: {enabled, from, to, days}}; Technitium's Advanced Blocking app gets it (installed when missing) and the secondary follows |
+| POST | `/dns/technitium/groups/{id}/pause-bedtime` | admin | Pause a group's bedtime: {minutes: 30 (1 to 240), or 0 to end the pause} |
 | POST | `/routes/reconcile` | admin | Probe the routes and restart Traefik once if they are dead |
 | PUT | `/dns/records/*` | admin | Change a record's type, name, content, TTL, proxy status, priority or comment |
 | PUT | `/routes/{stack}/{service}` | admin | Update a route file's subdomain |
 | DELETE | `/homarr/key` | admin | Forget Homarr's API key (apps then land in the library only) |
 | DELETE | `/dns/records/*` | admin | Delete a record (the zone apex and names DCS routes use need force=true) |
+| DELETE | `/dns/technitium/groups/{id}` | admin | Delete a group: its devices go back to the house's blocking |
 | DELETE | `/routes/{stack}/{service}` | admin | Delete a route file and optionally clean up DNS |
 
 ## CrowdSec

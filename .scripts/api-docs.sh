@@ -66,7 +66,7 @@ extract_descriptions() {
             next
         }
         { last=""; hint="" }
-    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh "$BASE_DIR"/.lib/crowdsec-cloudflare.sh "$BASE_DIR"/.lib/chat.sh
+    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh "$BASE_DIR"/.lib/crowdsec-cloudflare.sh "$BASE_DIR"/.lib/chat.sh "$BASE_DIR"/.lib/technitium.sh
 }
 
 # Fallback description from the handler name: handle_stack_compose_save → "Stack compose save"
@@ -124,6 +124,8 @@ doc_path() {
         "/crowdsec/bouncers/*")         p="/crowdsec/bouncers/{name}" ;;
         "/themes/*")                    p="/themes/{name}" ;;
         "/chat/messages/*")             p="/chat/messages/{id}" ;;
+        "/dns/technitium/groups/*/pause-bedtime") p="/dns/technitium/groups/{id}/pause-bedtime" ;;
+        "/dns/technitium/groups/*")     p="/dns/technitium/groups/{id}" ;;
     esac
     printf '%s' "$p"
 }
