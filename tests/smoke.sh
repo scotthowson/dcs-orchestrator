@@ -10448,7 +10448,7 @@ fi
 
 # >>> Technitium DNS: two stand-in servers (tests/mock-technitium.py), an install of its own
 if [[ "${SMOKE_ONLY:-}" != crowdsec ]]; then
-echo "Technitium DNS: connect, baseline, block/allow, pause, the kids' groups and bedtime (a fake clock), SafeSearch, the sync, roles"
+echo "Technitium DNS: the switch, connect, baseline, block/allow, pause, the kids' groups and bedtime (a fake clock), SafeSearch, the device directory, DHCP, the sync, roles"
 TW="$WORK-tech"; rm -rf "$TW"
 mkdir -p "$TW/.scripts" "$TW/.lib" "$TW/.config" "$TW/Stacks" "$TW/.data" "$TW/logs" "$TW/.api-auth"
 cp "$ROOT/.scripts/api-server.sh" "$ROOT/.scripts/api-dispatch.sh" "$TW/.scripts/"; cp "$ROOT/VERSION" "$TW/"
@@ -10476,6 +10476,27 @@ TA=$(tt_req "" POST /auth/setup '{"username":"scott","password":"correct horse b
 _tinv=$(tt_req "$TA" POST /auth/invite '{"role":"user"}' | body_of | jq -r '.code // empty')
 TU=$(tt_req "" POST /auth/register "{\"username\":\"kid\",\"password\":\"kid-pass-12345\",\"invite_code\":\"$_tinv\"}" | body_of | jq -r '.token // empty')
 check "technitium: the accounts"                   "yes yes" "$([[ ${#TA} -ge 32 ]] && printf yes || printf no) $([[ ${#TU} -ge 32 ]] && printf yes || printf no)"
+
+# the switch (Config → Integrations): off on a new install; every route answers 404 feature_off until an admin turns it on
+_toff=$(tt_req "$TA" GET /dns/technitium/status)
+check "technitium: off by default: 404 feature_off" "404 feature_off" "$(status_of <<< "$_toff") $(body_of <<< "$_toff" | jq -r .code)"
+check "technitium: …it says where to turn it on"   yes "$(body_of <<< "$_toff" | jq -r .message | grep -q 'Config → Integrations' && echo yes || echo no)"
+check "technitium: …a write and the devices too"   "404 404 404" "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"x.example"}' | status_of) $(tt_req "$TU" GET /dns/technitium/devices | status_of) $(tt_req "$TA" PUT /dns/technitium/devices/aabbccddeeff '{}' | status_of)"
+check "technitium: …/config says off (the nav hides the page)" false "$(tt_req "$TU" GET /config | body_of | jq -r .technitium_enabled)"
+check "technitium: …the minute clock leaves it alone" off "$( ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_on ) && echo on || echo off)"
+check "technitium: a viewer cannot turn it on"     403 "$(tt_req "$TU" POST /config '{"TECHNITIUM_ENABLED":"true"}' | status_of)"
+check "technitium: the switch is true or false"    400 "$(tt_req "$TA" POST /config '{"TECHNITIUM_ENABLED":"yes"}' | status_of)"
+check "technitium: the admin turns it on"          "200 true true" "$(tt_req "$TA" POST /config '{"TECHNITIUM_ENABLED":"true"}' | status_of) $(tt_req "$TU" GET /config | body_of | jq -r .technitium_enabled) $(grep -q '^TECHNITIUM_ENABLED=true' "$TW/.env" && echo true || echo false)"
+check "technitium: …and off again: 404"            "404 false" "$(tt_req "$TA" POST /config '{"TECHNITIUM_ENABLED":"false"}' >/dev/null; tt_req "$TA" GET /dns/technitium/groups | status_of) $(tt_req "$TU" GET /config | body_of | jq -r .technitium_enabled)"
+# an install from before the switch (TECHNITIUM_URL set, no TECHNITIUM_ENABLED line) keeps its page: switched on once, in .env
+cp "$TW/.env" "$TW/.env.keep"
+sed -i -e '/^TECHNITIUM_ENABLED=/d' -e 's|^TECHNITIUM_URL=.*|TECHNITIUM_URL=http://192.0.2.53:5380|' "$TW/.env"
+check "technitium: an old install with TECHNITIUM_URL keeps the page" "true 200" "$(tt_req "$TU" GET /config | body_of | jq -r .technitium_enabled) $(tt_req "$TU" GET /dns/technitium/groups | status_of)"
+check "technitium: …written to .env once, said in the audit log" "1 yes" "$(grep -c '^TECHNITIUM_ENABLED=true' "$TW/.env") $(grep -q 'TECHNITIUM_ENABLED.*already had Technitium connected' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+sed -i '/^TECHNITIUM_ENABLED=/d' "$TW/.env.keep"; sed -i 's|^TECHNITIUM_URL=.*|TECHNITIUM_URL=|' "$TW/.env.keep"
+check "technitium: …an install without TECHNITIUM_URL stays off" "false no" "$(command cp -f "$TW/.env.keep" "$TW/.env"; tt_req "$TU" GET /config | body_of | jq -r .technitium_enabled) $(grep -q '^TECHNITIUM_ENABLED' "$TW/.env" && echo yes || echo no)"
+rm -f "$TW/.env.keep"
+tt_req "$TA" POST /config '{"TECHNITIUM_ENABLED":"true"}' >/dev/null
 
 # nothing connected
 check "technitium: status before connecting"       "200 false" "$(R=$(tt_req "$TU" GET /dns/technitium/status); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '.configured')")"
@@ -10634,6 +10655,145 @@ check "technitium: delete a group"                 "200 0 {}" "$(R=$(tt_req "$TA
 check "technitium: …gone"                          404 "$(tt_req "$TA" DELETE "/dns/technitium/groups/$GB" '' | status_of)"
 check "technitium: a viewer cannot delete one"     403 "$(tt_req "$TU" DELETE /dns/technitium/groups/gx '' | status_of)"
 
+# the device directory: the hub's network, its neighbours, mDNS and the ping sweep are stand-ins on PATH
+TFB="$TW/fakebin"; mkdir -p "$TFB"
+cat > "$TFB/ip" <<'EOF'
+#!/bin/bash
+case "$*" in
+    "-4 route show default") echo "default via 192.168.2.1 dev eth9 proto dhcp src 192.168.2.233 metric 100" ;;
+    "-4 -o addr show dev eth9") printf '2: eth9    inet 192.168.2.233/24 brd 192.168.2.255 scope global dynamic eth9\\       valid_lft 86000sec preferred_lft 86000sec\n' ;;
+    "-o link show dev eth9") printf '2: eth9: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000\\    link/ether 00:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff\n' ;;
+    "-4 neigh show dev eth9") cat "$(dirname "$0")/neigh" ;;
+    *) exit 1 ;;
+esac
+EOF
+printf '#!/bin/bash\necho "${@: -1}" >> "$(dirname "$0")/pings"\n' > "$TFB/ping"
+printf '#!/bin/bash\nfor a in "$@"; do [[ "$a" == 192.168.2.61 ]] && printf "%%s\\t%%s\\n" "$a" esp-kitchen.local; done\nexit 0\n' > "$TFB/avahi-resolve-address"
+chmod +x "$TFB/"*
+cat > "$TFB/neigh" <<'EOF'
+192.168.2.1 lladdr 00:0e:59:aa:bb:01 REACHABLE
+192.168.2.50 lladdr da:a1:19:00:00:50 STALE
+192.168.2.60 lladdr 00:09:bf:00:00:60 REACHABLE
+192.168.2.61 lladdr 08:3a:8d:00:00:61 DELAY
+192.168.2.70 lladdr 28:cd:c1:00:00:70 REACHABLE
+192.168.2.99  FAILED
+EOF
+TFP="PATH=$TFB:$PATH"
+_dev() { tt_req "$TU" GET /dns/technitium/devices '' "DCS_TECHNITIUM_NOW=${2:-$MON1000}" | body_of | jq -r --arg ip "$1" ".devices[] | select(.ip == \$ip) | $3"; }
+check "technitium: a viewer cannot scan"           403 "$(tt_req "$TU" POST /dns/technitium/devices/scan '' "$TFP" | status_of)"
+check "technitium: an empty directory"             "0 null" "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '"\(.devices | length) \(.last_scan)"')"
+_tsc=$(tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$MON1000 | body_of)
+check "technitium: the scan finds 7 devices"       "7 devices found, 0 named by DHCP 7 true" "$(jq -r '"\(.message) \(.new) \(.swept)"' <<< "$_tsc")"
+check "technitium: …from the neighbours, the query log, reverse DNS and mDNS" '{"arp":6,"mdns":1,"querylog":3,"rdns":2}' "$(jq -c '.sources' <<< "$_tsc")"
+check "technitium: …one ping to each other address of the /24" "253 yes no" "$(wc -l < "$TFB/pings") $(grep -qx 192.168.2.254 "$TFB/pings" && echo yes || echo no) $(grep -qx 192.168.2.233 "$TFB/pings" && echo yes || echo no)"
+check "technitium: a console by its vendor"        "Nintendo console true" "$(_dev 192.168.2.60 '' '"\(.vendor) \(.icon) \(.icon_guessed)"')"
+check "technitium: a tablet by its name (reverse DNS), a private MAC" "tablet-9.home tablet Private address true" "$(_dev 192.168.2.50 '' '"\(.hostname) \(.icon) \(.vendor) \(.mac_random)"')"
+check "technitium: …its queries and blocked ones, both servers" "150 2" "$(_dev 192.168.2.50 '' '"\(.queries_today) \(.blocked_today)"')"
+check "technitium: a name over mDNS, Espressif is iot" "esp-kitchen.local iot" "$(_dev 192.168.2.61 '' '"\(.hostname) \(.icon)"')"
+check "technitium: reverse DNS on the primary, a Raspberry Pi is a server" "pi-hole.home server Raspberry Pi" "$(_dev 192.168.2.70 '' '"\(.hostname) \(.icon) \(.vendor)"')"
+check "technitium: the router (Sagemcom)"          "Sagemcom router" "$(_dev 192.168.2.1 '' '"\(.vendor) \(.icon)"')"
+check "technitium: the hub itself"                 "true server 001122334455" "$(_dev 192.168.2.233 '' '"\(.hub) \(.icon) \(.id)"')"
+check "technitium: a client of the query log alone: by its address" "ip-192.168.2.77 null 5" "$(_dev 192.168.2.77 '' '"\(.id) \(.mac) \(.queries_today)"')"
+check "technitium: no loopback, no IPv6 client"   0 "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq '[.devices[] | select(.ip == "127.0.0.1" or (.ip | test(":")))] | length')"
+check "technitium: …busiest first"                 "192.168.2.50" "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '.devices[0].ip')"
+_tsc=$(tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 120)) | body_of)
+check "technitium: a scan 2 minutes later does not sweep again" "false 0 253" "$(jq -r '"\(.swept) \(.new)"' <<< "$_tsc") $(wc -l < "$TFB/pings")"
+sed -i 's/^192.168.2.50 /192.168.2.55 /' "$TFB/neigh"
+
+# a device named, its icon picked
+TABLET=daa119000050
+check "technitium: a viewer cannot name a device"  403 "$(tt_req "$TU" PUT /dns/technitium/devices/$TABLET '{"nickname":"x"}' | status_of)"
+check "technitium: an icon that is not one"        400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"icon":"toaster"}' | status_of)"
+check "technitium: a nickname of 41 characters"    400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET "{\"nickname\":\"$(printf 'x%.0s' {1..41})\"}" | status_of)"
+check "technitium: a nickname on two lines"        400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"nickname":"a\nb"}' | status_of)"
+check "technitium: a field a device does not have" 400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"ip":"10.0.0.1"}' | status_of)"
+check "technitium: a device that is not there, an id that is not one" "404 400" "$(tt_req "$TA" PUT /dns/technitium/devices/aabbccddeeff '{}' | status_of) $(tt_req "$TA" PUT '/dns/technitium/devices/x;y' '{}' | status_of)"
+_tdu=$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"nickname":"  Tom'"'"'s tablet ","icon":"tablet","notes":"Fire HD 8, the blue case\nCharges in the kitchen"}' DCS_TECHNITIUM_NOW=$MON1000 | body_of)
+check "technitium: nickname, icon, notes"          "Tom's tablet tablet false 2" "$(jq -r '.device | "\(.nickname) \(.icon) \(.icon_guessed) \(.notes | split("\n") | length)"' <<< "$_tdu")"
+check "technitium: …said in the audit log"         yes "$(grep -q "TECHNITIUM_DEVICE.*Tom's tablet ($TABLET): nickname" "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+check "technitium: the stats show the nickname"    "Tom's tablet $TABLET tablet" "$(tt_req "$TU" GET '/dns/technitium/stats?range=lastDay' | body_of | jq -r '.top_clients[0] | "\(.name) \(.device_id) \(.icon)"')"
+
+# a kids' group picks devices from the directory
+_tgk=$(tt_req "$TA" POST /dns/technitium/groups '{"name":"Kids","lists":["adult"]}' DCS_TECHNITIUM_NOW=$MON1000 | body_of); GK=$(jq -r '.group.id' <<< "$_tgk")
+check "technitium: a device into a group"          "200 Kids" "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET "{\"group_id\":\"$GK\"}" DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .device.group_name)")"
+check "technitium: …the group holds it by its id"  "192.168.2.50 Tom's tablet $TABLET" "$(jq -r --arg g "$GK" '.groups[] | select(.id == $g) | .devices[0] | "\(.ip) \(.label) \(.id)"' "$TW/.data/technitium/groups.json")"
+check "technitium: …Technitium maps it"            Kids "$(_adv m1 | jq -r '.networkGroupMap["192.168.2.50"]')"
+check "technitium: …the directory says so"         "$GK Kids" "$(_dev 192.168.2.50 '' '"\(.group_id) \(.group_name)"')"
+check "technitium: a group that is not there"      404 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"group_id":"gnope"}' | status_of)"
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 300)) >/dev/null
+check "technitium: the tablet moved to .55: the group follows it" "192.168.2.55 Kids null" "$(jq -r --arg g "$GK" '.groups[] | select(.id == $g) | .devices[0].ip' "$TW/.data/technitium/groups.json") $(_adv m1 | jq -r '.networkGroupMap["192.168.2.55"]') $(_adv m1 | jq -r '.networkGroupMap["192.168.2.50"]')"
+check "technitium: …a sweep again after 5 minutes" 506 "$(wc -l < "$TFB/pings")"
+
+# DHCP: the router still hands out addresses, then the house's scope is made here, off, and turned on
+check "technitium: pin an address while the router does DHCP" "409 no_dhcp_scope yes" "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"static":true}'); printf '%s %s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .reason)" "$(body_of <<< "$R" | jq -r .message | grep -q 'the router still hands out addresses' && echo yes || echo no)")"
+_tdh=$(tt_req "$TU" GET /dns/technitium/dhcp '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 300)) | body_of)
+check "technitium: a viewer reads DHCP: off, the stock scope" "false Default false" "$(jq -r '"\(.enabled) \(.scopes[0].name) \(.scopes[0].enabled)"' <<< "$_tdh")"
+check "technitium: …a scope made from the hub's network" "192.168.2.100 192.168.2.199 192.168.2.1 home 24 true true 192.168.2.233" "$(jq -r '"\(.suggested.start) \(.suggested.end) \(.suggested.router) \(.suggested.domain) \(.suggested.lease_hours) \(.suggested.ping_check) \(.suggested.reserve_known) \(.hub.ip)"' <<< "$_tdh")"
+check "technitium: …which devices ask Technitium"  "7 3" "$(jq -r '"\(.devices.seen) \(.devices.asking)"' <<< "$_tdh")"
+SCOPE='{"start":"192.168.2.100","end":"192.168.2.199","router":"192.168.2.1","dns":["192.168.2.53","192.168.2.207"],"domain":"home","lease_hours":24,"exclusions":[{"start":"192.168.2.150","end":"192.168.2.160"}]}'
+check "technitium: a viewer cannot make the scope" 403 "$(tt_req "$TU" POST /dns/technitium/dhcp/scope "$SCOPE" | status_of)"
+check "technitium: a scope whose end comes first"  400 "$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$(jq -c '.end = "192.168.2.50"' <<< "$SCOPE")" | status_of)"
+check "technitium: a gateway in another network"   400 "$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$(jq -c '.router = "10.0.0.1"' <<< "$SCOPE")" | status_of)"
+check "technitium: a mask that is not one, no DNS" "400 400" "$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$(jq -c '.mask = "255.0.255.0"' <<< "$SCOPE")" | status_of) $(tt_req "$TA" POST /dns/technitium/dhcp/scope "$(jq -c '.dns = []' <<< "$SCOPE")" | status_of)"
+_tds=$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$SCOPE" | body_of)
+check "technitium: the scope is made, off, every known device with a MAC keeps its address" "LAN true false 6" "$(jq -r '"\(.scope) \(.created) \(.enabled) \(.reserved)"' <<< "$_tds")"
+check "technitium: …named or not, seen only as a neighbour too; not the address-only one" "192.168.2.1 192.168.2.55 192.168.2.60 192.168.2.61 192.168.2.70 192.168.2.233" "$(m1 '[.dhcp.scopes.LAN.reservedLeases[].address] | sort_by(split(".") | map(tonumber)) | join(" ")')"
+check "technitium: …Technitium's stock scope became it (never on), ping check on" "LAN false 192.168.2.53,192.168.2.207 false home 1 192.168.2.150 true" "$(m1 '.dhcp.scopes | keys | join(",")') $(m1 '.dhcp.scopes.LAN | "\(.enabled) \(.dnsServers | join(",")) \(.useThisDnsServer) \(.domainName) \(.leaseTimeDays) \(.exclusions[0].startingAddress) \(.pingCheckEnabled)"')"
+check "technitium: …the tablet's reservation: its MAC, its address, its name" "DA-A1-19-00-00-50 192.168.2.55 tom-s-tablet" "$(m1 '.dhcp.scopes.LAN.reservedLeases[] | select(.address == "192.168.2.55") | "\(.hardwareAddress) \(.address) \(.hostName)"')"
+check "technitium: …the directory marks it static" "true 192.168.2.55" "$(_dev 192.168.2.55 '' '"\(.static) \(.reserved_ip)"')"
+check "technitium: saving the scope again keeps it off, adds nothing" "false false 0 6" "$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$SCOPE" | body_of | jq -r '"\(.created) \(.enabled) \(.reserved)"') $(m1 '.dhcp.scopes.LAN.reservedLeases | length')"
+check "technitium: reserve_known false leaves the devices alone" "0" "$(tt_req "$TA" POST /dns/technitium/dhcp/scope "$(jq -c '.reserve_known = false' <<< "$SCOPE")" | body_of | jq -r .reserved)"
+NSW=0009bf000060
+tt_req "$TA" PUT /dns/technitium/devices/$NSW '{"static":false}' >/dev/null
+check "technitium: pin the Switch's address"       "200 true 192.168.2.60" "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$NSW '{"static":true,"nickname":"Switch"}'); printf '%s %s' "$(status_of <<< "$R")" "$(m1 '.dhcp.scopes.LAN.reservedLeases | map(select(.hardwareAddress == "00-09-BF-00-00-60"))[0] | "\(.address != null) \(.address)"')")"
+check "technitium: …and unpin it"                  "200 0 false" "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$NSW '{"static":false}'); printf '%s %s %s' "$(status_of <<< "$R")" "$(m1 '[.dhcp.scopes.LAN.reservedLeases[] | select(.hardwareAddress == "00-09-BF-00-00-60")] | length')" "$(body_of <<< "$R" | jq -r .device.static)")"
+check "technitium: a device without a MAC cannot be pinned" 409 "$(tt_req "$TA" PUT /dns/technitium/devices/ip-192.168.2.77 '{"static":true}' | status_of)"
+check "technitium: a viewer cannot turn DHCP on"   403 "$(tt_req "$TU" POST /dns/technitium/dhcp/enable '{}' | status_of)"
+check "technitium: turn DHCP on here"              "200 true true" "$(tt_req "$TA" POST /dns/technitium/dhcp/enable '{}' | status_of) $(m1 .dhcp.scopes.LAN.enabled) $(tt_req "$TU" GET /dns/technitium/dhcp '' "$TFP" | body_of | jq -r .enabled)"
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode scope=LAN --data-urlencode hardwareAddress=00-09-BF-00-00-60 --data-urlencode address=192.168.2.120 --data-urlencode hostName=Switch-Lite "$M1/api/_mock/lease" >/dev/null
+sed -i 's/^192.168.2.60 /192.168.2.120 /' "$TFB/neigh"
+_tsc=$(tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 600)) | body_of)
+check "technitium: a lease names the device"       "1 Switch-Lite 192.168.2.120 Switch" "$(jq -r .named_by_dhcp <<< "$_tsc") $(_dev 192.168.2.120 $((MON1000 + 600)) '"\(.hostname) \(.ip) \(.nickname)"')"
+_tdh=$(tt_req "$TU" GET /dns/technitium/dhcp '' "$TFP" | body_of)
+check "technitium: the leases with their device and the DNS they were given" "Switch $NSW 192.168.2.53,192.168.2.207" "$(jq -r '.leases[0] | "\(.nickname) \(.device_id) \(.dns | join(","))"' <<< "$_tdh")"
+check "technitium: end a lease"                    "200 0 404" "$(tt_req "$TA" DELETE /dns/technitium/dhcp/leases/00:09:bf:00:00:60 '' | status_of) $(m1 '.dhcp.leases | length') $(tt_req "$TA" DELETE /dns/technitium/dhcp/leases/00:09:bf:00:00:60 '' | status_of)"
+check "technitium: a lease address that is not a MAC" 400 "$(tt_req "$TA" DELETE '/dns/technitium/dhcp/leases/zz' '' | status_of)"
+check "technitium: turn DHCP off again"            "200 false" "$(tt_req "$TA" POST /dns/technitium/dhcp/disable '{"name":"LAN"}' | status_of) $(m1 .dhcp.scopes.LAN.enabled)"
+
+# block one device until a time (bedtime's rule for one device), lifted by the minute clock
+check "technitium: a block in the past"            400 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET "{\"blocked_until\":$((MON1000 - 60))}" DCS_TECHNITIUM_NOW=$MON1000 | status_of)"
+check "technitium: block the tablet for an hour"   "200 true" "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET "{\"blocked_until\":$((MON1000 + 3600))}" DCS_TECHNITIUM_NOW=$MON1000 | status_of) $(_dev 192.168.2.55 $MON1000 .blocked)"
+check "technitium: …everything blocked for it, on both" 'DCS: blocked devices ["."] ["."]' "$(_adv m1 | jq -r '.networkGroupMap["192.168.2.55"]') $(_adv m1 | jq -c '.groups[] | select(.name == "DCS: blocked devices") | .blockedRegex') $(_adv m2 | jq -c '.groups[] | select(.name == "DCS: blocked devices") | .blockedRegex')"
+_n=$(_sets); _ttick $((MON1000 + 1800))
+check "technitium: …half an hour later nothing is written" "$_n" "$(_sets)"
+_ttick $((MON1000 + 3601))
+check "technitium: …the hour is up: back in its group" "Kids 0" "$(_adv m1 | jq -r '.networkGroupMap["192.168.2.55"]') $(_adv m1 | jq '[.groups[] | select(.name == "DCS: blocked devices")] | length')"
+check "technitium: …said in the audit log"         "yes yes" "$(grep -q "TECHNITIUM_BLOCK.*Tom's tablet: blocked" "$TW/.api-auth/auth-audit.log" && echo yes || echo no) $(grep -q "TECHNITIUM_BLOCK.*Tom's tablet: block ended" "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+check "technitium: out of the group"               "200 null 0" "$(R=$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"group_id":null}'); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .device.group_id)") $(jq -r --arg g "$GK" '.groups[] | select(.id == $g) | .devices | length' "$TW/.data/technitium/groups.json")"
+tt_req "$TA" DELETE "/dns/technitium/groups/$GK" '' >/dev/null
+
+# forget, and seen again
+check "technitium: forget the Switch"              "200 1 0" "$(tt_req "$TA" DELETE /dns/technitium/devices/$NSW '' | status_of) $(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '"\(.forgotten) \([.devices[] | select(.id == "'$NSW'")] | length)"')"
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 900)) >/dev/null
+check "technitium: …seen again, with its nickname" "Switch 0" "$(_dev 192.168.2.120 $((MON1000 + 900)) .nickname) $(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r .forgotten)"
+tt_req "$TA" DELETE /dns/technitium/devices/$NSW '' >/dev/null
+check "technitium: clear the forgotten ones"       "200 1 0" "$(R=$(tt_req "$TA" DELETE /dns/technitium/devices/forgotten ''); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .cleared)") $(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r .forgotten)"
+check "technitium: a viewer cannot forget one"     403 "$(tt_req "$TU" DELETE /dns/technitium/devices/$TABLET '' | status_of)"
+
+# IEEE's whole list of vendors, fetched on request (a stand-in server here)
+mkdir -p "$TW/oui-www"
+{ echo 'Registry,Assignment,Organization Name,Organization Address'; for _i in $(seq 1 1200); do printf 'MA-L,%06X,Vendor %d,Somewhere\n' "$((0xA00000 + _i))" "$_i"; done
+  echo 'MA-L,001122,"Lab Vendor, Inc.","1 Lab Road, Testville"'; } > "$TW/oui-www/oui.csv"
+printf 'nothing here\n' > "$TW/oui-www/not.csv"
+OUIP=$(_rport); ( cd "$TW/oui-www" && exec python3 -m http.server "$OUIP" --bind 127.0.0.1 ) >/dev/null 2>&1 & OUI_PID=$!
+for _i in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$OUIP/oui.csv" && break; sleep 0.1; done
+check "technitium: a viewer cannot fetch the vendor list" 403 "$(tt_req "$TU" POST /dns/technitium/devices/oui-update '' | status_of)"
+check "technitium: a file that is not IEEE's list is refused" 502 "$(tt_req "$TA" POST /dns/technitium/devices/oui-update '' "DCS_TECHNITIUM_OUI_URL=http://127.0.0.1:$OUIP/not.csv" | status_of)"
+check "technitium: IEEE's list fetched"            "200 1201" "$(R=$(tt_req "$TA" POST /dns/technitium/devices/oui-update '' "DCS_TECHNITIUM_OUI_URL=http://127.0.0.1:$OUIP/oui.csv"); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .prefixes)")"
+tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 1200)) >/dev/null
+check "technitium: …the hub's vendor is known now (a quoted name)" "Lab Vendor, Inc." "$(_dev 192.168.2.233 '' .vendor)"
+kill "$OUI_PID" 2>/dev/null; wait "$OUI_PID" 2>/dev/null
+
 # the tokens: never in an answer, a log, .env or an address; always a Bearer header
 check "technitium: no token in any answer"         0 "$(grep -c -e "$TT1" -e "$TT2" "$TANS" || true)"
 check "technitium: no token in the logs or .data"  "" "$(grep -rl -e "$TT1" -e "$TT2" "$TW/logs" "$TW/.api-auth" "$TW/.data" "$TW/.env" 2>/dev/null)"
@@ -10644,6 +10804,8 @@ check "technitium: …its token is gone"             no "$([[ -e "$TW/.secrets/T
 # the route policy as documented
 check "technitium: docs: viewers read, admins act, a device's queries are the admin's" "user user user user admin admin admin admin admin admin" \
     "$(for r in 'GET /dns/technitium/status' 'GET /dns/technitium/stats' 'GET /dns/technitium/groups' 'GET /dns/technitium/lists' 'GET /dns/technitium/activity' 'POST /dns/technitium/block' 'POST /dns/technitium/connect' 'POST /dns/technitium/groups' 'DELETE /dns/technitium/groups/{id}' 'POST /dns/technitium/groups/{id}/pause-bedtime'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+check "technitium: docs: viewers read the devices and DHCP, admins change them" "user user admin admin admin admin admin admin admin admin admin" \
+    "$(for r in 'GET /dns/technitium/devices' 'GET /dns/technitium/dhcp' 'POST /dns/technitium/devices/scan' 'POST /dns/technitium/devices/oui-update' 'PUT /dns/technitium/devices/{id}' 'DELETE /dns/technitium/devices/{id}' 'DELETE /dns/technitium/devices/forgotten' 'POST /dns/technitium/dhcp/scope' 'POST /dns/technitium/dhcp/enable' 'POST /dns/technitium/dhcp/disable' 'DELETE /dns/technitium/dhcp/leases/{mac}'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 kill $TT_PIDS 2>/dev/null; wait $TT_PIDS 2>/dev/null
 rm -rf "$TW"
 fi

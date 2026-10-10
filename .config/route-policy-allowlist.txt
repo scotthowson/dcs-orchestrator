@@ -81,3 +81,7 @@ GET /dns/technitium/status
 GET /dns/technitium/stats
 GET /dns/technitium/lists
 GET /dns/technitium/groups
+# the device directory and the DHCP scope and leases: the house's inventory (addresses, MACs, names), read-only like the
+# groups that already list the devices; every change to them is the admin's
+GET /dns/technitium/devices
+GET /dns/technitium/dhcp

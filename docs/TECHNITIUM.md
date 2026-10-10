@@ -7,6 +7,11 @@ trackers and what the children should not reach, forwards the rest encrypted, an
 what. DCS runs it from **Security → Technitium** (also linked from DNS & routes), so Technitium's own console is
 needed once: to make an API token.
 
+**Turn it on first:** Config → Integrations → *Technitium DNS* (`TECHNITIUM_ENABLED=true`). Until then the page, its
+card on DNS & routes and every `/dns/technitium/*` route are off (404 `feature_off`), and the minute clock does nothing
+for it. A server that had Technitium connected before this switch existed is switched on by itself once. Turning it off
+leaves Technitium as it is: a bedtime or a device block in force stays until the switch is back on.
+
 ## The plan for the house
 
 | Part | Where | Does |
@@ -31,11 +36,8 @@ needed once: to make an API token.
    - the query log: the **Query Logs (Sqlite)** app, 30 days;
    - the **Advanced Blocking** app (the kids' groups);
    - the names `dns1` / `dns2`, a cache of 20 000 entries, serve-stale on.
-5. **Move DHCP** from the ISP router to Technitium: in Technitium's console, **DHCP → Scopes**, a scope for
-   `192.168.2.0/24` (the router as gateway, the range the router used), **DNS servers 192.168.2.53, 192.168.2.207**,
-   reserved leases for the consoles and the tablets (stable addresses are what the kids' groups follow). Turn the
-   router's DHCP off, then on the scope **Enable**. Devices pick it up as their leases renew (or after a reconnect).
-   With Technitium serving DHCP, the top clients carry their device names.
+5. **Move DHCP** from the ISP router to Technitium with the page's guided flow (**DHCP** tab, below). Devices pick it
+   up as their leases renew (or after a reconnect); with Technitium serving DHCP, every device tells its name.
 
 ## The page
 
@@ -46,9 +48,58 @@ needed once: to make an API token.
   **Pause bedtime 30 min**. Categories: adult content, gambling, social networks, VPNs/proxies/other DNS,
   and search engines without SafeSearch (Hagezi's lists; Hagezi has no dating list, so none is offered).
 - **Activity**: one device's recent queries from both servers, the blocked ones marked, with Allow / Block.
+- **Devices**: the device directory (below): a name and an icon for each, its group, its address pinned, a block
+  until a time, its latest queries.
+- **DHCP**: Technitium's scope and leases, and the guided move from the router.
 - **Lists**: the blocklists, and the names allowed or blocked for everyone.
 
-A viewer sees the page read-only and does not see a device's queries.
+A viewer sees the page read-only (the devices and DHCP included) and does not see a device's queries.
+
+## The device directory
+
+Every device of the house, named once: `.data/technitium/devices.json`, one record per MAC address (or per IP address
+while no MAC is known). **Scan the network** (and the API's clock every 5 minutes) gathers:
+
+| Source | Gives | Needs |
+|---|---|---|
+| Technitium's DHCP leases and reservations | the name each device gives itself, its MAC, whether its address is reserved | Technitium serving DHCP |
+| The hub's neighbour table | every device on the LAN with its MAC, even while the router does DHCP | the hub on the LAN; one ping to each address of its /24 first (a private network only, 0.2 s each, at most every 5 minutes) |
+| mDNS | names like `Toms-iPad.local` | `avahi-resolve-address` on the hub (avahi-tools) |
+| Reverse DNS on the primary | the names Technitium (or the router) knows | — |
+| The query log | who asked in the last 24 hours, and how much of it was blocked | the Query Logs (Sqlite) app |
+
+The vendor comes from the MAC's first half: `.config/oui-common.txt` holds the prefixes of the vendors a home network is
+full of (Apple, Samsung, Google, Amazon, Sony, Microsoft, Nintendo, Raspberry Pi, Espressif, TP-Link, Ubiquiti, …),
+and **Update the vendor list** fetches IEEE's whole list once (`.data/technitium/oui.txt`). A phone or tablet that uses a
+private (random) MAC shows *Private address*: Android and iOS do that per network, so the address stays the same on
+this Wi-Fi.
+
+The icon is guessed from the vendor and the name (a Nintendo is a console, a `*-tv` a TV, a Raspberry Pi a server, an
+Espressif board an iot device) until you pick one. A nickname shows everywhere the page names a device: the top
+clients, a device's queries, the groups. A group holds its devices by their directory id, so a device that gets
+another address stays in its group. **Forget** drops a device; seen again, it comes back with its nickname and icon
+until the forgotten ones are cleared. **Block until …** blocks every name for one device (bedtime's rule) until a time;
+the clock lifts it. **Pin address** reserves its current address in Technitium's DHCP (only once Technitium has a scope:
+while the router still does DHCP there is nothing to reserve in).
+
+IPv4 only: an IPv6 client of the query log is not a device here (IPv6 is off on the house's router).
+
+## Moving DHCP from the router (the DHCP tab)
+
+1. **Scan the network**, so the directory has every device.
+2. **Create the scope here, off.** Made from the hub's network: `.100`-`.199`, the router as gateway, DNS = the primary
+   then the secondary, domain `home`, leases of 24 h, ping check on (an address that answers is not offered). With
+   *Keep every known device on its current address* (on), every device of the directory with a MAC gets a reservation
+   at the address it has now, named or not, seen in a lease or only in the neighbour table, so nothing changes address
+   at the flip. Machines with an address set by hand never ask and are not affected. Technitium turns a new scope on
+   when it makes one, so DCS turns its stock *Default* scope (off) into this one instead, or turns the new one off at once.
+3. **Turn the router's DHCP off.** Bell Home Hub 4000: Advanced tools and settings → DHCP.
+4. **Turn DHCP on here.** Both resolvers must stay up from now on: every device is told to use them.
+5. **Renew a device** (turn its Wi-Fi off and on) and check it: its lease shows the DNS servers it was given, green
+   when they are Technitium's.
+
+Technitium's DHCP scopes are on the primary only; the secondary is not given a copy (two DHCP servers would hand out the
+same addresses). If the primary is down for long, turn the router's DHCP back on.
 
 ## How the groups work
 

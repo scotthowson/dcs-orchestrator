@@ -24,6 +24,9 @@
 # minute clock needs (which groups are in bedtime, the pauses), the last sync
 # and whether each instance answered.
 #
+# The device directory (devices.json: every device seen, its nickname, icon and notes) and Technitium's DHCP (the
+# scope, the leases, reservations, moving the house's DHCP here) are at the end of this file.
+#
 # SafeSearch is a house-wide switch, not a group's: Advanced Blocking answers a
 # blocked name with fixed addresses only (never a CNAME, and only for lists it
 # downloads), so a group cannot be sent to forcesafesearch.google.com. The
@@ -189,19 +192,21 @@ _tt_bedtime_now() {
 }
 
 # the app's config for the groups, with the groups of ACTIVE (a JSON array of ids) in bedtime: everything blocked but the house's own domains
+# a device blocked by hand (devices.json blocked_until) is in a group of DCS's own that blocks everything, whatever kids' group it is in
 _tt_adv_render() {
-    local active="$1" house
+    local active="$1" house blocked
     house=$(_domains_all 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0))') || house='[]'
-    jq -c --argjson active "$active" --argjson cats "$TT_CATEGORIES" --argjson house "$house" '
+    blocked=$(_tt_blocked_ips "$(_tt_now)")
+    jq -c --argjson active "$active" --argjson cats "$TT_CATEGORIES" --argjson house "$house" --argjson blocked "$blocked" --arg bg "$TT_BLOCKED_GROUP" '
+        def grp($name; $bed; $lists): {name: $name, enableBlocking: true, allowTxtBlockingReport: true, blockAsNxDomain: true, blockingAddresses: ["0.0.0.0", "::"],
+            allowed: (if $bed then $house else [] end), blocked: [], allowListUrls: [], blockListUrls: $lists,
+            allowedRegex: [], blockedRegex: (if $bed then ["."] else [] end), regexAllowListUrls: [], regexBlockListUrls: [], adblockListUrls: []};
         {enableBlocking: true, blockingAnswerTtl: 30, blockListUrlUpdateIntervalHours: 24, blockListUrlUpdateIntervalMinutes: 0,
          localEndPointGroupMap: {},
-         networkGroupMap: ([.groups[] as $g | $g.devices[]? | {key: .ip, value: $g.name}] | from_entries),
-         groups: [.groups[] | (.id as $id | ($active | index($id)) != null) as $bed |
-           {name, enableBlocking: true, allowTxtBlockingReport: true, blockAsNxDomain: true, blockingAddresses: ["0.0.0.0", "::"],
-            allowed: (if $bed then $house else [] end), blocked: [], allowListUrls: [],
-            blockListUrls: [(.lists // [])[] as $l | $cats[] | select(.id == $l) | .url],
-            allowedRegex: [], blockedRegex: (if $bed then ["."] else [] end),
-            regexAllowListUrls: [], regexBlockListUrls: [], adblockListUrls: []}]}' <<< "$(_tt_model)"
+         networkGroupMap: ([.groups[] as $g | $g.devices[]? | {key: .ip, value: $g.name}] + ($blocked | map({key: ., value: $bg})) | from_entries),
+         groups: ([.groups[] | (.id as $id | ($active | index($id)) != null) as $bed
+                   | grp(.name; $bed; [(.lists // [])[] as $l | $cats[] | select(.id == $l) | .url])]
+                  + (if ($blocked | length) > 0 then [grp($bg; true; [])] else [] end))}' <<< "$(_tt_model)"
 }
 
 # _tt_groups_apply WHO: renders the groups as they are now and puts the config on every connected instance (the app installed when
@@ -218,6 +223,16 @@ _tt_groups_apply() {
     done
     TT_APPLY_MSG="${msgs[*]:-}"
     (( ok == 1 )) || return 1
+    # the devices blocked by hand: one audit line when a block starts or ends
+    local bnow bwas
+    bnow=$(_tt_blocked_now "$now"); bwas=$(jq -c '.blocked_active // []' <<< "$(_tt_state)" 2>/dev/null) || bwas='[]'
+    if [[ "$bnow" != "$bwas" ]]; then
+        while IFS=$'\t' read -r g name; do
+            [[ -n "$g" ]] || continue
+            _api_audit_log "${CLIENT_IP:-local}" "TECHNITIUM_BLOCK" "$who" "$name: $(jq -e --arg g "$g" 'index($g) != null' >/dev/null <<< "$bnow" && printf 'blocked (every name)' || printf 'block ended')"
+        done < <(jq -r --argjson a "$bnow" --argjson w "$bwas" '(($a - $w) + ($w - $a))[] as $id | .devices[] | select(.id == $id) | [.id, (.nickname // .hostname // .ip)] | @tsv' "$TT_DEVICES" 2>/dev/null)
+        _tt_state_set --argjson b "$bnow" '.blocked_active = $b'
+    fi
     was=$(jq -c '.bedtime_active // []' <<< "$(_tt_state)" 2>/dev/null) || was='[]'
     if [[ "$active" != "$was" ]]; then
         while IFS=$'\t' read -r g name; do
@@ -233,14 +248,16 @@ _tt_groups_apply() {
     return 0
 }
 
-# the minute clock (_dcs_automation_loop): re-renders only when the set of groups in bedtime changed since the last render
+# the minute clock (_dcs_automation_loop): re-renders only when the groups in bedtime, or the devices blocked by hand, changed since the last render
 _tt_tick() {
-    [[ -s "$TT_GROUPS" ]] || return 0
+    [[ -s "$TT_GROUPS" || -s "$TT_DEVICES" ]] || return 0
     _tt_configured primary || return 0
-    local now active was
+    local now active was bnow bwas
     now=$(_tt_now); active=$(_tt_bedtime_now "$now") || return 0
+    bnow=$(_tt_blocked_now "$now")
     was=$(jq -c '.bedtime_active // []' <<< "$(_tt_state)" 2>/dev/null) || was='[]'
-    [[ "$active" == "$was" ]] && return 0
+    bwas=$(jq -c '.blocked_active // []' <<< "$(_tt_state)" 2>/dev/null) || bwas='[]'
+    [[ "$active" == "$was" && "$bnow" == "$bwas" ]] && return 0
     if _tt_groups_apply scheduler; then _api_cache_clear 2>/dev/null || true
     else printf '%s technitium: bedtime not applied: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TT_APPLY_MSG" >&2; fi
     return 0
@@ -425,7 +442,7 @@ handle_technitium_status() {
          bedtime_active: ($st.bedtime_active // []), bedtime_paused: ($st.bedtime_paused // {})}')"
 }
 
-# GET /dns/technitium/stats?range=lastHour|lastDay|lastWeek — Queries, blocked and clients over the range for both instances together: the totals, the series, the top clients (named after a group's device, else Technitium's name for it), domains and blocked domains, the query types
+# GET /dns/technitium/stats?range=lastHour|lastDay|lastWeek — Queries, blocked and clients over the range for both instances together: the totals, the series, the top clients (named by their nickname in the device directory or a group's label, else Technitium's name for them; with the device and its icon), domains and blocked domains, the query types
 handle_technitium_stats() {
     _tt_need_primary || return
     local range="${QUERY_PARAMS[range]:-lastHour}" type role all='[]' errs='[]' labels
@@ -438,8 +455,12 @@ handle_technitium_stats() {
         fi
     done
     if [[ "$all" == '[]' ]]; then _api_error 502 "$(jq -r 'map(.error) | join("; ")' <<< "$errs")"; return; fi
-    labels=$(jq -c '[.groups[] as $g | $g.devices[]? | {key: .ip, value: (.label // $g.name)}] | from_entries' <<< "$(_tt_model)") || labels='{}'
-    _api_success "$(jq -c --arg range "$range" --argjson errs "$errs" --argjson lab "$labels" '
+    local dir devs
+    dir=$(_tt_dir)
+    labels=$(jq -c --argjson d "$dir" '([.groups[] as $g | $g.devices[]? | {key: .ip, value: (.label // $g.name)}] | from_entries)
+        + ($d.devices | map(select(.nickname != null and .ip != null) | {key: .ip, value: .nickname}) | from_entries)' <<< "$(_tt_model)") || labels='{}'
+    devs=$(jq -c '.devices | map(select(.ip != null) | {key: .ip, value: {id, icon, hostname}}) | from_entries' <<< "$dir") || devs='{}'
+    _api_success "$(jq -c --arg range "$range" --argjson errs "$errs" --argjson lab "$labels" --argjson dv "$devs" '
         def ds($n): [.[] | (.mainChartData.labels // []) as $l | ((.mainChartData.datasets // []) | map(select(.label == $n))[0].data // []) as $d
                       | range(0; $l | length) as $i | {t: $l[$i], v: ($d[$i] // 0)}] | group_by(.t) | map({t: .[0].t, v: (map(.v) | add)});
         def merge($k; $f): [.[] | .[$k] // [] | .[]] | group_by(.name) | map({($f): .[0].name, count: (map(.hits) | add), rdns: (map(.domain // empty) | first)})
@@ -450,7 +471,7 @@ handle_technitium_stats() {
                   nxdomain: (map(.stats.totalNxDomain // 0) | add)},
          series: (ds("Total") as $q | ds("Blocked") as $b | {labels: ($q | map(.t)), queries: ($q | map(.v)),
                   blocked: ($q | map(.t) | map(. as $t | ($b | map(select(.t == $t))[0].v // 0)))}),
-         top_clients: (merge("topClients"; "ip") | map({ip, count, name: ($lab[.ip] // .rdns // null)})),
+         top_clients: (merge("topClients"; "ip") | map({ip, count, name: ($lab[.ip] // .rdns // $dv[.ip].hostname // null), device_id: ($dv[.ip].id // null), icon: ($dv[.ip].icon // null)})),
          top_domains: (merge("topDomains"; "domain") | map({domain, count})),
          top_blocked: (merge("topBlockedDomains"; "domain") | map({domain, count})),
          query_types: ([.[] | (.queryTypeChartData.labels // []) as $l | (.queryTypeChartData.datasets[0].data // []) as $d
@@ -599,13 +620,14 @@ _tt_group_clean() {
                 or (.bedtime.days // [1,2,3,4,5,6,7] | type) != "array" or (.bedtime.days // [] | map(select(type != "number" or . < 1 or . > 7)) | length) > 0)
             then "bedtime is {enabled, from: \"20:30\", to: \"07:00\", days: [1..7, Monday is 1]}"
           else {id: (.id // null), name: $name,
-                devices: (.devices // [] | map({ip: (.ip | tostring), label: (.label // "" | tostring | gsub("^\\s+|\\s+$"; "")), mac: (if (.mac // "") == "" then null else (.mac | ascii_downcase) end)})),
+                devices: (.devices // [] | map({ip: (.ip | tostring), label: (.label // "" | tostring | gsub("^\\s+|\\s+$"; "")), mac: (if (.mac // "") == "" then null else (.mac | ascii_downcase) end)}
+                    + (if (.id // "" | tostring | test("^([0-9a-f]{12}|ip-[0-9]{1,3}(\\.[0-9]{1,3}){3})$")) then {id} else {} end))),
                 lists: (.lists // [] | unique),
                 bedtime: {enabled: (.bedtime.enabled == true), from: (.bedtime.from // "20:30"), to: (.bedtime.to // "07:00"), days: (.bedtime.days // [1,2,3,4,5,6,7] | unique)}}
           end' <<< "$1" 2>/dev/null || printf '"Send a group: {name, devices: [{ip, label}], lists: [], bedtime: {enabled, from, to, days}}"'
 }
 
-# POST /dns/technitium/groups — Add a group, or change one ({id} of an existing one): {name, devices: [{ip, label, mac?}], lists: [adult, gambling, social, proxy-vpn, nosafesearch], bedtime: {enabled, from, to, days}}; Technitium's Advanced Blocking app gets it (installed when missing) and the secondary follows
+# POST /dns/technitium/groups — Add a group, or change one ({id} of an existing one): {name, devices: [{ip, label, mac?, id? (the device directory's)}], lists: [adult, gambling, social, proxy-vpn, nosafesearch], bedtime: {enabled, from, to, days}}; Technitium's Advanced Blocking app gets it (installed when missing) and the secondary follows
 handle_technitium_group_save() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _tt_need_primary || return
@@ -775,4 +797,590 @@ handle_technitium_bootstrap() {
         return
     fi
     _api_success "$(jq -c '{success: true, roles: ., unchanged: (map(.changed + .installed | length) | add == 0)}' <<< "$out")"
+}
+
+# =============================================================================
+# The device directory: every device of the house, named once
+#
+# .data/technitium/devices.json {devices: [...], forgotten: {id: {nickname, icon, notes}}, last_scan, last_sweep}. A device
+# is one record keyed by its MAC (id: the 12 hex digits) or, while no MAC is known, by its address (id: ip-<address>):
+# {id, ip, mac, mac_random, vendor, hostname, nickname, icon, icon_guessed, notes, static, reserved_ip, blocked_until,
+#  first_seen, last_seen, queries_today, blocked_today, hub, sources: {dhcp, arp, mdns, rdns, querylog, manual}} (sources:
+# when that source last saw it, epoch seconds). Which kids' group a device is in lives in groups.json (a group device
+# carries the directory id), so the two cannot disagree. IPv4 only: an IPv6 client of the query log is not a device here.
+#
+# The scan (POST /dns/technitium/devices/scan, and the minute clock every 5 minutes) merges: Technitium's DHCP leases and
+# reservations; the hub's neighbour table after one ping to each address of its own /24 (a private network only, at most
+# once per 5 minutes: the hub is on the LAN, so this finds MACs while the router still does DHCP); names over mDNS
+# (avahi-resolve-address, when installed) and reverse DNS on the primary; the clients of the query log (the last 24 hours,
+# with how many of their queries were blocked). The vendor comes from the MAC's prefix (.config/oui-common.txt, or IEEE's
+# whole list once POST /dns/technitium/devices/oui-update fetched it).
+# =============================================================================
+
+TT_DEVICES="$TT_DIR/devices.json"
+TT_ICONS='["desktop","laptop","phone","tablet","tv","console","speaker","camera","printer","router","server","iot","lightbulb","thermostat","watch","car","unknown"]'
+# the Advanced Blocking group a device blocked by hand is in (a group name of DCS's own: a kids' group cannot have a colon)
+TT_BLOCKED_GROUP="DCS: blocked devices"
+TT_SWEEP_EVERY=300
+TT_DEV_ID_RE='^([0-9a-f]{12}|ip-[0-9]{1,3}(\.[0-9]{1,3}){3})$'
+
+# the icon a device most likely is, from its vendor and its name (a guess until the owner picks one)
+# shellcheck disable=SC2016  # jq, not shell
+TT_GUESS_JQ='def guess($vv; $hh):
+  ($vv // "" | ascii_downcase) as $v | ($hh // "" | ascii_downcase) as $h
+  | if ($h | test("xbox|playstation|ps[345]|nintendo|switch|steam-?deck")) or ($v | test("nintendo|playstation|valve")) then "console"
+    elif $h | test("ipad|tablet|galaxy-?tab|sm-[tx][0-9]|kindle|fire-?hd|lenovo-?tab|(^|[-_])tab([-_0-9]|$)") then "tablet"
+    elif $h | test("iphone|pixel|android|galaxy|oneplus|phone|moto") then "phone"
+    elif $h | test("macbook|laptop|notebook|thinkpad|xps|zenbook|chromebook") then "laptop"
+    elif ($h | test("watch")) or ($v | test("garmin|fitbit")) then "watch"
+    elif ($h | test("(^|[-_.])tv([-_.0-9]|$)|bravia|roku|chromecast|fire-?tv|apple-?tv|shield|webos|tizen")) or ($v | test("\\b(roku|lg|vizio|hisense|tcl|skyworth|vestel|insignia)\\b")) then "tv"
+    elif ($h | test("echo|homepod|sonos|speaker|nest-?(mini|audio|hub)|google-?home")) or ($v | test("sonos|bose|denon|yamaha|harman|onkyo")) then "speaker"
+    elif ($h | test("cam|doorbell")) or ($v | test("\\b(ring|arlo|wyze|hikvision|dahua|reolink|blink|ezviz|canary)\\b")) then "camera"
+    elif ($h | test("print|^brn|^npi|epson|officejet|laserjet")) or ($v | test("\\b(brother|canon|epson|xerox|lexmark|kyocera|ricoh|konica|zebra|dymo)\\b")) then "printer"
+    elif ($h | test("router|gateway|unifi|eero|homehub|^hub|access-?point|^ap-")) or ($v | test("\\b(ubiquiti|tp-link|netgear|d-link|linksys|eero|mikrotik|zyxel|tenda|mercusys|arris|sagemcom|technicolor|sercomm|askey|plume|vantiva)\\b")) then "router"
+    elif ($h | test("server|nas|pve|proxmox|raspberrypi|^pi[0-9-]|^dns[0-9]")) or ($v | test("raspberry|synology|qnap|proxmox|hardkernel|pine64")) then "server"
+    elif ($h | test("bulb|light|hue")) or ($v | test("philips hue|lifx|nanoleaf|sengled|wiz|yeelight|govee|lutron")) then "lightbulb"
+    elif ($h | test("thermostat|ecobee")) or ($v | test("ecobee|google nest|honeywell|tado|mysa|netatmo")) then "thermostat"
+    elif $v | test("\\b(tesla|ford)\\b") then "car"
+    elif $h | test("imac|mac-?mini|desktop|-pc$|^pc-|workstation|gaming") then "desktop"
+    elif $v | test("espressif|tuya|shelly|sonoff|meross|aqara|silicon labs|nordic|particle|arduino|irobot|ecovacs|roborock|dreame|dyson|whirlpool|bosch|miele|electrolux|haier|midea|chamberlain|rachio|traeger") then "iot"
+    elif ($v | test("microsoft")) and ($h | test("surface")) then "laptop"
+    else "unknown" end;'
+# IPv4 as a number, a mask's prefix
+# shellcheck disable=SC2016
+TT_IP4_JQ='def ip4ok: type == "string" and test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") and (split(".") | all(tonumber <= 255));
+def ip2n: split(".") | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3];
+def n2ip: [(. / 16777216 | floor) % 256, (. / 65536 | floor) % 256, (. / 256 | floor) % 256, . % 256] | map(tostring) | join(".");'
+
+_tt_dir() {
+    mkdir -p "$TT_DIR" 2>/dev/null; chmod 700 "$TT_DIR" 2>/dev/null || true
+    _api_state_file "$TT_DEVICES" '{"devices":[],"forgotten":{}}' object >/dev/null 2>&1 || true
+    jq -c '{devices: (.devices // []), forgotten: (.forgotten // {}), last_scan: (.last_scan // null), last_sweep: (.last_sweep // 0)}' "$TT_DEVICES" 2>/dev/null \
+        || printf '{"devices":[],"forgotten":{},"last_scan":null,"last_sweep":0}'
+}
+# _tt_dir_update [jq opts] FILTER: one locked change of devices.json
+_tt_dir_update() { _tt_dir >/dev/null; _api_jq_update_file "$TT_DEVICES" "$@"; }
+_tt_mac_dash() { local m="${1^^}"; printf '%s' "${m//:/-}"; }
+
+# the ids of the devices blocked by hand at NOW, sorted (JSON); their addresses
+_tt_blocked_now() { [[ -s "$TT_DEVICES" ]] || { printf '[]'; return 0; }; jq -c --argjson now "$1" '[.devices[]? | select((.blocked_until // 0) > $now and .ip != null) | .id] | sort' "$TT_DEVICES" 2>/dev/null || printf '[]'; }
+_tt_blocked_ips() { [[ -s "$TT_DEVICES" ]] || { printf '[]'; return 0; }; jq -c --argjson now "$1" '[.devices[]? | select((.blocked_until // 0) > $now and .ip != null) | .ip] | unique' "$TT_DEVICES" 2>/dev/null || printf '[]'; }
+
+# the hub's own network: "DEV ADDRESS PREFIX GATEWAY" from the default route (status 1 when there is none)
+_tt_hub_net() {
+    local r dev gw cidr
+    r=$(ip -4 route show default 2>/dev/null | head -n1)
+    [[ -n "$r" ]] || return 1
+    dev=$(awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}' <<< "$r")
+    gw=$(awk '{for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit }}' <<< "$r")
+    [[ "$dev" =~ ^[A-Za-z0-9_.@-]{1,32}$ ]] || return 1
+    cidr=$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "inet") { print $(i + 1); exit }}')
+    [[ "$cidr" =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3})/([0-9]{1,2})$ ]] || return 1
+    printf '%s %s %s %s\n' "$dev" "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${gw:--}"
+}
+_tt_private4() { [[ "$1" =~ ^10\. || "$1" =~ ^192\.168\. || "$1" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; }
+
+# _tt_neighbours NOW: the LAN as the hub sees it, one "ADDRESS<TAB>MAC<TAB>hub|-" line each (the hub itself included). Pings
+# every address of the hub's /24 first (once, 0.2 s each, 64 at a time) when the hub is on a private network and the last
+# sweep is 5 minutes old; TT_SWEPT=1 when it did.
+TT_SWEPT=0
+_tt_neighbours() {
+    local now="$1" net dev self prefix last base i mac pids=()
+    TT_SWEPT=0
+    net=$(_tt_hub_net) || return 0
+    read -r dev self prefix _ <<< "$net"
+    last=$(jq -r '.last_sweep // 0' "$TT_DEVICES" 2>/dev/null) || last=0
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    if _tt_private4 "$self" && (( prefix >= 16 && now - last >= TT_SWEEP_EVERY )) && command -v ping >/dev/null 2>&1; then
+        base="${self%.*}"
+        _tt_dir_update --argjson t "$now" '.last_sweep = $t' >/dev/null 2>&1 || true
+        for i in $(seq 1 254); do
+            [[ "$base.$i" == "$self" ]] && continue
+            timeout 0.2 ping -n -q -c 1 -W 1 "$base.$i" >/dev/null 2>&1 & pids+=("$!")
+            (( ${#pids[@]} >= 64 )) && { wait "${pids[@]}"; pids=(); }
+        done
+        (( ${#pids[@]} > 0 )) && wait "${pids[@]}"
+        TT_SWEPT=1
+    fi
+    mac=$(ip -o link show dev "$dev" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "link/ether") { print $(i + 1); exit }}')
+    printf '%s\t%s\thub\n' "$self" "${mac:--}"
+    ip -4 neigh show dev "$dev" 2>/dev/null | awk '{ st = $NF; if (st == "FAILED" || st == "INCOMPLETE") next; for (i = 1; i < NF; i++) if ($i == "lladdr") { print $1 "\t" $(i + 1) "\t-"; next } }'
+}
+
+# _tt_vendors MACS (a JSON array) → {"aabbcc": "Apple", …} for the prefixes the table knows
+_tt_vendors() {
+    local f="$BASE_DIR/.config/oui-common.txt"
+    [[ -s "$TT_DIR/oui.txt" ]] && f="$TT_DIR/oui.txt"
+    jq -r '.[] | select(test("^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")) | gsub(":"; "") | .[0:6] | ascii_upcase' <<< "$1" | sort -u \
+        | awk -F'\t' 'NR == FNR { want[$1] = 1; next } ($1 in want) { print $1 "\t" $2 }' - "$f" 2>/dev/null \
+        | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t")) | map({key: (.[0] | ascii_downcase), value: .[1]}) | from_entries'
+}
+
+# the primary's DHCP scopes with their details (JSON array) in TT_SCOPES; status 1 (TT_ERR) when Technitium did not answer
+TT_SCOPES='[]'
+_tt_scopes() {
+    local list s one
+    TT_SCOPES='[]'
+    _tt_api primary dhcp/scopes/list || return 1
+    list=$(jq -c '.response.scopes // []' <<< "$TT_BODY")
+    while IFS= read -r s; do
+        [[ -n "$s" ]] || continue
+        _tt_api primary dhcp/scopes/get "name=$s" || return 1
+        one=$(jq -c '.response' <<< "$TT_BODY")
+        TT_SCOPES=$(jq -c --argjson l "$list" --arg n "$s" --argjson g "$one" '. + [($l | map(select(.name == $n))[0] // {}) + $g]' <<< "$TT_SCOPES")
+    done < <(jq -r '.[].name' <<< "$list")
+}
+
+# _tt_scan WHO: one discovery (one at a time: a second waits for the first). TT_SCAN_SUMMARY is what it found (JSON).
+TT_SCAN_SUMMARY='{}'
+_tt_scan() {
+    mkdir -p "$TT_DIR" 2>/dev/null || true
+    { flock -w 90 9 || { TT_SCAN_SUMMARY='{"error":"Another scan is still running"}'; return 1; }; _tt_scan_locked "$@"; } 9>"$TT_DIR/.scan.lock"
+}
+_tt_scan_locked() {
+    local who="${1:-dcs}" now obs='[]' serrs='[]' resv='{}' dhcp_ok=false ql_ok=false serving=false role ips ip name n line a m h me
+    now=$(_tt_now)
+    _tt_dir >/dev/null
+    local o; o=$(mktemp "${TMPDIR:-/tmp}/dcs-tt-obs-XXXXXX") || return 1
+    # (a) Technitium's DHCP: its leases (the names devices give themselves) and its reservations (static)
+    if _tt_configured primary; then
+        if _tt_scopes; then
+            dhcp_ok=true
+            resv=$(jq -c '[.[] | .reservedLeases // [] | .[] | {key: (.hardwareAddress | ascii_downcase | gsub("-"; ":")), value: .address}] | from_entries' <<< "$TT_SCOPES")
+            serving=$(jq -c 'any(.[]; .enabled == true)' <<< "$TT_SCOPES")
+            if _tt_api primary dhcp/leases/list; then
+                jq -c '.response.leases // [] | .[] | {src: "dhcp", ip: .address, mac: .hardwareAddress, hostname: (.hostName // null)}' <<< "$TT_BODY" >> "$o"
+            fi
+        else
+            serrs=$(jq -c --arg e "$TT_ERR" '. + [$e]' <<< "$serrs")
+        fi
+        # (d) who asked, the last 24 hours, on every server: the queries, and the blocked ones from the query log
+        for role in $(_tt_roles); do
+            if _tt_api "$role" dashboard/stats/getTop type=LastDay statsType=TopClients limit=1000; then
+                ql_ok=true
+                jq -c '.response.topClients // [] | .[] | {src: "querylog", ip: .name, hits: (.hits // 0)},
+                       (select((.domain // "") != "") | {src: "rdns", ip: .name, hostname: .domain})' <<< "$TT_BODY" >> "$o"
+            fi
+            if _tt_api "$role" logs/query "name=$TT_QL_APP" "classPath=$TT_QL_CLASS" pageNumber=1 entriesPerPage=10000 descendingOrder=true \
+                    responseType=Blocked "start=$(date -u -d "@$((now - 86400))" +%Y-%m-%dT%H:%M:%SZ)"; then
+                jq -c '[.response.entries // [] | .[] | .clientIpAddress] | group_by(.) | .[] | {src: "querylog", ip: .[0], blocked: length}' <<< "$TT_BODY" >> "$o"
+            fi
+        done
+    fi
+    # (b) the neighbour table, after the sweep
+    me=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
+    _tt_neighbours "$now" > "$o.n"
+    while IFS=$'\t' read -r a m h; do
+        [[ -n "$a" ]] || continue
+        jq -nc --arg ip "$a" --arg mac "$m" --arg h "$h" --arg me "$me" '{src: "arp", ip: $ip, mac: (if $mac == "-" then null else $mac end), hub: ($h == "hub")}
+            + (if $h == "hub" and $me != "" then {hostname: $me} else {} end)' >> "$o"
+    done < "$o.n"
+    rm -f "$o.n"
+    obs=$(jq -s -c '
+        def ok4: type == "string" and test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") and (test("^(127\\.|0\\.|169\\.254\\.|22[4-9]\\.|2[3-5][0-9]\\.)") | not) and (endswith(".255") | not);
+        map(select(.ip | ok4))' "$o" 2>/dev/null) || obs='[]'
+    rm -f "$o"
+    # (c) names for the addresses that have none yet: mDNS, then reverse DNS on the primary (24 at most a scan)
+    ips=$(jq -r --slurpfile d "$TT_DEVICES" '(map(select(.hostname != null) | .ip) + ($d[0].devices // [] | map(select(.hostname != null) | .ip))) as $named
+        | [.[] | select(.src == "arp" or .src == "dhcp") | .ip] | unique | map(select(. as $i | $named | index($i) | not)) | .[]' <<< "$obs")
+    if [[ -n "$ips" ]] && command -v avahi-resolve-address >/dev/null 2>&1; then
+        # shellcheck disable=SC2086  # one address a word
+        while IFS=$'\t' read -r a name; do
+            [[ -n "$a" && -n "$name" ]] || continue
+            obs=$(jq -c --arg ip "$a" --arg h "$name" '. + [{src: "mdns", ip: $ip, hostname: $h}]' <<< "$obs")
+        done < <(timeout 5 avahi-resolve-address $ips 2>/dev/null)
+    fi
+    if [[ -n "$ips" ]] && _tt_configured primary; then
+        n=0
+        for ip in $ips; do
+            jq -e --arg ip "$ip" 'any(.[]; .ip == $ip and .hostname != null)' >/dev/null <<< "$obs" && continue
+            (( n++ < 24 )) || break
+            IFS=. read -r a m h line <<< "$ip"
+            TT_CALL_TIMEOUT=2 _tt_api primary dnsClient/resolve server=this-server "domain=$line.$h.$m.$a.in-addr.arpa" type=PTR protocol=Udp || continue
+            name=$(jq -r '[.response.result.Answer // [] | .[] | .RDATA.Domain // .RDATA.Value // empty][0] // empty' <<< "$TT_BODY" 2>/dev/null)
+            [[ -n "$name" ]] && obs=$(jq -c --arg ip "$ip" --arg h "$name" '. + [{src: "rdns", ip: $ip, hostname: $h}]' <<< "$obs")
+        done
+    fi
+    local vend
+    vend=$(_tt_vendors "$(jq -c '[.[] | .mac // empty | ascii_downcase | gsub("-"; ":")] | unique' <<< "$obs")") || vend='{}'
+    [[ -n "$vend" ]] || vend='{}'
+    _tt_dir_update --argjson obs "$obs" --argjson now "$now" --argjson vend "$vend" --argjson resv "$resv" --argjson dhcp_ok "$dhcp_ok" \
+        --argjson ql_ok "$ql_ok" --argjson errs "$serrs" --argjson swept "$( ((TT_SWEPT)) && echo true || echo false)" "$TT_GUESS_JQ"'
+        def nmac: if . == null or . == "" then null else (ascii_downcase | gsub("-"; ":")) | (if test("^([0-9a-f]{2}:){5}[0-9a-f]{2}$") and . != "00:00:00:00:00:00" then . else null end) end;
+        def randmac: . != null and (.[1:2] | test("[26ae]"));
+        def vendor_of($m): if $m == null then null elif ($m | randmac) then "Private address" else ($vend[$m | gsub(":"; "") | .[0:6]] // null) end;
+        def host: if . == null then null else (rtrimstr(".") | if length == 0 or length > 253 then null else . end) end;
+        ($obs | map(.mac |= nmac | .hostname |= host)) as $o
+        | ($o | map(select(.mac != null)) | map({key: .ip, value: .mac}) | from_entries) as $ipmac
+        | ($o | map(. + {key: (.mac // $ipmac[.ip] // ("ip-" + .ip))}) | group_by(.key) | map({
+              mac: (map(.mac // empty) | first // null),
+              ip: ((map(select(.src == "dhcp")) + map(select(.src == "arp")) + .) | map(.ip) | first),
+              hostname: ((map(select(.src == "dhcp")) + map(select(.src == "mdns")) + map(select(.src == "rdns"))) | map(.hostname // empty) | first // null),
+              hits: (map(.hits // 0) | add), blocked: (map(.blocked // 0) | add), hub: (map(.hub // false) | any),
+              present: (map(.src) | any(. == "arp" or . == "mdns")), srcs: (map(.src) | unique)})) as $seen
+        | .devices as $orig
+        | reduce $seen[] as $s (. + {added: 0};
+            (if $s.mac then ($s.mac | gsub(":"; "")) else "ip-" + $s.ip end) as $id
+            | (.devices | map(.id) | index($id)) as $byid
+            | (if $byid == null and $s.mac != null then (.devices | map(.id == ("ip-" + $s.ip)) | index(true)) else null end) as $byaddr
+            # an address alone (the query log): the device that had that address before this scan, even if it moved since
+            | (if $byid == null and $s.mac == null then ([$orig[] | select(.ip == $s.ip and .mac != null)] | max_by(.last_seen // 0) | .id) as $was
+                 | (if $was == null then null else (.devices | map(.id) | index($was)) end) else null end) as $bymacip
+            | ($byid // $byaddr // $bymacip) as $i
+            # a MAC seen at an address that had a record of its own while no MAC was known: its names carry over
+            | (if $s.mac != null then (.devices | map(select(.id == ("ip-" + $s.ip))) | first // {}) else {} end) as $old
+            | (.forgotten[$id] // .forgotten["ip-" + $s.ip] // {}) as $f
+            | (if $i != null then .devices[$i] else {first_seen: $now, sources: {}} end) as $d
+            # seen by another sighting of this scan already: the counts add up; only a sighting on the LAN (neighbours, mDNS, a lease) moves it
+            | (($d.sources // {}) | any(.[]; . == $now)) as $touched
+            | ($s.present or ($s.srcs | index("dhcp")) != null or $d.ip == null) as $moves
+            | ($d + {
+                id: (if $s.mac then $id elif $i != null then $d.id else $id end),
+                ip: (if $moves then $s.ip else $d.ip end), mac: ($s.mac // $d.mac // null),
+                hostname: ($s.hostname // $d.hostname // $old.hostname // null),
+                nickname: ($d.nickname // $old.nickname // $f.nickname // null),
+                notes: ($d.notes // $old.notes // $f.notes // null),
+                icon: ($d.icon // $old.icon // $f.icon // null),
+                icon_guessed: (if $d.icon != null then ($d.icon_guessed // false) elif ($old.icon // $f.icon) != null then false else true end),
+                last_seen: (if $s.present or $d.last_seen == null then $now else $d.last_seen end),
+                queries_today: ((if $touched then ($d.queries_today // 0) else 0 end) + $s.hits),
+                blocked_today: ((if $touched then ($d.blocked_today // 0) else 0 end) + $s.blocked), hub: ($s.hub or ($d.hub // false)),
+                sources: (($d.sources // {}) + ($s.srcs | map({key: ., value: $now}) | from_entries))}) as $n
+            | ($n + {vendor: vendor_of($n.mac), mac_random: ($n.mac | randmac)}) as $n
+            | (if $n.icon_guessed then $n + {icon: (if $n.hub then "server" else guess($n.vendor; $n.hostname) end)} else $n end) as $n
+            | (if $i != null then .devices[$i] = $n else .devices += [$n] | .added += 1 end)
+            | (if $s.mac != null then .devices |= map(select(.id != ("ip-" + $s.ip))) else . end)
+            | .forgotten |= del(.[$id], .["ip-" + $s.ip]))
+        | .devices |= map(
+            (if $ql_ok and ((.sources // {}) | any(.[]; . == $now) | not) then . + {queries_today: 0, blocked_today: 0} else . end)
+            | (if $dhcp_ok then . + {static: (.mac != null and $resv[.mac] != null), reserved_ip: (if .mac != null then $resv[.mac] else null end)} else . end))
+        | .last_scan = {at: $now, found: ($seen | length), new: .added, devices: (.devices | length), swept: $swept,
+                        named_by_dhcp: ([$o[] | select(.src == "dhcp" and .hostname != null)] | length),
+                        sources: ($o | group_by(.src) | map({key: .[0].src, value: (map(.ip) | unique | length)}) | from_entries),
+                        errors: $errs}
+        | del(.added)' >/dev/null || { TT_SCAN_SUMMARY='{"error":"Could not write the device directory"}'; return 1; }
+    _tt_state_set --argjson s "$serving" --argjson ok "$dhcp_ok" --argjson now "$now" 'if $ok then .dhcp = {serving: $s, at: $now} else . end'
+    TT_SCAN_SUMMARY=$(jq -c '.last_scan' "$TT_DEVICES")
+    # a device in a kids' group that moved to another address: the group follows it
+    local model new
+    model=$(_tt_model)
+    new=$(jq -c --slurpfile d "$TT_DEVICES" '($d[0].devices | map({key: .id, value: .ip}) | from_entries) as $ip
+        | .groups |= map(.devices |= map(if (.id // null) != null and $ip[.id] != null and $ip[.id] != .ip then .ip = $ip[.id] else . end))' <<< "$model") || new="$model"
+    if [[ "$new" != "$model" ]]; then
+        _tt_model_save "$new" && { _tt_groups_apply "$who" || printf '%s technitium: a group device moved, not applied: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TT_APPLY_MSG" >&2; }
+    fi
+    return 0
+}
+
+# the minute clock, every 5 minutes: a scan in the background (the lock keeps two from running at once)
+_tt_scan_tick() { _tt_scan scheduler >/dev/null 2>&1 || true; }
+
+# GET /dns/technitium/devices — The device directory: every device seen (address, MAC and vendor, its name on the network, the nickname and icon given, notes, its kids' group, whether its address is reserved, a block until when, first and last seen, queries and blocked in the last 24 hours, which sources saw it), the last scan, whether Technitium hands out addresses, the icons to pick from
+handle_technitium_devices() {
+    local now
+    now=$(_tt_now)
+    _api_success "$(jq -c --argjson now "$now" --argjson m "$(_tt_model)" --argjson st "$(_tt_state)" --argjson icons "$TT_ICONS" '
+        ([$m.groups[] as $g | $g.devices[] | select((.id // null) != null) | {key: .id, value: {id: $g.id, name: $g.name}}] | from_entries) as $gid
+        | ([$m.groups[] as $g | $g.devices[] | {key: .ip, value: {id: $g.id, name: $g.name}}] | from_entries) as $gip
+        | {devices: ([.devices[] | ($gid[.id] // $gip[.ip // ""] // null) as $g
+              | . + {group_id: ($g.id // null), group_name: ($g.name // null), blocked: ((.blocked_until // 0) > $now)}]
+              | sort_by(-(.queries_today // 0), ((.nickname // .hostname // .ip) | ascii_downcase))),
+           forgotten: (.forgotten | length), last_scan, dhcp: ($st.dhcp // null), icons: $icons, now: $now}' <<< "$(_tt_dir)")"
+}
+
+# POST /dns/technitium/devices/scan — Look for devices now: Technitium's DHCP leases and reservations, the hub's neighbour table after one ping to each address of its own network (at most every 5 minutes), names over mDNS and reverse DNS, the clients of the query log. Answers what it found
+handle_technitium_devices_scan() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    if ! _tt_scan "${AUTH_USERNAME:-}"; then _api_error 409 "$(jq -r '.error // "The scan did not finish"' <<< "$TT_SCAN_SUMMARY")"; return; fi
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_SCAN" "${AUTH_USERNAME:-}" "$(jq -r '"\(.found) devices found, \(.new) new"' <<< "$TT_SCAN_SUMMARY")"
+    _api_cache_clear 2>/dev/null || true
+    _api_success "$(jq -c '{success: true} + . + {message: ("\(.found) device\(if .found == 1 then "" else "s" end) found, \(.named_by_dhcp) named by DHCP")}' <<< "$TT_SCAN_SUMMARY")"
+}
+
+# POST /dns/technitium/devices/oui-update — Fetch IEEE's whole list of MAC prefixes (oui.csv, about 6 MB) so every vendor has its name; kept in .data/technitium/oui.txt
+handle_technitium_oui_update() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local url="${DCS_TECHNITIUM_OUI_URL:-https://standards-oui.ieee.org/oui/oui.csv}" tmp n
+    mkdir -p "$TT_DIR"; tmp=$(mktemp "$TT_DIR/.oui-XXXXXX") || { _api_error 500 "Could not write in $TT_DIR"; return; }
+    if ! curl -sSfL --proto '=https,http' --max-time 120 --max-filesize 40000000 -A "DCS-Orchestrator" -o "$tmp" "$url" 2>/dev/null; then
+        rm -f "$tmp"; _api_error 502 "IEEE's list could not be downloaded ($url): can this server reach the internet?"; return
+    fi
+    if ! head -n1 "$tmp" | grep -q '^Registry,Assignment,Organization Name'; then rm -f "$tmp"; _api_error 502 "That was not IEEE's list of MAC prefixes"; return; fi
+    # Registry,Assignment,"Organization Name",…: the assignment and the name (quoted when it has a comma), as "PREFIX<TAB>Name"
+    awk 'NR > 1 { a = $0; i = index(a, ","); a = substr(a, i + 1); j = index(a, ","); p = substr(a, 1, j - 1); r = substr(a, j + 1)
+             if (substr(r, 1, 1) == "\"") { r = substr(r, 2); k = index(r, "\""); nm = substr(r, 1, k - 1) } else { k = index(r, ","); nm = (k ? substr(r, 1, k - 1) : r) }
+             gsub(/[\t\r]/, " ", nm); sub(/^ +/, "", nm); sub(/ +$/, "", nm)
+             if (length(p) == 6 && p !~ /[^0-9A-F]/ && nm != "") print p "\t" nm }' "$tmp" | sort -u > "$tmp.txt"
+    rm -f "$tmp"
+    n=$(wc -l < "$tmp.txt")
+    (( n >= 1000 )) || { rm -f "$tmp.txt"; _api_error 502 "IEEE's list had only $n prefixes: kept the one there was"; return; }
+    mv -f "$tmp.txt" "$TT_DIR/oui.txt"; chmod 600 "$TT_DIR/oui.txt" 2>/dev/null || true
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_OUI" "${AUTH_USERNAME:-}" "IEEE MAC prefixes updated: $n"
+    _api_success "$(jq -nc --argjson n "$n" '{success: true, prefixes: $n, message: "The vendors of \($n) MAC prefixes are known now"}')"
+}
+
+# PUT /dns/technitium/devices/{id} — Change a device: {nickname (40 at most, "" clears), icon (desktop, laptop, phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car, unknown), notes (280 at most), group_id (a kids' group, or null for none), static (true reserves its address in Technitium's DHCP, false gives it back), blocked_until (epoch seconds within a year: every name blocked for it until then; null lifts it)}
+handle_technitium_device_update() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local id="$1" body d now bad ip mac scope need_apply=0 model gid sync warn="" what=()
+    _tt_body "${2:-}" || return; body="$TT_REQ"
+    d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' <<< "$(_tt_dir)")
+    [[ -n "$d" ]] || { _api_error 404 "No device $id: scan the network, or it was forgotten"; return; }
+    now=$(_tt_now)
+    bad=$(jq -r --argjson icons "$TT_ICONS" --argjson now "$now" '
+        def txt($n): type == "string" and length <= $n and (test("[\\x00-\\x1f\\x7f]") | not);
+        def note: type == "string" and length <= 280 and (test("[\\x00-\\x08\\x0b-\\x1f\\x7f]") | not);
+        (keys - ["nickname", "icon", "notes", "group_id", "static", "blocked_until"]) as $extra
+        | if ($extra | length) > 0 then "Not a field of a device: \($extra | join(", "))"
+          elif has("nickname") and .nickname != null and ((.nickname | txt(40)) | not) then "A nickname is 40 characters at most, on one line"
+          elif has("icon") and ((.icon as $i | $icons | index($i)) == null) then "icon is one of: \($icons | join(", "))"
+          elif has("notes") and .notes != null and ((.notes | note) | not) then "Notes are 280 characters at most"
+          elif has("group_id") and .group_id != null and ((.group_id | type) != "string" or (.group_id | test("^[A-Za-z0-9_-]{1,40}$") | not)) then "group_id is a kids group id, or null"
+          elif has("static") and (.static | type) != "boolean" then "static is true or false"
+          elif has("blocked_until") and .blocked_until != null and ((.blocked_until | type) != "number" or .blocked_until <= $now or .blocked_until > $now + 31622400)
+            then "blocked_until is a moment within the next year (epoch seconds), or null to lift the block"
+          else "" end' <<< "$body")
+    [[ -z "$bad" ]] || { _api_error 400 "$bad"; return; }
+    ip=$(jq -r '.ip // empty' <<< "$d"); mac=$(jq -r '.mac // empty' <<< "$d")
+    if jq -e 'has("group_id") or has("static") or has("blocked_until")' >/dev/null <<< "$body"; then _tt_need_primary || return; fi
+    model=$(_tt_model)
+    gid=$(jq -r '.group_id // empty' <<< "$body")
+    if [[ -n "$gid" ]]; then jq -e --arg g "$gid" 'any(.groups[]; .id == $g)' >/dev/null <<< "$model" || { _api_error 404 "No kids group $gid"; return; }; fi
+    if jq -e 'has("group_id") or (.blocked_until != null)' >/dev/null <<< "$body" && [[ -z "$ip" ]]; then _api_error 409 "This device has no address yet: scan the network first"; return; fi
+    # static: a reservation in the Technitium scope its address belongs to
+    if jq -e 'has("static")' >/dev/null <<< "$body"; then
+        [[ -n "$mac" ]] || { _api_error 409 "DCS does not know this device's MAC address yet, and a reservation needs it: scan the network while it is on"; return; }
+        _tt_scopes || { _api_error 502 "$TT_ERR"; return; }
+        scope=$(jq -r --arg ip "$ip" "$TT_IP4_JQ"'($ip | ip2n) as $a | [.[] | select(($a >= (.networkAddress | ip2n)) and ($a <= (.broadcastAddress | ip2n)))][0].name // empty' <<< "$TT_SCOPES")
+        if [[ -z "$scope" ]]; then
+            _api_response 409 "$(jq -nc --arg ip "$ip" '{error: true, code: 409, reason: "no_dhcp_scope", message: ("Technitium has no DHCP scope for " + $ip + ": the router still hands out addresses. Move DHCP here first (the DHCP tab), then pin it.")}')"
+            return
+        fi
+        local cur dn
+        dn=$(jq -c --argjson b "$body" '. + ($b | with_entries(select(.key == "nickname" and .value != null and .value != "")))' <<< "$d")   # the name being given now
+        cur=$(jq -r --arg m "$(_tt_mac_dash "$mac")" --arg s "$scope" '.[] | select(.name == $s) | .reservedLeases // [] | .[] | select(.hardwareAddress == $m) | .address' <<< "$TT_SCOPES")
+        if [[ "$(jq -r .static <<< "$body")" == true ]]; then
+            if [[ "$cur" != "$ip" ]]; then
+                [[ -n "$cur" ]] && { _tt_api primary dhcp/scopes/removeReservedLease "name=$scope" "hardwareAddress=$(_tt_mac_dash "$mac")" || { _api_error 502 "$TT_ERR"; return; }; }
+                local hn rargs=("name=$scope" "hardwareAddress=$(_tt_mac_dash "$mac")" "ipAddress=$ip" "comments=DCS: $(jq -r '.nickname // .hostname // .ip' <<< "$dn")")
+                hn=$(jq -r '((.nickname // .hostname // "") | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-"))[0:63]' <<< "$dn")
+                [[ -n "$hn" ]] && rargs+=("hostName=$hn")
+                _tt_api primary dhcp/scopes/addReservedLease "${rargs[@]}" || { _api_error 502 "$TT_ERR"; return; }
+            fi
+            what+=("reserved $ip in $scope")
+        elif [[ -n "$cur" ]]; then
+            _tt_api primary dhcp/scopes/removeReservedLease "name=$scope" "hardwareAddress=$(_tt_mac_dash "$mac")" || { _api_error 502 "$TT_ERR"; return; }
+            what+=("reservation removed")
+        fi
+    fi
+    # the directory's own fields
+    _tt_dir_update --arg id "$id" --argjson b "$body" --argjson now "$now" '
+        def clean: if . == null then null else (gsub("^\\s+|\\s+$"; "") | if . == "" then null else . end) end;
+        .devices |= map(if .id != $id then . else
+            . + ($b | with_entries(select(.key == "nickname" or .key == "notes")) | map_values(clean))
+              + (if $b | has("icon") then {icon: $b.icon, icon_guessed: false} else {} end)
+              + (if $b | has("static") then {static: $b.static, reserved_ip: (if $b.static then .ip else null end)} else {} end)
+              + (if $b | has("blocked_until") then {blocked_until: $b.blocked_until} else {} end)
+              + {sources: ((.sources // {}) + {manual: $now})} end)' || { _api_error 500 "Could not write $TT_DEVICES"; return; }
+    d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' "$TT_DEVICES")
+    jq -e 'has("nickname")' >/dev/null <<< "$body" && what+=("nickname $(jq -r '.nickname // "cleared"' <<< "$d")")
+    jq -e 'has("icon")' >/dev/null <<< "$body" && what+=("icon $(jq -r .icon <<< "$d")")
+    jq -e 'has("notes")' >/dev/null <<< "$body" && what+=("notes")
+    # its kids' group: out of every group (by id or address), into the one asked for
+    if jq -e 'has("group_id")' >/dev/null <<< "$body"; then
+        model=$(jq -c --argjson d "$d" --arg g "$gid" '
+            .groups |= map(.devices |= map(select(((.id // null) == $d.id or .ip == $d.ip) | not)))
+            | if $g == "" then . else .groups |= map(if .id == $g then .devices += [{ip: $d.ip, label: (($d.nickname // (($d.hostname // "") | split(".")[0]) // "") | .[0:40]),
+                  mac: $d.mac, id: $d.id}] else . end) end' <<< "$model")
+        _tt_model_save "$model" || { _api_error 500 "Could not write $TT_GROUPS"; return; }
+        need_apply=1; what+=("group ${gid:-none}")
+    fi
+    if jq -e 'has("blocked_until")' >/dev/null <<< "$body"; then
+        need_apply=1
+        what+=("$(jq -r 'if .blocked_until == null then "block lifted" else "blocked until \(.blocked_until | todate)" end' <<< "$body")")
+    fi
+    if (( need_apply == 1 )); then
+        _tt_groups_apply "${AUTH_USERNAME:-}" || warn="Saved in DCS, but Technitium did not take it: $TT_APPLY_MSG (it is tried again by the minute clock)"
+    fi
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "$(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id): ${what[*]:-nothing}"
+    sync=null; (( need_apply == 1 )) && [[ -z "$warn" ]] && sync=$(_tt_after_write)
+    _api_cache_clear 2>/dev/null || true
+    _api_success "$(jq -nc --argjson d "$d" --argjson sync "${sync:-null}" --arg w "$warn" --argjson m "$(_tt_model)" '
+        ([$m.groups[] | select(any(.devices[]; (.id // null) == $d.id or .ip == $d.ip))][0] // null) as $g
+        | {success: true, device: ($d + {group_id: ($g.id // null), group_name: ($g.name // null)}), sync: $sync, warning: (if $w == "" then null else $w end)}')"
+}
+
+# DELETE /dns/technitium/devices/{id} — Forget a device: it comes back when it is seen again, with the nickname, icon and notes it had (until the forgotten ones are cleared)
+handle_technitium_device_forget() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local id="$1" d
+    d=$(jq -c --arg id "$id" '.devices[] | select(.id == $id)' <<< "$(_tt_dir)")
+    [[ -n "$d" ]] || { _api_error 404 "No device $id"; return; }
+    _tt_dir_update --arg id "$id" --argjson d "$d" '.devices |= map(select(.id != $id))
+        | if ($d.nickname // $d.notes // (if $d.icon_guessed then null else $d.icon end)) != null
+          then .forgotten[$id] = {nickname: $d.nickname, notes: $d.notes, icon: (if $d.icon_guessed then null else $d.icon end)} else . end' \
+        || { _api_error 500 "Could not write $TT_DEVICES"; return; }
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "forgot $(jq -r '.nickname // .hostname // .ip' <<< "$d") ($id)"
+    _api_success "$(jq -nc --arg id "$id" '{success: true, forgotten: $id}')"
+}
+
+# DELETE /dns/technitium/devices/forgotten — Clear what DCS keeps of forgotten devices (their nicknames, icons and notes)
+handle_technitium_forgotten_clear() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    local n
+    n=$(jq -r '.forgotten | length' <<< "$(_tt_dir)")
+    _tt_dir_update '.forgotten = {}' || { _api_error 500 "Could not write $TT_DEVICES"; return; }
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DEVICE" "${AUTH_USERNAME:-}" "cleared $n forgotten devices"
+    _api_success "$(jq -nc --argjson n "$n" '{success: true, cleared: $n}')"
+}
+
+# =============================================================================
+# DHCP: Technitium's own DHCP server, and moving the house's DHCP to it
+# =============================================================================
+
+# the address of an instance when its URL is an IPv4 one (what the devices are told to use)
+_tt_url_ip4() { local u; u=$(_tt_url "$1"); u="${u#*://}"; u="${u%%:*}"; [[ "$u" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && printf '%s' "$u"; return 0; }
+
+# GET /dns/technitium/dhcp — Technitium's DHCP: its scopes (range, gateway, DNS servers, lease time, exclusions, reservations, enabled), the leases it gave (with the DNS servers each device was told), whether it hands out addresses, the hub's network and a scope made from it, and how many of the devices seen ask Technitium
+handle_technitium_dhcp() {
+    _tt_need_primary || return
+    local leases net dev self prefix gw sug='null' hub='null'
+    _tt_scopes || { _api_error 502 "$TT_ERR"; return; }
+    _tt_api primary dhcp/leases/list || { _api_error 502 "$TT_ERR"; return; }
+    leases=$(jq -c '.response.leases // []' <<< "$TT_BODY")
+    if net=$(_tt_hub_net); then
+        read -r dev self prefix gw <<< "$net"
+        hub=$(jq -nc --arg ip "$self" --argjson p "$prefix" --arg gw "$gw" --arg dev "$dev" '{ip: $ip, prefix: $p, gateway: (if $gw == "-" then null else $gw end), interface: $dev}')
+        sug=$(jq -nc --arg ip "$self" --arg gw "$gw" --arg d1 "$(_tt_url_ip4 primary)" --arg d2 "$(_tt_url_ip4 secondary)" '
+            ($ip | split(".")[0:3] | join(".")) as $b
+            | {name: "LAN", start: ($b + ".100"), end: ($b + ".199"), mask: "255.255.255.0", router: (if $gw == "-" then ($b + ".1") else $gw end),
+               dns: ([$d1, $d2] | map(select(. != ""))), domain: "home", lease_hours: 24, exclusions: [], ping_check: true, reserve_known: true}')
+    fi
+    _api_success "$(jq -c -n --argjson scopes "$TT_SCOPES" --argjson leases "$leases" --argjson hub "$hub" --argjson sug "$sug" --argjson dir "$(_tt_dir)" \
+        --argjson now "$(_tt_now)" --arg d1 "$(_tt_url_ip4 primary)" --arg d2 "$(_tt_url_ip4 secondary)" '
+        def mac: ascii_downcase | gsub("-"; ":");
+        ($dir.devices | map(select(.mac != null) | {key: .mac, value: .}) | from_entries) as $bymac
+        | ($scopes | map({key: .name, value: (.dnsServers // [])}) | from_entries) as $sdns
+        | ($dir.devices | map(select(($now - (.last_seen // 0)) < 86400 or (.queries_today // 0) > 0))) as $recent
+        | {enabled: any($scopes[]; .enabled == true),
+           scopes: [$scopes[] | {name, enabled: (.enabled == true), start: .startingAddress, end: .endingAddress, mask: .subnetMask, network: .networkAddress,
+                    broadcast: .broadcastAddress, router: .routerAddress, dns: (if .useThisDnsServer == true then ["this server"] else (.dnsServers // []) end),
+                    domain: .domainName, lease_hours: (((.leaseTimeDays // 0) * 24) + (.leaseTimeHours // 0)), exclusions: (.exclusions // []), ping_check: (.pingCheckEnabled == true),
+                    reservations: [.reservedLeases // [] | .[] | (.hardwareAddress | mac) as $m
+                        | {mac: $m, ip: .address, hostname: .hostName, comments, device_id: ($bymac[$m].id // null), nickname: ($bymac[$m].nickname // null)}]}],
+           leases: [$leases[] | (.hardwareAddress | mac) as $m
+                    | {scope, type, mac: $m, ip: .address, hostname: .hostName, obtained: .leaseObtained, expires: .leaseExpires, dns: ($sdns[.scope] // []),
+                       device_id: ($bymac[$m].id // null), nickname: ($bymac[$m].nickname // null), icon: ($bymac[$m].icon // null)}],
+           hub: $hub, suggested: $sug, resolvers: {primary: (if $d1 == "" then null else $d1 end), secondary: (if $d2 == "" then null else $d2 end)},
+           devices: {seen: ($recent | length), asking: ($recent | map(select((.queries_today // 0) > 0)) | length),
+                     silent: [$recent[] | select((.queries_today // 0) == 0) | {id, ip, nickname, hostname, icon}]}}')"
+}
+
+# POST /dns/technitium/dhcp/scope — Make or change the house's DHCP scope in Technitium: {name: "LAN", start, end, mask, router, dns: [the primary, the secondary], domain: "home", lease_hours: 24, exclusions: [{start, end}], ping_check: true (an address that answers a ping is not offered), reserve_known: true (every device of the directory with a MAC keeps its current address: a reservation each, so nothing moves when DHCP does; false leaves them)}. A new scope is left off: POST /dns/technitium/dhcp/enable turns it on
+handle_technitium_dhcp_scope() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    _tt_need_primary || return
+    local body bad name exists dflt created=false rd=() reserved=0 skipped='[]' row m ip
+    _tt_body "${1:-}" || return; body="$TT_REQ"
+    bad=$(jq -r "$TT_IP4_JQ"'
+        (.mask // "255.255.255.0") as $mask
+        | if (.name // "LAN" | type) != "string" or ((.name // "LAN") | test("^[A-Za-z0-9 ._-]{1,40}$") | not) then "name is letters, digits, spaces, . _ and - (40 at most)"
+          elif ([.start, .end, .router, $mask] | all(ip4ok) | not) then "start, end and router are IPv4 addresses (and mask, 255.255.255.0 when left out)"
+          elif (($mask | ip2n) as $n | ([range(0; 33)] | map(4294967296 - pow(2; 32 - .)) | index($n)) == null) then "mask is a network mask, like 255.255.255.0"
+          elif ((.start | ip2n) > (.end | ip2n)) then "start comes before end"
+          elif ([.start, .end, .router] | map((ip2n / (4294967296 - ($mask | ip2n))) | floor) | unique | length) != 1 then "start, end and router are in one network"
+          elif ((.dns // []) | type) != "array" or ((.dns // []) | length) < 1 or ((.dns // []) | length) > 3 or ((.dns // []) | all(ip4ok) | not) then "dns is one to three IPv4 addresses: the primary first"
+          elif ((.domain // "home") | type) != "string" or ((.domain // "home") | test("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$") | not) then "domain is a name like home or lan"
+          elif ((.lease_hours // 24) | type) != "number" or (.lease_hours // 24) < 1 or (.lease_hours // 24) > 720 or ((.lease_hours // 24) | floor) != (.lease_hours // 24) then "lease_hours is 1 to 720"
+          elif has("ping_check") and (.ping_check | type) != "boolean" then "ping_check is true or false"
+          elif has("reserve_known") and (.reserve_known | type) != "boolean" then "reserve_known is true or false"
+          elif ((.exclusions // []) | type) != "array" or ((.exclusions // []) | length) > 16
+               or ((.exclusions // []) | any((([.start, .end] | all(ip4ok)) | not) or ((.start | ip2n) > (.end | ip2n)))) then "exclusions are up to 16 {start, end}"
+          else "" end' <<< "$body" 2>/dev/null) || bad="Send the scope: {start, end, router, dns: [...]}"
+    [[ -z "$bad" ]] || { _api_error 400 "$bad"; return; }
+    name=$(jq -r '.name // "LAN"' <<< "$body")
+    _tt_scopes || { _api_error 502 "$TT_ERR"; return; }
+    exists=$(jq -r --arg n "$name" 'any(.[]; .name == $n)' <<< "$TT_SCOPES")
+    # a new scope: Technitium turns a scope on when it makes it; its stock "Default" scope is off, so it becomes this one (off) instead
+    dflt=$(jq -r --arg n "$name" 'if any(.[]; .name == $n) then "" else ([.[] | select(.name == "Default" and .enabled != true)][0].name // "") end' <<< "$TT_SCOPES")
+    local args=("name=${dflt:-$name}")
+    [[ -n "$dflt" ]] && args+=("newName=$name")
+    while IFS= read -r row; do args+=("$row"); done < <(jq -r '
+        "startingAddress=\(.start)", "endingAddress=\(.end)", "subnetMask=\(.mask // "255.255.255.0")", "routerAddress=\(.router)",
+        "leaseTimeDays=\(((.lease_hours // 24) / 24) | floor)", "leaseTimeHours=\((.lease_hours // 24) % 24)", "leaseTimeMinutes=0",
+        "useThisDnsServer=false", "dnsServers=\(.dns | join(","))", "domainName=\(.domain // "home")", "pingCheckEnabled=\(.ping_check != false)",
+        "exclusions=\((.exclusions // []) | map("\(.start)|\(.end)") | join("|"))"' <<< "$body")
+    _tt_api primary dhcp/scopes/set "${args[@]}" || { _api_error 502 "$TT_ERR"; return; }
+    if [[ "$exists" != true && -z "$dflt" ]]; then
+        created=true
+        _tt_api primary dhcp/scopes/disable "name=$name" || { _api_error 502 "The scope is made but Technitium did not turn it off: $TT_ERR"; return; }
+    fi
+    # every device the directory knows (a lease, or only the hub's neighbour table) keeps its address: a reservation each, named or
+    # not, so nothing moves when DHCP does (one device an address: the one seen last; the ones already reserved stay as they are)
+    if [[ "$(jq -r '.reserve_known != false' <<< "$body")" == true ]]; then
+        _tt_scopes || { _api_error 502 "$TT_ERR"; return; }
+        while IFS=$'\t' read -r m ip row; do
+            [[ -n "$m" ]] || continue
+            local ra=("name=$name" "hardwareAddress=$(_tt_mac_dash "$m")" "ipAddress=$ip" "comments=DCS: ${row:-$ip}")
+            [[ -n "$row" ]] && ra+=("hostName=$row")
+            if _tt_api primary dhcp/scopes/addReservedLease "${ra[@]}"; then
+                reserved=$((reserved + 1)); rd+=("$m")
+            else
+                skipped=$(jq -c --arg ip "$ip" --arg e "$TT_ERR" '. + [{ip: $ip, error: $e}]' <<< "$skipped")
+            fi
+        done < <(jq -r --arg n "$name" --argjson sc "$TT_SCOPES" "$TT_IP4_JQ"'
+            ($sc | map(select(.name == $n))[0]) as $s
+            | ($s.reservedLeases // [] | map(.hardwareAddress | ascii_downcase | gsub("-"; ":"))) as $have
+            | [.devices[] | select(.mac != null and .ip != null and (.ip | ip4ok))
+               | select((.ip | ip2n) > ($s.networkAddress | ip2n) and (.ip | ip2n) < ($s.broadcastAddress | ip2n))]
+            | group_by(.ip) | map(max_by(.last_seen // 0)) | .[]
+            | select(.mac as $m | $have | index($m) | not)
+            | [.mac, .ip, ((.nickname // ((.hostname // "") | split(".")[0]) // "") | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-") | .[0:63])] | @tsv' <<< "$(_tt_dir)")
+        if (( ${#rd[@]} > 0 )); then
+            _tt_dir_update --argjson r "$(printf '%s\n' "${rd[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')" \
+                '.devices |= map(if (.mac as $m | $r | index($m)) != null then . + {static: true, reserved_ip: .ip} else . end)' || true
+        fi
+    fi
+    _tt_scopes || true
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DHCP" "${AUTH_USERNAME:-}" "scope $name $( [[ "$exists" == true ]] && printf 'changed' || printf 'made (off)'): $(jq -r '"\(.start)-\(.end), gateway \(.router), DNS \(.dns | join(" "))"' <<< "$body"), $reserved reserved"
+    _api_cache_clear 2>/dev/null || true
+    _api_success "$(jq -nc --arg n "$name" --argjson sc "$TT_SCOPES" --argjson created "$created" --argjson renamed "$([[ -n "$dflt" ]] && echo true || echo false)" \
+        --argjson r "$reserved" --argjson sk "$skipped" '($sc | map(select(.name == $n))[0] // {}) as $s
+        | {success: true, scope: $n, created: ($created or $renamed), enabled: ($s.enabled == true), reserved: $r, skipped: $sk,
+           message: ("The scope \($n) is " + (if $created or $renamed then "made" else "saved" end) + (if $s.enabled == true then " and hands out addresses" else ", off until you turn it on" end)
+                     + (if $r > 0 then "; \($r) device\(if $r == 1 then "" else "s" end) keep their address" else "" end))}')"
+}
+
+# POST /dns/technitium/dhcp/enable — Technitium hands out addresses from now on: {name} (the house's scope when left out). Turn the router's DHCP off first
+handle_technitium_dhcp_enable() { _tt_dhcp_switch enable "${1:-}"; }
+# POST /dns/technitium/dhcp/disable — Technitium stops handing out addresses: {name} (the house's scope when left out)
+handle_technitium_dhcp_disable() { _tt_dhcp_switch disable "${1:-}"; }
+_tt_dhcp_switch() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    _tt_need_primary || return
+    local how="$1" body name
+    _tt_body "${2:-}" || return; body="$TT_REQ"
+    _tt_scopes || { _api_error 502 "$TT_ERR"; return; }
+    name=$(jq -r --argjson b "$body" 'if ($b.name // "") != "" then ([.[] | select(.name == $b.name)][0].name // "")
+        elif any(.[]; .name == "LAN") then "LAN" elif length == 1 then .[0].name else "" end' <<< "$TT_SCOPES")
+    [[ -n "$name" ]] || { _api_error 404 "No such DHCP scope: name the scope (there is more than one, or none yet)"; return; }
+    _tt_api primary "dhcp/scopes/$how" "name=$name" || { _api_error 502 "$TT_ERR"; return; }
+    _tt_state_set --argjson s "$([[ "$how" == enable ]] && echo true || echo false)" --argjson now "$(_tt_now)" '.dhcp = {serving: $s, at: $now}'
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DHCP" "${AUTH_USERNAME:-}" "scope $name ${how}d"
+    _api_cache_clear 2>/dev/null || true
+    _api_success "$(jq -nc --arg n "$name" --arg h "$how" '{success: true, scope: $n, enabled: ($h == "enable"),
+        message: (if $h == "enable" then "Technitium hands out addresses now: devices move over as their leases renew" else "Technitium no longer hands out addresses" end)}')"
+}
+
+# DELETE /dns/technitium/dhcp/leases/{mac} — End a lease Technitium gave (the device asks again; a reservation stays)
+handle_technitium_dhcp_lease_delete() {
+    _api_check_admin || { _api_error 403 "Admin access required"; return; }
+    _tt_need_primary || return
+    local mac="$1" scope
+    _tt_api primary dhcp/leases/list || { _api_error 502 "$TT_ERR"; return; }
+    scope=$(jq -r --arg m "$(_tt_mac_dash "$mac")" '[.response.leases // [] | .[] | select((.hardwareAddress | ascii_upcase) == $m)][0].scope // empty' <<< "$TT_BODY")
+    [[ -n "$scope" ]] || { _api_error 404 "Technitium has no lease for $mac"; return; }
+    _tt_api primary dhcp/leases/remove "name=$scope" "hardwareAddress=$(_tt_mac_dash "$mac")" || { _api_error 502 "$TT_ERR"; return; }
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_DHCP" "${AUTH_USERNAME:-}" "lease of $mac ended ($scope)"
+    _api_success "$(jq -nc --arg m "$mac" --arg s "$scope" '{success: true, mac: $m, scope: $s}')"
 }

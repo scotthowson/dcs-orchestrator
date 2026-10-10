@@ -3,6 +3,40 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Technitium is a switch in Config → Integrations** (`TECHNITIUM_ENABLED`, off on a new install). Off: every
+  `/dns/technitium/*` route answers 404 `{code: "feature_off", message: "Technitium is off. Turn it on in Config →
+  Integrations."}`, the minute clock leaves bedtime and the device scan alone, and `GET /config` says
+  `technitium_enabled: false` so the dashboard hides the page and its card. **An install that already had Technitium
+  connected (`TECHNITIUM_URL` set, no `TECHNITIUM_ENABLED` line) keeps it: the first look writes
+  `TECHNITIUM_ENABLED=true` to `.env`** (with a line in the audit log). Turning it off leaves Technitium as it is.
+- **The device directory** (`.data/technitium/devices.json`): every device of the house, one record per MAC (or per
+  address while no MAC is known), with its address, MAC and vendor, its own name, a nickname, an icon (desktop, laptop,
+  phone, tablet, tv, console, speaker, camera, printer, router, server, iot, lightbulb, thermostat, watch, car; guessed
+  from the vendor and the name until one is picked: `icon_guessed`), notes, its kids' group, whether its address is
+  reserved, first and last seen, queries and blocked in the last 24 hours, and which sources saw it. `POST
+  /dns/technitium/devices/scan` (and the minute clock every 5 minutes) merges Technitium's DHCP leases and
+  reservations, the hub's neighbour table after one ping to each address of its own /24 (a private network only, at most
+  every 5 minutes, 0.2 s each), names over mDNS (`avahi-resolve-address` when installed) and reverse DNS on the primary,
+  and the clients of the query log. Vendors from `.config/oui-common.txt` (the consumer vendors' prefixes, from IEEE's
+  list); `POST /dns/technitium/devices/oui-update` fetches IEEE's whole list. `PUT /dns/technitium/devices/{id}` sets
+  the nickname, icon, notes, group (`group_id`; a group now keeps its device's directory id and follows it when its
+  address changes), `static` (a DHCP reservation in Technitium; 409 while the router still hands out addresses) and
+  `blocked_until` (every name blocked for that device until then, bedtime's rule; the minute clock lifts it). `DELETE`
+  forgets a device (it comes back with its nickname when seen again); `DELETE /dns/technitium/devices/forgotten` clears
+  that memory. The stats name top clients by their nickname and carry their icon.
+- **DHCP from the page.** `GET /dns/technitium/dhcp` (the scopes with their reservations, the leases with the DNS
+  servers each device was given, the hub's network and a scope made from it: `.100`-`.199`, the gateway, DNS = the
+  primary then the secondary, domain `home`, 24 h, ping check on, and how many devices ask Technitium), `POST
+  /dns/technitium/dhcp/scope` (makes the house's scope **off**: Technitium turns a new scope on at once, so its stock
+  "Default" scope becomes it, or it is made and turned off; by default every device the directory knows keeps its
+  current address with a reservation, so nothing moves when DHCP does), `POST .../dhcp/enable|disable`,
+  `DELETE .../dhcp/leases/{mac}`. Proven against the real `technitium/dns-server` 15.6 (a lease to a client, a
+  reservation, the stock scope renamed while off).
+
 ## [4.0.48] - 2026-10-10
 
 ### Added

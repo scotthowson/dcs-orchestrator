@@ -5,6 +5,9 @@ Usage: mock-technitium.py PORTFILE STATEFILE TOKEN NAME
   binds 127.0.0.1 on a free port and writes it to PORTFILE; keeps its state in STATEFILE (JSON, rewritten after
   every call, so the test reads what landed); TOKEN is the API token it accepts (Authorization: Bearer, as v15 wants);
   NAME is its dnsServerDomain. Every request is logged in the state's "calls" ([path, had_bearer, token_in_url]).
+  DHCP behaves as Technitium 15's does: a stock "Default" scope that is off, a scope made by scopes/set is on at once (renaming
+  one with newName keeps it as it was), a reservation is not a lease, a MAC is reserved once a scope. A lease is put in with
+  the stand-in's own POST /api/_mock/lease {scope, hardwareAddress, address, hostName} (the token is needed as for any call).
 """
 import json
 import os
@@ -34,7 +37,39 @@ state = {
                  "blockListUpdateIntervalHours": 24, "blockListNextUpdatedOn": "2026-10-10T08:00:00.000Z", "cacheMaximumEntries": 10000,
                  "serveStale": True, "blockingType": "NxDomain"},
     "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [],
+    "dhcp": {"scopes": {"Default": {"enabled": False, "startingAddress": "192.168.1.1", "endingAddress": "192.168.1.254", "subnetMask": "255.255.255.0",
+                                    "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "home", "routerAddress": "192.168.1.1",
+                                    "useThisDnsServer": True, "dnsServers": [], "exclusions": [{"startingAddress": "192.168.1.1", "endingAddress": "192.168.1.10"}],
+                                    "reservedLeases": []}},
+             "leases": []},
 }
+# who asked over the last day (the top clients), and the names reverse DNS knows
+TOP = {"dns1": [{"name": "192.168.2.50", "domain": "tablet-9.home", "hits": 120}, {"name": "192.168.2.60", "hits": 40}, {"name": "192.168.2.77", "hits": 5},
+                {"name": "127.0.0.1", "hits": 9}, {"name": "fd00::5", "hits": 3}],
+       "dns2": [{"name": "192.168.2.50", "domain": "tablet-9.home", "hits": 30}]}
+PTR = {"70.2.168.192.in-addr.arpa": "pi-hole.home"}
+
+
+def ip2n(a):
+    p = [int(x) for x in a.split(".")]
+    if len(p) != 4 or any(x < 0 or x > 255 for x in p):
+        raise ValueError("An invalid IP address was specified.")
+    return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]
+
+
+def n2ip(n):
+    return ".".join(str((n >> s) & 255) for s in (24, 16, 8, 0))
+
+
+def scope_view(name, sc, full):
+    m = ip2n(sc["subnetMask"])
+    net = ip2n(sc["startingAddress"]) & m
+    v = {"name": name, "enabled": sc["enabled"], "startingAddress": sc["startingAddress"], "endingAddress": sc["endingAddress"],
+         "subnetMask": sc["subnetMask"], "networkAddress": n2ip(net), "broadcastAddress": n2ip(net | (~m & 0xFFFFFFFF))}
+    if full:
+        v = dict(sc, name=name)
+        v.pop("enabled", None)
+    return v
 
 
 def save():
@@ -155,6 +190,75 @@ class H(BaseHTTPRequestHandler):
                 return ok()
             if p == f"/api/{zone}/export":
                 return "".join(d + "\r\n" for d in state[zone])
+        if p == "/api/dashboard/stats/getTop":
+            return ok({"topClients": TOP.get(NAME, [])[: int(q.get("limit", 1000))]})
+        if p == "/api/dnsClient/resolve":
+            ans = [{"Name": q["domain"], "Type": "PTR", "RDATA": {"Domain": PTR[q["domain"]]}}] if q.get("type") == "PTR" and q.get("domain") in PTR else []
+            return ok({"result": {"Answer": ans}})
+        d = state["dhcp"]
+        if p == "/api/dhcp/scopes/list":
+            return ok({"scopes": [scope_view(n, sc, False) for n, sc in d["scopes"].items()]})
+        if p == "/api/dhcp/scopes/get":
+            if q["name"] not in d["scopes"]:
+                raise ValueError("DHCP scope was not found: " + q["name"])
+            return ok(scope_view(q["name"], d["scopes"][q["name"]], True))
+        if p == "/api/dhcp/scopes/set":
+            new = q["name"] not in d["scopes"]
+            sc = d["scopes"].get(q["name"]) or {"enabled": True, "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "",
+                                                "routerAddress": None, "useThisDnsServer": True, "dnsServers": [], "exclusions": [], "reservedLeases": []}
+            for k in ("startingAddress", "endingAddress", "subnetMask", "routerAddress"):
+                if k in q:
+                    ip2n(q[k])
+                    sc[k] = q[k]
+            for k in ("leaseTimeDays", "leaseTimeHours", "leaseTimeMinutes"):
+                if k in q:
+                    sc[k] = int(q[k])
+            if "domainName" in q:
+                sc["domainName"] = q["domainName"]
+            if "pingCheckEnabled" in q:
+                sc["pingCheckEnabled"] = q["pingCheckEnabled"] == "true"
+            if "useThisDnsServer" in q:
+                sc["useThisDnsServer"] = q["useThisDnsServer"] == "true"
+            if "dnsServers" in q:
+                sc["dnsServers"] = [x for x in q["dnsServers"].split(",") if x and ip2n(x) is not None]
+            if "exclusions" in q:
+                x = [e for e in q["exclusions"].split("|") if e]
+                for e in x:
+                    ip2n(e)
+                sc["exclusions"] = [{"startingAddress": x[i], "endingAddress": x[i + 1]} for i in range(0, len(x) - 1, 2)]
+            if new and "startingAddress" not in q:
+                raise ValueError("Parameter 'startingAddress' missing.")
+            name = q.get("newName") or q["name"]
+            d["scopes"].pop(q["name"], None)
+            d["scopes"][name] = sc
+            return ok()
+        if p in ("/api/dhcp/scopes/enable", "/api/dhcp/scopes/disable"):
+            if q["name"] not in d["scopes"]:
+                raise ValueError("DHCP scope was not found: " + q["name"])
+            d["scopes"][q["name"]]["enabled"] = p.endswith("/enable")
+            return ok()
+        if p == "/api/dhcp/scopes/addReservedLease":
+            sc = d["scopes"][q["name"]]
+            if any(r["hardwareAddress"] == q["hardwareAddress"] for r in sc["reservedLeases"]):
+                raise ValueError("A reserved lease with same hardware address already exists in scope: " + q["name"])
+            ip2n(q["ipAddress"])
+            sc["reservedLeases"].append({"hostName": q.get("hostName"), "hardwareAddress": q["hardwareAddress"], "address": q["ipAddress"], "comments": q.get("comments")})
+            return ok()
+        if p == "/api/dhcp/scopes/removeReservedLease":
+            sc = d["scopes"][q["name"]]
+            sc["reservedLeases"] = [r for r in sc["reservedLeases"] if r["hardwareAddress"] != q["hardwareAddress"]]
+            return ok()
+        if p == "/api/dhcp/leases/list":
+            return ok({"leases": d["leases"]})
+        if p == "/api/dhcp/leases/remove":
+            if not any(x["hardwareAddress"] == q["hardwareAddress"] and x["scope"] == q["name"] for x in d["leases"]):
+                raise ValueError("No lease was found for hardware address: " + q["hardwareAddress"])
+            d["leases"] = [x for x in d["leases"] if x["hardwareAddress"] != q["hardwareAddress"]]
+            return ok()
+        if p == "/api/_mock/lease":
+            d["leases"].append({"scope": q["scope"], "type": "Dynamic", "hardwareAddress": q["hardwareAddress"], "clientIdentifier": "1-" + q["hardwareAddress"],
+                                "address": q["address"], "hostName": q.get("hostName"), "leaseObtained": "2026-10-10T08:00:00Z", "leaseExpires": "2026-10-11T08:00:00Z"})
+            return ok()
         if p == "/api/logs/query":
             if q.get("name") not in state["apps"]:
                 raise ValueError("DNS application was not found: " + str(q.get("name")))
