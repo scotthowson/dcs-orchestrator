@@ -26,7 +26,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with a note of its blocklists and apps' configs, 14 kept per server; `GET /dns/technitium/backups` lists them (admin);
   `POST /dns/technitium/restore {server, file, confirm: true}` restores one (Technitium restarts its DNS service; its
   own accounts stay, DHCP scopes only onto the primary; the lists and apps are put back and the secondary follows a
-  restored primary; audited). docs/TECHNITIUM.md: how to rebuild a resolver from scratch.
+  restored primary; audited). The recovery bundle now carries `.data/technitium` (the device directory, the groups,
+  the clocks' state and these backups), as full backups already did. docs/TECHNITIUM.md: how to rebuild a resolver
+  from scratch.
 
 ## [4.0.49] - 2026-10-10
 
