@@ -696,12 +696,14 @@ esac
 exit 0
 FAKEDOCKER
 chmod +x "$DK/docker"
-# ssh: the VM's command runs here, with the VM's Docker; a flag file names an operation that fails (a cable pulled mid-copy)
+# ssh: the VM's command runs here, with the VM's Docker; a flag file names an operation that fails (a cable pulled mid-copy).
+# sudo is the stand-in's too: a runner with passwordless sudo (GitHub's) would otherwise reach its real Docker through sudo's secure_path
+mkdir -p "$F2/vmbin"; ln -sf "$FAKE/vmbin/sudo" "$F2/vmbin/sudo"
 cat > "$F2/ssh" <<FAKESSH2
 #!/bin/bash
 cmd="\${@: -1}"
 for op in tar-vol tar-dir; do [[ -f "$F2/fail-\$op" && "\$cmd" == *" \$op "* ]] && exit 1; done
-PATH="$DK:\$PATH" FAKE_DOCKER_STATE="$DKV" bash -c "\$cmd"
+PATH="$F2/vmbin:$DK:\$PATH" FAKE_DOCKER_STATE="$DKV" bash -c "\$cmd"
 FAKESSH2
 chmod +x "$F2/ssh"
 mkdir -p "$H2/.data/fleet-ssh"; printf 'not a real key\n' > "$H2/.data/fleet-ssh/id_ed25519"
