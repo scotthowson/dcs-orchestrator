@@ -58,6 +58,7 @@ GET /metrics/history
 GET /metrics/summary
 GET /metrics/trends
 GET /notifications/history
+GET /proxmox/vms/*/snapshots
 GET /rollback/*/snapshots
 GET /rollback/*/snapshots/*
 GET /schedules/*/history
