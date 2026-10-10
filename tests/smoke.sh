@@ -10446,6 +10446,209 @@ rm -rf "$CHW"
 fi
 # <<< Chat
 
+# >>> Technitium DNS: two stand-in servers (tests/mock-technitium.py), an install of its own
+if [[ "${SMOKE_ONLY:-}" != crowdsec ]]; then
+echo "Technitium DNS: connect, baseline, block/allow, pause, the kids' groups and bedtime (a fake clock), SafeSearch, the sync, roles"
+TW="$WORK-tech"; rm -rf "$TW"
+mkdir -p "$TW/.scripts" "$TW/.lib" "$TW/.config" "$TW/Stacks" "$TW/.data" "$TW/logs" "$TW/.api-auth"
+cp "$ROOT/.scripts/api-server.sh" "$ROOT/.scripts/api-dispatch.sh" "$TW/.scripts/"; cp "$ROOT/VERSION" "$TW/"
+cp -r "$ROOT/.lib/." "$TW/.lib/"; cp -r "$ROOT/.config/." "$TW/.config/"
+grep -vE '^(API_BIND|API_AUTH_ENABLED|API_INSECURE_NO_AUTH|API_TRUSTED_PROXIES|API_IP_WHITELIST|API_PORT|PROXY_DOMAIN)=' "$ROOT/.env.example" > "$TW/.env"
+printf 'API_PORT=9876\nMETRICS_ENABLED=false\nAPI_RESPONSE_CACHE=false\n' >> "$TW/.env"
+TAPI="$TW/.scripts/api-server.sh"; TANS="$TW/answers.txt"; : > "$TANS"
+TT1=$(head -c 32 /dev/urandom | xxd -p -c 64); TT2=$(head -c 32 /dev/urandom | xxd -p -c 64)
+python3 "$ROOT/tests/mock-technitium.py" "$TW/m1.port" "$TW/m1.json" "$TT1" dns1 >/dev/null 2>&1 & TT_PIDS="$!"
+python3 "$ROOT/tests/mock-technitium.py" "$TW/m2.port" "$TW/m2.json" "$TT2" dns2 >/dev/null 2>&1 & TT_PIDS+=" $!"
+for _i in $(seq 1 50); do [[ -s "$TW/m1.port" && -s "$TW/m2.port" ]] && break; sleep 0.1; done
+M1="http://127.0.0.1:$(cat "$TW/m1.port")"; M2="http://127.0.0.1:$(cat "$TW/m2.port")"
+# tt_req WHO METHOD PATH [BODY] [env…]: every answer is also kept in answers.txt (the token must never be in one)
+tt_req() {
+    local who="$1" m="$2" p="$3" b="${4:-}" h="" n
+    shift 4 2>/dev/null || shift $#
+    [[ -n "$who" ]] && h="Authorization: Bearer $who"$'\r\n'
+    n=$(printf '%s' "$b" | wc -c)
+    printf '%s %s HTTP/1.1\r\n%sContent-Length: %d\r\n\r\n%s' "$m" "$p" "$h" "$n" "$b" \
+        | env "${AUTH[@]}" TZ=UTC "$@" "$TAPI" --handle-request 2>/dev/null | tee -a "$TANS"
+}
+m1() { jq -r "$1" "$TW/m1.json"; }
+m2() { jq -r "$1" "$TW/m2.json"; }
+TA=$(tt_req "" POST /auth/setup '{"username":"scott","password":"correct horse battery"}' | body_of | jq -r '.token // empty')
+_tinv=$(tt_req "$TA" POST /auth/invite '{"role":"user"}' | body_of | jq -r '.code // empty')
+TU=$(tt_req "" POST /auth/register "{\"username\":\"kid\",\"password\":\"kid-pass-12345\",\"invite_code\":\"$_tinv\"}" | body_of | jq -r '.token // empty')
+check "technitium: the accounts"                   "yes yes" "$([[ ${#TA} -ge 32 ]] && printf yes || printf no) $([[ ${#TU} -ge 32 ]] && printf yes || printf no)"
+
+# nothing connected
+check "technitium: status before connecting"       "200 false" "$(R=$(tt_req "$TU" GET /dns/technitium/status); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '.configured')")"
+check "technitium: stats need a connection (409)"  409 "$(tt_req "$TA" GET /dns/technitium/stats | status_of)"
+check "technitium: a viewer cannot connect"        403 "$(tt_req "$TU" POST /dns/technitium/connect "{\"url\":\"$M1\",\"token\":\"$TT1\"}" | status_of)"
+check "technitium: an address with a path is refused" 400 "$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M1/api\",\"token\":\"$TT1\"}" | status_of)"
+check "technitium: a token with a quote is refused" 400 "$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M1\",\"token\":\"abcdefghijklmnop\\\" -o x\"}" | status_of)"
+check "technitium: a role that is not one is refused" 400 "$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M1\",\"token\":\"$TT1\",\"role\":\"third\"}" | status_of)"
+_tw=$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M1\",\"token\":\"$(printf 'x%.0s' {1..64})\"}" | body_of)
+check "technitium: a wrong token is saved but says so" "true false yes" "$(jq -r '"\(.connected) \(.reachable)"' <<< "$_tw") $(jq -r '.error' <<< "$_tw" | grep -q 'refused the API token' && echo yes || echo no)"
+_tc=$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M1\",\"token\":\"$TT1\",\"role\":\"primary\"}" | body_of)
+check "technitium: the primary connects"           "true 15.6 dns1" "$(jq -r '"\(.reachable) \(.version) \(.domain)"' <<< "$_tc")"
+check "technitium: the URL is in .env, the token is a secret" "yes no yes" "$(grep -q "^TECHNITIUM_URL=\"\{0,1\}$M1" "$TW/.env" && echo yes || echo no) $(grep -q "$TT1" "$TW/.env" && echo yes || echo no) $([[ -s "$TW/.secrets/TECHNITIUM_TOKEN.enc" ]] && echo yes || echo no)"
+check "technitium: the secondary connects"         "true dns2" "$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M2/\",\"token\":\"$TT2\",\"role\":\"secondary\"}" | body_of | jq -r '"\(.reachable) \(.domain)"')"
+check "technitium: a new URL alone keeps the token" "true" "$(tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M2\",\"role\":\"secondary\"}" | body_of | jq -r '.reachable')"
+
+# the baseline
+_tb=$(tt_req "$TA" POST /dns/technitium/bootstrap '{}' | body_of)
+check "technitium: baseline on both"               "false primary,secondary" "$(jq -r '"\(.unchanged) \(.roles | keys | join(","))"' <<< "$_tb")"
+check "technitium: …it changed the settings"       "yes" "$(jq -r '.roles.primary.changed | (index("forwarders") != null and index("forwarderProtocol") != null and index("blockListUrls") != null and index("dnsServerDomain") == null)' <<< "$_tb" | sed 's/true/yes/')"
+check "technitium: …and installed both apps"       "Advanced Blocking,Query Logs (Sqlite)" "$(jq -r '.roles.secondary.installed | sort | join(",")' <<< "$_tb")"
+check "technitium: forwarders Quad9 + Mullvad over TLS, one at a time" "dns.quad9.net:853 (9.9.9.9),dns.quad9.net:853 (149.112.112.112),dns.mullvad.net:853 (194.242.2.2) Tls 1" "$(m1 '"\(.settings.forwarders | join(",")) \(.settings.forwarderProtocol) \(.settings.forwarderConcurrency)"')"
+check "technitium: DNSSEC on, no IPv6 preference, cache 20000, daily lists" "true false 20000 24" "$(m2 '"\(.settings.dnssecValidation) \(.settings.preferIPv6) \(.settings.cacheMaximumEntries) \(.settings.blockListUpdateIntervalHours)"')"
+check "technitium: Hagezi Pro, TIF and DoH (wildcard)" "pro-onlydomains.txt tif-onlydomains.txt doh-onlydomains.txt" "$(m1 '.settings.blockListUrls | map(split("/") | last) | join(" ")')"
+check "technitium: …each from Hagezi's wildcard folder" 3 "$(m1 '[.settings.blockListUrls[] | select(startswith("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/"))] | length')"
+check "technitium: the names stay dns1 / dns2"     "dns1 dns2" "$(m1 .settings.dnsServerDomain) $(m2 .settings.dnsServerDomain)"
+check "technitium: the query log keeps 30 days"    "30 true" "$(m1 '.apps["Query Logs (Sqlite)"] | fromjson | "\(.maxLogDays) \(.enableLogging)"')"
+check "technitium: Advanced Blocking's example config is replaced" "0 {}" "$(m1 '.apps["Advanced Blocking"] | fromjson | "\(.groups | length) \(.networkGroupMap | tojson)"')"
+check "technitium: a second baseline changes nothing" "true" "$(tt_req "$TA" POST /dns/technitium/bootstrap '{}' | body_of | jq -r '.unchanged')"
+check "technitium: a blocklist added by hand"      4 "$(tt_req "$TA" POST /dns/technitium/blocklists '{"url":"https://example.org/my-list.txt"}' | body_of | jq -r '.blocklists | length')"
+check "technitium: …stays through the baseline"    "true 4" "$(tt_req "$TA" POST /dns/technitium/bootstrap '{"role":"primary"}' | body_of | jq -r '.unchanged') $(m1 '.settings.blockListUrls | length')"
+check "technitium: …and reached the secondary"     4 "$(m2 '.settings.blockListUrls | length')"
+check "technitium: a list address that is not one" 400 "$(tt_req "$TA" POST /dns/technitium/blocklists '{"url":"ftp://x"}' | status_of)"
+check "technitium: …removed again"                 "3 3" "$(tt_req "$TA" POST /dns/technitium/blocklists '{"url":"https://example.org/my-list.txt","remove":true}' | body_of | jq -r '.blocklists | length') $(m2 '.settings.blockListUrls | length')"
+
+# status
+_ts=$(tt_req "$TU" GET /dns/technitium/status | body_of)
+check "technitium: a viewer reads the status of both" "true true 15.6 true" "$(jq -r '"\(.primary.reachable) \(.secondary.reachable) \(.primary.version) \(.primary.apps.advanced_blocking)"' <<< "$_ts")"
+check "technitium: …in sync, blocking on, 3 lists" "true true 3" "$(jq -r '"\(.in_sync) \(.primary.blocking) \(.primary.block_lists)"' <<< "$_ts")"
+check "technitium: …the last list update"          "2026-10-09T08:00:00Z" "$(jq -r '.primary.lists_last_update' <<< "$_ts")"
+
+# block / allow
+check "technitium: block a name (tidied)"          "200 ads.example.net true" "$(R=$(tt_req "$TA" POST /dns/technitium/block '{"domain":" Ads.Example.NET. "}'); printf '%s %s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .domain)" "$(body_of <<< "$R" | jq -r .sync.ok)")"
+check "technitium: …on both"                       "ads.example.net ads.example.net" "$(m1 '.blocked | join(",")') $(m2 '.blocked | join(",")')"
+check "technitium: allow a name, on both"          "example.com example.com" "$(tt_req "$TA" POST /dns/technitium/allow '{"domain":"example.com"}' >/dev/null; m1 '.allowed | join(",")') $(m2 '.allowed | join(",")')"
+check "technitium: not a name"                     400 "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"no spaces.com"}' | status_of)"
+check "technitium: a viewer cannot block"          403 "$(tt_req "$TU" POST /dns/technitium/block '{"domain":"x.example"}' | status_of)"
+check "technitium: lists"                          "3 example.com ads.example.net 5" "$(tt_req "$TU" GET /dns/technitium/lists | body_of | jq -r '"\(.blocklists | length) \(.allowed | join(",")) \(.blocked | join(",")) \(.categories | length)"')"
+check "technitium: unblock, on both"               "0 0" "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"ads.example.net","remove":true}' >/dev/null; m1 '.blocked | length') $(m2 '.blocked | length')"
+
+# pause / resume
+_tp=$(tt_req "$TA" POST /dns/technitium/pause '{"minutes":15}' | body_of)
+check "technitium: pause 15 minutes, both"         "false false yes" "$(m1 .settings.enableBlocking) $(m2 .settings.enableBlocking) $([[ "$(jq -r .paused_until <<< "$_tp")" == 20* ]] && echo yes || echo no)"
+check "technitium: …the status says until when"    "false yes" "$(tt_req "$TU" GET /dns/technitium/status | body_of | jq -r '"\(.primary.blocking) \(if .primary.paused_until then "yes" else "no" end)"')"
+check "technitium: 7 minutes is not offered"       400 "$(tt_req "$TA" POST /dns/technitium/pause '{"minutes":7}' | status_of)"
+check "technitium: resume, both"                   "true true null" "$(tt_req "$TA" POST /dns/technitium/resume '' >/dev/null; m1 .settings.enableBlocking) $(m2 .settings.enableBlocking) $(m1 .settings.temporaryDisableBlockingTill)"
+check "technitium: a viewer cannot pause"          403 "$(tt_req "$TU" POST /dns/technitium/pause '{"minutes":5}' | status_of)"
+
+# the kids' groups → the Advanced Blocking app
+MON2100=1791838800; MON1000=1791799200; MON1001=1791799260; MON0600=1791784800; MON2131=1791840660; TUE0600=1791871200
+BOYS='{"name":"Boys","devices":[{"ip":"192.168.2.50","label":"Tablet 9"},{"ip":"192.168.2.51","label":"Tablet 7","mac":"AA:BB:CC:DD:EE:01"}],"lists":["adult","gambling","proxy-vpn"],"bedtime":{"enabled":true,"from":"20:30","to":"07:00","days":[1,2,3,4,5,6,7]}}'
+_tg=$(tt_req "$TA" POST /dns/technitium/groups "$BOYS" DCS_TECHNITIUM_NOW=$MON1000 | body_of)
+GB=$(jq -r '.group.id' <<< "$_tg")
+check "technitium: a group is saved"               "yes true aa:bb:cc:dd:ee:01" "$([[ "$GB" =~ ^g[0-9a-f]{8}$ ]] && echo yes || echo no) $(jq -r '.sync.ok' <<< "$_tg") $(jq -r '.group.devices[1].mac' <<< "$_tg")"
+_adv() { jq -r '.apps["Advanced Blocking"] | fromjson' "$TW/$1.json"; }
+check "technitium: the app maps its devices to it" '{"192.168.2.50":"Boys","192.168.2.51":"Boys"}' "$(_adv m1 | jq -c .networkGroupMap)"
+check "technitium: …with its category lists"      "nsfw-onlydomains.txt gambling-onlydomains.txt doh-vpn-proxy-bypass-onlydomains.txt" "$(_adv m1 | jq -r '.groups[0].blockListUrls | map(split("/") | last) | join(" ")')"
+check "technitium: …no bedtime at 10:00"           "[] []" "$(_adv m1 | jq -c '.groups[0].blockedRegex') $(_adv m2 | jq -c '.groups[0].blockedRegex')"
+check "technitium: a device address that is not one" 400 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"X","devices":[{"ip":"tablet"}]}' | status_of)"
+check "technitium: a list that does not exist"    400 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"X","lists":["dating"]}' | status_of)"
+check "technitium: a bedtime of 25:00"             400 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"X","bedtime":{"enabled":true,"from":"25:00","to":"07:00"}}' | status_of)"
+check "technitium: a name taken"                   409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"boys"}' | status_of)"
+check "technitium: a device in two groups"         409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"Girls","devices":[{"ip":"192.168.2.50"}]}' | status_of)"
+check "technitium: a viewer cannot add a group"    403 "$(tt_req "$TU" POST /dns/technitium/groups '{"name":"Mine"}' | status_of)"
+check "technitium: a viewer reads the groups"      "200 Boys false 5" "$(R=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '"\(.groups[0].name) \(.groups[0].in_bedtime) \(.categories | length)"')")"
+check "technitium: SafeSearch is the house's"      house "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r '.safe_search_scope')"
+
+# bedtime by the minute clock (a fake clock: DCS_TECHNITIUM_NOW, UTC)
+_ttick() { local t="$1"; ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_lib; DCS_TECHNITIUM_NOW="$t" TZ=UTC _tt_tick ) >/dev/null 2>&1; }
+_sets() { jq -r '[.calls[] | select(.[0] == "/api/apps/config/set")] | length' "$TW/m1.json"; }
+_ttick $MON2100
+check "technitium: 21:00 Monday: bedtime blocks everything" '["."] ["."]' "$(_adv m1 | jq -c '.groups[0].blockedRegex') $(_adv m2 | jq -c '.groups[0].blockedRegex')"
+check "technitium: …said in the audit log"         yes "$(grep -q 'Boys: bedtime started' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+check "technitium: …the groups page says so"       true "$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON2100 | body_of | jq -r '.groups[0].in_bedtime')"
+_n=$(_sets); _ttick $((MON2100 + 60))
+check "technitium: the next minute writes nothing" "$_n" "$(_sets)"
+_ttick $MON1000
+check "technitium: 10:00: bedtime over"            '[] []' "$(_adv m1 | jq -c '.groups[0].blockedRegex') $(_adv m2 | jq -c '.groups[0].blockedRegex')"
+check "technitium: …said too"                      yes "$(grep -q 'Boys: bedtime ended' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+_n=$(_sets); _ttick $MON1001
+check "technitium: 10:01 writes nothing"           "$_n" "$(_sets)"
+check "technitium: the state survives a restart (a file)" '[]' "$(jq -c '.bedtime_active' "$TW/.data/technitium/state.json")"
+# weekends only: Sunday night runs into Monday morning, Monday night does not start one
+tt_req "$TA" POST /dns/technitium/groups "$(jq -c --arg id "$GB" '. + {id: $id, bedtime: {enabled: true, from: "20:30", to: "07:00", days: [6, 7]}}' <<< "$BOYS")" DCS_TECHNITIUM_NOW=$MON1000 >/dev/null
+_ttick $MON0600
+check "technitium: weekend group: 06:00 Monday is Sunday's night" '["."]' "$(_adv m1 | jq -c '.groups[0].blockedRegex')"
+_ttick $MON2100
+check "technitium: …21:00 Monday is not a weekend night" '[]' "$(_adv m1 | jq -c '.groups[0].blockedRegex')"
+_ttick $TUE0600
+check "technitium: …nor 06:00 Tuesday"             '[]' "$(_adv m1 | jq -c '.groups[0].blockedRegex')"
+tt_req "$TA" POST /dns/technitium/groups "$(jq -c --arg id "$GB" '. + {id: $id}' <<< "$BOYS")" DCS_TECHNITIUM_NOW=$MON2100 >/dev/null
+check "technitium: every night again: 21:00 is bedtime" '["."]' "$(_adv m1 | jq -c '.groups[0].blockedRegex')"
+_tq=$(tt_req "$TA" POST "/dns/technitium/groups/$GB/pause-bedtime" '{}' DCS_TECHNITIUM_NOW=$MON2100 | body_of)
+check "technitium: pause bedtime 30 minutes"       "2026-10-12T21:30:00Z []" "$(jq -r .paused_until <<< "$_tq") $(_adv m1 | jq -c '.groups[0].blockedRegex')"
+check "technitium: …the group says until when"     "false 2026-10-12T21:30:00Z" "$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON2100 | body_of | jq -r '.groups[0] | "\(.in_bedtime) \(.bedtime_paused_until)"')"
+_ttick $MON2131
+check "technitium: …and bedtime comes back at 21:31" '["."]' "$(_adv m1 | jq -c '.groups[0].blockedRegex')"
+check "technitium: a pause of 300 minutes"         400 "$(tt_req "$TA" POST "/dns/technitium/groups/$GB/pause-bedtime" '{"minutes":300}' | status_of)"
+check "technitium: a group that is not there"      404 "$(tt_req "$TA" POST /dns/technitium/groups/gnope/pause-bedtime '{}' | status_of)"
+
+# SafeSearch and YouTube for the house
+_tss=$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":true,"youtube":"moderate"}' | body_of)
+check "technitium: SafeSearch on, YouTube moderate" "true moderate true" "$(jq -r '"\(.house.safe_search) \(.house.youtube) \(.sync.ok)"' <<< "$_tss")"
+check "technitium: www.google.com is a Forwarder zone, its apex an ANAME" "Forwarder ANAME forcesafesearch.google.com" "$(m1 '.zones["www.google.com"] | "\(.type) \(.records[0].type) \(.records[0].rData.aname)"')"
+check "technitium: …YouTube restricted (moderate), on both" "restrictmoderate.youtube.com restrictmoderate.youtube.com" "$(m1 '.zones["www.youtube.com"].records[0].rData.aname') $(m2 '.zones["m.youtube.com"].records[0].rData.aname')"
+check "technitium: …9 forced names"                9 "$(m2 '.zones | length')"
+check "technitium: YouTube strict replaces the zone" "restrict.youtube.com 1" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"strict"}' >/dev/null; m1 '.zones["www.youtube.com"].records[0].rData.aname') $(m1 '.zones["www.youtube.com"].records | length')"
+check "technitium: SafeSearch off removes its zones, YouTube stays" "5 5 null" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":false}' >/dev/null; m1 '.zones | length') $(m2 '.zones | length') $(m1 '.zones["www.google.com"]')"
+check "technitium: a mode that is not one"         400 "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"loud"}' | status_of)"
+tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"off"}' >/dev/null
+
+# stats and activity
+_tst=$(tt_req "$TU" GET '/dns/technitium/stats?range=lastDay' | body_of)
+check "technitium: stats of both together"         "300 30 primary,secondary" "$(jq -r '"\(.totals.queries) \(.totals.blocked) \(.instances | join(","))"' <<< "$_tst")"
+check "technitium: …a client named after its device" "192.168.2.50 180 Tablet 9" "$(jq -r '.top_clients[0] | "\(.ip) \(.count) \(.name)"' <<< "$_tst")"
+check "technitium: …else Technitium's name, else none" "null" "$(jq -r '.top_clients[1].name' <<< "$_tst")"
+check "technitium: …the series added up"           "30,60,210 2,4,24" "$(jq -r '"\(.series.queries | join(",")) \(.series.blocked | join(","))"' <<< "$_tst")"
+check "technitium: …top blocked, query types"      "ads.example.net 21 A 240" "$(jq -r '"\(.top_blocked[0].domain) \(.top_blocked[0].count) \(.query_types[0].type) \(.query_types[0].count)"' <<< "$_tst")"
+check "technitium: a range that is not one"       400 "$(tt_req "$TU" GET '/dns/technitium/stats?range=forever' | status_of)"
+_tac=$(tt_req "$TA" GET '/dns/technitium/activity?client=192.168.2.50' | body_of)
+check "technitium: a device's queries from both, newest first" "4 ads.example.net true" "$(jq -r '"\(.entries | length) \(.entries[0].name) \(.entries[0].blocked)"' <<< "$_tac")"
+check "technitium: …blocked alone"                 "2 true" "$(tt_req "$TA" GET '/dns/technitium/activity?client=192.168.2.50&blocked=1' | body_of | jq -r '"\(.entries | length) \(all(.entries[]; .blocked))"')"
+check "technitium: …a part of a name"             "2 dcs.example.org" "$(tt_req "$TA" GET '/dns/technitium/activity?q=dcs' | body_of | jq -r '"\(.entries | length) \(.entries[0].name)"')"
+check "technitium: …a limit"                       1 "$(tt_req "$TA" GET '/dns/technitium/activity?limit=1' | body_of | jq -r '.entries | length')"
+check "technitium: a client that is not an address" 400 "$(tt_req "$TA" GET '/dns/technitium/activity?client=x;y' | status_of)"
+check "technitium: a viewer does not read a device's queries" 403 "$(tt_req "$TU" GET '/dns/technitium/activity?client=192.168.2.50' | status_of)"
+
+# the sync: the secondary drifts, the status sees it, Sync now mends it
+curl -s -H "Authorization: Bearer $TT2" --data-urlencode domain=stray.example "$M2/api/blocked/add" >/dev/null
+check "technitium: a drifted secondary is out of sync" false "$(tt_req "$TU" GET /dns/technitium/status | body_of | jq -r '.in_sync')"
+check "technitium: a viewer cannot sync"           403 "$(tt_req "$TU" POST /dns/technitium/sync '' | status_of)"
+check "technitium: Sync now"                       "200 0" "$(R=$(tt_req "$TA" POST /dns/technitium/sync ''); printf '%s %s' "$(status_of <<< "$R")" "$(m2 '.blocked | length')")"
+check "technitium: …in sync again"                 "true true" "$(tt_req "$TU" GET /dns/technitium/status | body_of | jq -r '"\(.in_sync) \(.last_sync.ok)"')"
+check "technitium: the groups reached the secondary" "$(_adv m1 | jq -S -c .)" "$(_adv m2 | jq -S -c .)"
+
+# a secondary that does not answer
+tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"http://127.0.0.1:9\",\"role\":\"secondary\"}" >/dev/null
+_tsd=$(tt_req "$TU" GET /dns/technitium/status | body_of)
+check "technitium: an unreachable secondary says so" "false false yes" "$(jq -r '"\(.secondary.reachable) \(.in_sync)"' <<< "$_tsd") $(jq -r '.secondary.error' <<< "$_tsd" | grep -q 'did not answer within 5 seconds' && echo yes || echo no)"
+check "technitium: …a write still works, the sync says why not" "200 false" "$(R=$(tt_req "$TA" POST /dns/technitium/block '{"domain":"late.example"}'); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .sync.ok)")"
+check "technitium: …the reachable state is kept for the dashboard" "true false" "$(jq -r '"\(.reachable.primary.ok) \(.reachable.secondary.ok)"' "$TW/.data/technitium/state.json")"
+tt_req "$TA" POST /dns/technitium/connect "{\"url\":\"$M2\",\"role\":\"secondary\"}" >/dev/null
+
+# delete a group
+check "technitium: delete a group"                 "200 0 {}" "$(R=$(tt_req "$TA" DELETE "/dns/technitium/groups/$GB" ''); printf '%s %s %s' "$(status_of <<< "$R")" "$(_adv m1 | jq -r '.groups | length')" "$(_adv m2 | jq -c .networkGroupMap)")"
+check "technitium: …gone"                          404 "$(tt_req "$TA" DELETE "/dns/technitium/groups/$GB" '' | status_of)"
+check "technitium: a viewer cannot delete one"     403 "$(tt_req "$TU" DELETE /dns/technitium/groups/gx '' | status_of)"
+
+# the tokens: never in an answer, a log, .env or an address; always a Bearer header
+check "technitium: no token in any answer"         0 "$(grep -c -e "$TT1" -e "$TT2" "$TANS" || true)"
+check "technitium: no token in the logs or .data"  "" "$(grep -rl -e "$TT1" -e "$TT2" "$TW/logs" "$TW/.api-auth" "$TW/.data" "$TW/.env" 2>/dev/null)"
+check "technitium: every call carried the token as a Bearer header, none in its address" "true false" "$(jq -s -r '[.[].calls[]] | "\(all(.[1])) \(any(.[2]))"' "$TW/m1.json" "$TW/m2.json")"
+# disconnect
+check "technitium: disconnect the secondary"       "false null" "$(tt_req "$TA" POST /dns/technitium/connect '{"url":"","role":"secondary"}' | body_of | jq -r .connected) $(tt_req "$TU" GET /dns/technitium/status | body_of | jq -r .in_sync)"
+check "technitium: …its token is gone"             no "$([[ -e "$TW/.secrets/TECHNITIUM_SECONDARY_TOKEN.enc" ]] && echo yes || echo no)"
+# the route policy as documented
+check "technitium: docs: viewers read, admins act, a device's queries are the admin's" "user user user user admin admin admin admin admin admin" \
+    "$(for r in 'GET /dns/technitium/status' 'GET /dns/technitium/stats' 'GET /dns/technitium/groups' 'GET /dns/technitium/lists' 'GET /dns/technitium/activity' 'POST /dns/technitium/block' 'POST /dns/technitium/connect' 'POST /dns/technitium/groups' 'DELETE /dns/technitium/groups/{id}' 'POST /dns/technitium/groups/{id}/pause-bedtime'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+kill $TT_PIDS 2>/dev/null; wait $TT_PIDS 2>/dev/null
+rm -rf "$TW"
+fi
+# <<< Technitium DNS
+
 if [[ "${SMOKE_ONLY:-}" != crowdsec ]]; then
 echo "Factory reset (last: it removes the accounts)"
 cp "$ROOT/.env.example" "$WORK/.env.example"   # what the reset copies back over .env

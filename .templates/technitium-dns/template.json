@@ -1,7 +1,7 @@
 {
   "name": "technitium-dns",
   "title": "Technitium DNS",
-  "description": "Technitium is a DNS server with a web page: it resolves names itself or forwards them (DNS-over-HTTPS and DNS-over-TLS included), blocks ads from block lists and hosts your own zones. After deploying, sign in as admin with the password you set here, then point your router or devices at this server's DNS port; set that port to 53 once nothing else on the host uses it.",
+  "description": "Technitium is a DNS server with a web page: it resolves names itself or forwards them (DNS-over-HTTPS and DNS-over-TLS included), blocks ads from block lists and hosts your own zones. After deploying, sign in as admin with the password you set here, then point your router or devices at this server's DNS port; set that port to 53 once nothing else on the host uses it. To run it from DCS (numbers, block and allow, the kids' groups and their bedtime, a second server kept in step), make an API token in Technitium (your name at the top right → Create API Token) and connect it on the Technitium page under DNS & routes.",
   "category": "network",
   "target_stack": "networking-security",
   "icon": "🧭",
