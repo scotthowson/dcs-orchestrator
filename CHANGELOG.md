@@ -3,6 +3,19 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Maintenance mode per route.** `PUT /routes/{host}/maintenance {on, message?}` (admin, audited) puts one route behind a
+  "back soon" page: DCS writes `custom_routes/dcs-maintenance/<host>.yml`, a Traefik router for the route's host with a
+  far higher priority, TLS like the route, and a `replacePath` to the new public `GET /maintenance/{host}` (503,
+  `Retry-After: 300`, no script, no version; 404 when the route is not in maintenance). The router borrows the
+  dashboard's `dcs-ui` service when Traefik has the dashboard's route (nginx passes `/api/*` to the API), else a service
+  of its own to the API's address. Turning it off removes the file; the route's own files are never touched. A VM's
+  route is set on the hub, whose Traefik fronts it. `GET /routes/maintenance` lists the state (`.data/maintenance.json`)
+  and every row of `GET /routes` says `maintenance: true/false`.
+
 ## [4.0.47] - 2026-10-09
 
 ### Fixed
