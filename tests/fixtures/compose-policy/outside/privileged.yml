@@ -1,0 +1,4 @@
+services:
+  evil:
+    image: alpine:3
+    privileged: true

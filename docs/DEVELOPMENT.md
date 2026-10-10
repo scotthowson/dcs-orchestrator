@@ -59,7 +59,7 @@ The API writes its state to `.api-auth/`, `.data/`, `.secrets/` and `logs/`; git
 One helper per job. Before writing a pipeline that reads `.env`, checks a container or takes a lock, look
 here: the helper below is the one the rest of the code uses, with the same arguments and exit status.
 Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.sh`) call live in
-`api-server.sh` or in a library it sources at start (`envfile.sh`, `secrets.sh`).
+`api-server.sh` or in a library it sources at start (`envfile.sh`, `secrets.sh`, `compose-policy.sh`).
 
 | Job | The helper | Where | What it replaced |
 |---|---|---|---|
@@ -86,6 +86,7 @@ Helpers the lazily loaded libraries (`crowdsec.sh`, `crowdsec-config.sh`, `chat.
 | A sliding-window rate limit | `_api_rate_window FILE LIMIT SECONDS` (under `FILE.lock`) | `api-server.sh` | the terminal's own unlocked copy (`_terminal_rate_limited` is now a call) |
 | Audit | `_api_audit_log IP EVENT USER DETAIL` (auth log, mirrored), `_audit_log ACTION DETAIL` (the JSON log behind `GET /audit` and webhooks) | `api-server.sh` | — |
 | Secrets | `secrets_get`, `secrets_env_exports`, `compose_with_secrets` | `.lib/secrets.sh` | the aliases `_decrypt_secret`, `_secrets_env_exports`, `_compose_with_secrets` |
+| Judge a compose file (the compose policy) | `_compose_policy_check FILE [STACK]` (a file on disk), `_compose_policy_check_content CONTENT [STACK]` (content not written yet); the verdict in `COMPOSE_POLICY`, `_compose_policy_text` for people; in a handler `_api_scan_compose_security` / `_api_policy_refuse` (422 with the findings) | `.lib/compose-policy.sh` | any grep of a compose file for a key |
 | A compose file backup before a template changes it | `_compose_backup DIR TIMESTAMP` (`.bak.TIMESTAMP`, newest 5 kept) | `api-server.sh` | the copies in the template deploy and removal |
 | Parse a `.env` for the editor | `_env_file_vars_json FILE` | `api-server.sh` | the copies in `GET /env`, `GET /stacks/{stack}/env` |
 | Terminal title, the traps' exit | `_set_terminal_title`, `_graceful_exit` | `.lib/docker-utils.sh` | the copies in `start.sh` and `stop.sh` |

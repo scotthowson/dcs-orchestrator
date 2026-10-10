@@ -3,6 +3,30 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+
+- **The compose security scanner is replaced by a compose policy that judges the file as it will run.** The old scanner read the
+  text line by line, so valid YAML went past it: `privileged:` with `true` on the next line, flow style (`{privileged: true}`), merge
+  keys, the long volume syntax (`source: /`), a `${VAR}` the stack's `.env` sets to `/`, `cap_add: [ALL]`, a top-level `include:`, a
+  device list that also named `/dev/null`. Docker Compose now resolves the file (`docker compose config --format json`: the `.env`
+  filled in, every profile on, `include:`/`extends:` followed) and `.lib/compose-policy.jq` judges the result; without Compose,
+  `.lib/compose-policy.py` reads the file itself and the same rules apply. The 20 evasions are fixtures in
+  `tests/fixtures/compose-policy/` and are refused by both engines (SECURITY.md, "Compose policy").
+- **Two outcomes**: *refused* (privileged, SYS_ADMIN/ALL/SYS_MODULE, the host's PID/IPC/cgroup/user namespace, `/`, `/etc`,
+  `/proc`, `/sys`, `/boot`, `/dev`, `/root`, ssh keys, DCS's own folder, the Docker socket writable, seccomp/AppArmor off, a raw
+  disk, files outside the stack's folder) and *warned* (host networking, NET_ADMIN, the Docker socket read-only, a GPU, a tunnel or
+  a USB stick). `.config/compose-policy.json` allows what the shipped templates need for their images, each with its reason;
+  `GET`/`PUT /config/compose-policy` keep a server's own exceptions in `.data/compose-policy.local.json`.
+- **Every path that writes or runs a compose file asks it.** `POST /stacks/{s}/files` used to write `docker-compose.yml` unchecked (a
+  refusal now puts the folder back), and a `.env` save could make a mount of `/`; both are judged, as are the compose save, the
+  editors' checks (the findings with their line numbers, in `policy`), rollbacks, restores, template deploys, imports and updates,
+  and the hub's push of a stack into a VM (422 with the findings). Start, restart, update and recreate report what a file already
+  on disk would be refused for, in the answer and the audit log, and go on.
+- No false refusals: the ten shipped stacks pass without a warning and all 200 templates pass at their defaults; `tests/lint.sh`
+  keeps it that way. Verdicts are cached by the hash of the file, its `.env` and the policy (`.data/compose-policy-cache.json`).
+
 ## [4.0.47] - 2026-10-09
 
 ### Fixed

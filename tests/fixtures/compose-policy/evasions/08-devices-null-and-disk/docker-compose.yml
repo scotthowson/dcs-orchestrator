@@ -1,0 +1,6 @@
+services:
+  app:
+    image: alpine:3
+    devices:
+      - /dev/null:/dev/null
+      - /dev/sda:/dev/sda

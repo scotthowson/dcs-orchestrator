@@ -1,0 +1,7 @@
+services:
+  app:
+    image: alpine:3
+    security_opt: [
+      "no-new-privileges:true",
+      seccomp=unconfined
+    ]

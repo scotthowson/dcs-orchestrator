@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `442` in total.
+Every endpoint below is `444` in total.
 
 ## Access levels
 
@@ -72,10 +72,12 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/health/score` | user | # GET /health/score?fleet=1 on a hub: the members' scores folded in — containers and images add up across the fleet, the score is |
 | GET | `/health/score/history` | user | Recorded health scores over a range |
 | GET | `/config/schema` | user | Return contents of .config/schema.json |
+| GET | `/config/compose-policy` | admin | The compose policy: the exceptions DCS ships, this server's own, the engine that judges and the rules a finding can name |
 | GET | `/health/score/{stack}` | user | Compute health score for a specific stack |
 | GET | `/export/{health|system|config}` | user | Export data |
 | POST | `/config` | admin | Update allow-listed .env settings |
 | POST | `/metrics/snapshot` | admin | Record a metrics sample now |
+| PUT | `/config/compose-policy` | admin | Replace this server's own compose-policy exceptions {allow: [{image \| stack, service?, rules: [...], reason}], devices: {warn, ignore}} |
 
 ## Authentication
 

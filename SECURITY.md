@@ -46,16 +46,61 @@ open the web terminal. The security model therefore concentrates on three things
 - `.env` files are read as **data**, never sourced: only `KEY=value` lines are accepted, values are
   literal, and a fixed list of shell/loader variables (`PATH`, `LD_PRELOAD`, `BASH_ENV`, ...) can
   never be set through the API. Writes reject command substitution and control characters.
-- Compose content is scanned before it is written or deployed: `privileged`, host namespaces,
-  dangerous mounts (`/`, `/etc`, `/proc`, `/dev`, `docker.sock`, ...), dangerous capabilities,
-  disabled security profiles and `${VAR:-value}` bypasses are refused. Built-in templates deploy
-  under a relaxed policy; user-edited files use the strict one.
+- Compose content goes through the compose policy (below) before it is written or deployed.
 - URLs fetched by the server (templates, webhooks, plugins) are checked against private and
   link-local ranges and redirects are not followed.
 - Archives (backups, snapshots) are listed before extraction; absolute paths, `..` entries and
   symbolic links are refused.
 - Background jobs started by a request are detached from the client socket, so a slow job can
   never hold a connection open or write into an HTTP response.
+
+### Compose policy
+
+What a compose file may ask of the host is judged on the file **as it will run**, not on its
+text: Docker Compose resolves it (`docker compose config --format json` with the stack's `.env` and
+the server's environment, every profile on, `include:` and `extends:` followed, `${VAR}` filled
+in), and the rules in `.lib/compose-policy.jq` read the result. A value on the next line, flow style,
+anchors and merge keys, the long volume syntax, a named volume that is a bind, a `${VAR}` the `.env`
+sets to `/`, a path through `..` or a link: none of it changes the verdict. Where Docker Compose is
+not there (a VM before Docker is installed) `.lib/compose-policy.py` reads the file itself (PyYAML
+when present, else a small YAML reader of its own) and the same rules judge it; the answer says which
+engine did (`policy.engine`). The stored secrets are not filled in (their values would land in the
+findings): a `${SECRETS_X}` is judged as empty.
+
+| Refused (root on the host in all but name) | Warned |
+|---|---|
+| `privileged`; `cap_add` ALL, SYS_ADMIN, SYS_MODULE, SYS_RAWIO, DAC_READ_SEARCH, SYS_BOOT | `network_mode: host`; `cap_add` NET_ADMIN, SYS_PTRACE, BPF, PERFMON |
+| `pid`, `ipc`, `cgroup` or `userns_mode`: `host` | the Docker socket read-only (`:ro` does not stop API calls: the socket proxy template is the way) |
+| `security_opt` seccomp, AppArmor or systempaths `unconfined` | a device of the usual kinds (`/dev/dri`, `/dev/net/tun`, USB serial sticks, `/dev/bus/usb`, sound, video, `/dev/kvm`, …: `devices.warn`) |
+| a mount of `/`, `/etc` (a file under it read-only is fine), `/proc`, `/sys`, `/boot`, `/dev`, `/root`, `/home/*/.ssh` | `/sys/…` or `/var/lib/docker` read-only; `/home` writable; a folder that holds DCS, read-only |
+| the Docker (containerd, podman) socket or `/run` writable; `/var/lib/docker` writable | `sysctls` outside `net.*`; device cgroup rules; `volumes_from` another container |
+| DCS's own folder (its accounts, secrets key, scripts; `Stacks/<stack>/` is fine), or a folder that holds it, writable | a socket proxy with `POST=1` |
+| any other device (a disk, `/dev/mem`), a device rule for every device | |
+| `build:` context, `include:`, `extends: file`, `env_file:`, `configs`/`secrets` `file:` outside the stack's folder | |
+
+Exceptions are named rules for an image (by prefix: `netdata/netdata` matches `netdata/netdata:stable`,
+not `netdata/netdata-evil`) or a stack, optionally one service, each with its reason. DCS ships its
+own in `.config/compose-policy.json` (Portainer, Watchtower and Sablier with the Docker socket,
+Tailscale, WireGuard, Gluetun and Pi-hole with NET_ADMIN, Plex, Jellyfin, Emby and Home Assistant on
+the host network, the monitoring agents with `/proc` and `/sys`, …); a server's own go in
+`.data/compose-policy.local.json` through `GET`/`PUT /config/compose-policy` (admins). An allowed
+refusal is still reported, as a warning with its reason; an allowed warning is listed as allowed. An
+allowed image is trusted with its rules whatever its `command` says: allow by stack when in doubt. A
+template's own `host_access` (and a deploy's `allow_privileged`) is allowed for that deploy.
+
+Where it runs: an edit (`POST /stacks/{s}/compose`, the editors' checks `POST /stacks/{s}/compose/validate`
+and `POST /compose/validate` with the findings and their lines), `POST /stacks/{s}/files` (the folder
+is put back when the result is refused), a `.env` save and a container's environment change (refused
+for what they add), a rollback, a snapshot restore, a template deploy (after its variables are filled
+in), a template import or update (at its defaults), and the hub's push of a stack's files into a VM:
+those refuse with 422 and the findings. A start, restart, update or recreate, and the setup wizard,
+report what a file already on disk would be refused for (in the answer and the audit log) and go on:
+a file an admin wrote by hand is the admin's. Verdicts are cached by the hash of the file, its `.env`,
+the root `.env` and the policy files (`.data/compose-policy-cache.json`, the newest 300).
+`tests/lint.sh` runs every template through the policy with its defaults.
+
+The policy keeps the promise against mistakes and against content an admin did not read (a template
+from a URL, a pasted file). It is not a sandbox against a hostile admin, who can edit the crontab.
 
 ### Plugins and hooks
 

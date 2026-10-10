@@ -67,7 +67,7 @@ The dashboard does everything the commands do, and more:
 
 - **Stacks** (on a hub, the VMs' stacks too): start, stop, restart and update a stack; follow its progress (pull,
   create, start, health); edit its `docker-compose.yml` and `.env`. Every compose save is checked by the
-  security scan and `docker compose config`, and the previous version is kept: the history can put any
+  compose policy and `docker compose config`, and the previous version is kept: the history can put any
   version back.
 - **Containers**: state, health, ports, CPU and memory; start, stop, restart, recreate, remove; logs,
   the files inside, its environment (saved where the compose file defines it, then recreated); *Run

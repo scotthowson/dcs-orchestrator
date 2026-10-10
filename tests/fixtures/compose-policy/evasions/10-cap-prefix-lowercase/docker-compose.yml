@@ -1,0 +1,5 @@
+services:
+  app:
+    image: alpine:3
+    cap_add:
+      - "cap_sys_admin"

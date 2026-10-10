@@ -1,0 +1,5 @@
+include:
+  - ../outside/privileged.yml
+services:
+  app:
+    image: alpine:3

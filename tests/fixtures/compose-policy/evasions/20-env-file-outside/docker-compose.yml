@@ -1,0 +1,5 @@
+services:
+  app:
+    image: alpine:3
+    env_file:
+      - ../outside/stolen.env

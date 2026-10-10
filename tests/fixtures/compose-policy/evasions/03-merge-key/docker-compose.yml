@@ -1,0 +1,7 @@
+x-defaults: &defaults
+  restart: unless-stopped
+  privileged: true
+services:
+  app:
+    <<: *defaults
+    image: alpine:3

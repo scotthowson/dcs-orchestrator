@@ -1,0 +1,5 @@
+services:
+  app:
+    extends:
+      file: ../outside/privileged.yml
+      service: evil

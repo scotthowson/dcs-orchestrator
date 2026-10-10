@@ -592,7 +592,8 @@ rm -rf "$WORK/hookplug" "$WORK/hook-ctx.json"
 # shows the later action running until it really ended
 _QS="$WORK/Stacks/queued"; mkdir -p "$_QS"; printf 'services:\n  q:\n    image: alpine:3\n' > "$_QS/docker-compose.yml"
 _QC="$WORK/queued-compose.sh"; _QL="$WORK/queued-compose.log"; : > "$_QL"
-printf '#!/bin/bash\ncase " $* " in *" version "*) exit 0;; esac\necho "begin $*" >> %q; sleep 2; echo end >> %q\n' "$_QL" "$_QL" > "$_QC"; chmod +x "$_QC"
+# (`config`, the compose policy's read of the file, changes nothing on the project: not counted)
+printf '#!/bin/bash\ncase " $* " in *" version "*|*" config "*) exit 0;; esac\necho "begin $*" >> %q; sleep 2; echo end >> %q\n' "$_QL" "$_QL" > "$_QC"; chmod +x "$_QC"
 auth_request POST /stacks/queued/restart '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null; sleep 0.5
 auth_request POST /stacks/queued/stop '{}' DOCKER_COMPOSE_CMD="$_QC" >/dev/null
 check "stack actions in a row: the later one is shown running" "stop|true" "$(auth_request GET /stacks/queued/activity | body_of | jq -r '"\(.action)|\(.active)"' 2>/dev/null)"
@@ -3464,40 +3465,136 @@ _DS=$(fake_request POST /templates/coresecret-tpl/deploy '{"target_stack":"demo2
 check "deploy: the core Redis password is made, not asked for" "200 asked=no made=yes" "$(status_of <<< "$_DS") asked=$(body_of <<< "$_DS" | grep -q 'do not exist yet' && echo yes || echo no) made=$(_lib secrets_exists DCS_REDIS_PASSWORD && echo yes || echo no)"
 command cp -f "$WORK/demo2-compose.keep" "$WORK/Stacks/demo2/docker-compose.yml"; rm -f "$WORK/demo2-compose.keep" "$WORK/.secrets/DCS_REDIS_PASSWORD.enc"
 check "deploy: explicit none is marked"     1 "$(grep -c '^# authelia: off' "$_ZZR/demo2/routed-tpl.yml")"
-# every built-in template passes the scan a deploy runs on it (its variables at their defaults): a rule that is too
-# wide makes a template in the gallery one nobody can deploy (the /dev rule refused every device: a VPN's tunnel,
-# a Zigbee stick, a UPS on USB)
-_tpl_scan() {
-    local d f c k v
-    for d in "$ROOT"/.templates/*/; do
-        f="$d/docker-compose.yml"; [[ -f "$f" ]] || continue
-        c=$(cat "$f")
-        if [[ -f "$d/template.json" ]]; then
-            while IFS=$'\t' read -r k v; do
-                [[ "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-                v="${v//[&|\\]/}"
-                c=$(printf '%s' "$c" | sed -E "s|\\\$\\{$k(:-[^}]*)?\\}|$v|g")
-            done < <(jq -r '.variables[]? | select(.name != null) | [.name, ((.default // "") | tostring)] | @tsv' "$d/template.json" 2>/dev/null)
-        fi
-        c=$(printf '%s' "$c" | sed -E 's/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/\1/g' | sed '/^\s*privileged:\s*/d')
-        c=$(_template_host_access_strip "$c" "$d/template.json")     # the host access the template declares, as the deploy does
-        _API_SCAN_QUIET=true _api_scan_compose_security "$c" "smoke" deploy >/dev/null 2>&1 || printf '%s ' "$(basename "$d")"
-    done
-}
-check "templates: every built-in one passes the deploy scan" "" "$(set --; source "$API" >/dev/null 2>&1; _tpl_scan 2>/dev/null)"
-_scan_dev() { local _mode="$1" _key="$2" _val="$3"; ( set --; source "$API" >/dev/null 2>&1; _API_SCAN_QUIET=true _api_scan_compose_security "$(printf 'services:\n  a:\n    image: x\n    %s:\n      - %s\n' "$_key" "$_val")" smoke "$_mode" >/dev/null 2>&1 && echo 0 || echo 1 ); }
-# host access is waved through only for what the template itself declares, and never a writable mount of /
-_ha_tpl="$WORK/ha-tpl.json"
-_ha_scan() { local _m="$2"; printf '%s' "$1" > "$_ha_tpl"; ( set --; source "$API" >/dev/null 2>&1; c=$(_template_host_access_strip "$(printf 'services:\n  a:\n    image: x\n    network_mode: host\n    pid: host\n    volumes:\n      - %s\n' "$_m")" "$_ha_tpl"); _API_SCAN_QUIET=true _api_scan_compose_security "$c" smoke deploy 2>&1 | tr '\n' ' ' ); }
-_ha_none=$(_ha_scan '{}' '/:/host:ro')
-check "host access: nothing declared, everything refused" yes "$([[ "$_ha_none" == *"host network"* && "$_ha_none" == *"host PID"* && "$_ha_none" == *"root filesystem"* ]] && echo yes || echo no)"
-check "host access: what is declared passes"            "" "$(_ha_scan '{"host_access":["network","pid","root-ro"]}' '/:/host:ro,rslave')"
-check "host access: only what is declared"              yes "$([[ "$(_ha_scan '{"host_access":["network"]}' '/:/host:ro')" == *"host PID"* ]] && echo yes || echo no)"
-check "host access: never a writable /"                 yes "$([[ "$(_ha_scan '{"host_access":["network","pid","root-ro"]}' '/:/host')" == *"root filesystem"* ]] && echo yes || echo no)"
-check "scan: a template may name one device"            0 "$(_scan_dev deploy devices /dev/ttyUSB0:/dev/ttyUSB0)"
-check "scan: …but not the whole of /dev"                1 "$(_scan_dev deploy volumes /dev:/dev)"
-check "scan: …nor the machine's memory"                 1 "$(_scan_dev deploy devices /dev/mem:/dev/mem)"
-check "scan: an edited compose file still names no device" 1 "$(_scan_dev strict devices /dev/ttyUSB0:/dev/ttyUSB0)"
+echo "Compose policy (what a compose file may ask of the host: .lib/compose-policy.sh)"
+# _pol FILE STACK [env...] — the verdict on FILE judged as STACK's compose file: "rc engine refused-rules|warned-rules|allowed-rules"
+_POLW="$WORK/policy"; mkdir -p "$_POLW/Stacks"
+_pol() { local f="$1" st="$2"; shift 2; env "$@" _POL_F="$f" _POL_S="$st" bash -c 'set --; source "$_POL_API" >/dev/null 2>&1; set +e; _compose_policy_check "$_POL_F" "$_POL_S"; rc=$?; jq -r --arg rc "$rc" "\"\(\$rc) \(.engine) \([.refused[].rule] | join(\",\"))|\([.warned[].rule] | join(\",\"))|\([.allowed[].rule] | join(\",\"))\"" <<< "$COMPOSE_POLICY"' 2>/dev/null; }
+export _POL_API="$API"
+_pol_rule_in() { [[ " $(cut -d'|' -f"$2" <<< "$1" | tr ',' ' ') " == *" $3 "* ]] && echo yes || echo "no ($1)"; }
+# the evasions of the 2026-10 audit and their relatives: valid YAML a line scanner let through, each refused by Docker
+# Compose's own reading of the file and by the fallback that reads it without Compose (the small YAML reader, no PyYAML)
+cp -r "$ROOT/tests/fixtures/compose-policy/outside" "$_POLW/Stacks/outside"
+for _pd in "$ROOT"/tests/fixtures/compose-policy/evasions/*/; do
+    _pn=$(basename "$_pd"); cp -r "$_pd" "$_POLW/Stacks/$_pn"; _pw=$(cat "$_pd/expect")
+    _pv=$(_pol "$_POLW/Stacks/$_pn/docker-compose.yml" "$_pn" COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")
+    check "policy: evasion $_pn refused (compose)" "1 compose yes" "${_pv%% *} $(cut -d' ' -f2 <<< "$_pv") $(_pol_rule_in "${_pv#* * }" 1 "$_pw")"
+    _pv=$(_pol "$_POLW/Stacks/$_pn/docker-compose.yml" "$_pn" COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json" DCS_POLICY_ENGINE=python DCS_POLICY_PYYAML=0)
+    check "policy: evasion $_pn refused (fallback)" "1 python yes" "${_pv%% *} $(cut -d' ' -f2 <<< "$_pv") $(_pol_rule_in "${_pv#* * }" 1 "$_pw")"
+done
+# the stacks DCS ships pass without a word, in both engines
+for _ps in "$ROOT"/Stacks/*/; do
+    _pn=$(basename "$_ps")
+    check "policy: shipped stack $_pn passes" "0 compose ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$ROOT/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
+    check "policy: shipped stack $_pn passes (fallback)" "0 python ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$ROOT/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json" DCS_POLICY_ENGINE=python DCS_POLICY_PYYAML=0)"
+done
+# a dozen templates as the gallery deploys them (variables at their defaults): passed, warned or allowed as intended
+_polt() { local t="$1" e; e=$(_lib _compose_policy_template_env "$ROOT/.templates/$t/template.json"); mkdir -p "$_POLW/Stacks/tpl"; _pol "$ROOT/.templates/$t/docker-compose.yml" tpl COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_DIR="$_POLW/Stacks/tpl" COMPOSE_POLICY_ENV_FILE="$e" COMPOSE_POLICY_CACHE="$_POLW/cache.json" "${@:2}"; rm -f "$e"; }
+check "policy: template plex passes"                     "0 compose ||"                                   "$(_polt plex)"
+check "policy: template home-assistant passes"           "0 compose ||"                                   "$(_polt home-assistant)"
+check "policy: template jellyfin passes"                 "0 compose ||"                                   "$(_polt jellyfin)"
+check "policy: template crowdsec passes"                 "0 compose ||"                                   "$(_polt crowdsec)"
+check "policy: template traefik: the socket proxy is allowed" "0 compose ||docker-socket:ro"              "$(_polt traefik)"
+check "policy: template docker-socket-proxy: allowed"    "0 compose ||docker-socket:ro"                  "$(_polt docker-socket-proxy)"
+check "policy: template wg-easy: WireGuard is allowed (SYS_MODULE stays a warning)" "0 compose |cap:SYS_MODULE|cap:NET_ADMIN" "$(_polt wg-easy)"
+check "policy: template gluetun: the VPN is allowed"     "0 compose ||cap:NET_ADMIN,device:/dev/net/tun" "$(_polt gluetun)"
+check "policy: template tailscale: the host network is allowed" "0 compose |cap:SYS_MODULE|cap:NET_ADMIN,device:/dev/net/tun,network:host" "$(_polt tailscale)"
+check "policy: template dozzle: the socket read-only is a warning" "0 compose |docker-socket:ro|"       "$(_polt dozzle)"
+check "policy: template portainer: the socket writable is allowed, with a warning" "0 compose |docker-socket:rw|" "$(_polt portainer)"
+check "policy: template zigbee2mqtt: a USB stick is a warning" "0 compose |device:/dev/ttyUSB0|"         "$(_polt zigbee2mqtt)"
+check "policy: template pelican: privileged Wings is allowed, with warnings" "0 compose |docker-socket:rw,privileged|" "$(_polt pelican)"
+check "policy: template duplicati: / read-only is allowed, with a warning" "0 compose |bind:/:ro|"         "$(_polt duplicati)"
+check "policy: template netdata (fallback engine)"       "0 python |bind:/proc:ro,bind:/sys:ro,cap:SYS_ADMIN,security_opt:apparmor=unconfined|cap:SYS_PTRACE,docker-socket:ro" "$(_polt netdata DCS_POLICY_ENGINE=python DCS_POLICY_PYYAML=0)"
+# what an image is allowed is allowed for that image only
+mkdir -p "$_POLW/Stacks/zz-own"
+printf 'services:\n  ha:\n    image: ghcr.io/home-assistant/home-assistant:stable\n    network_mode: host\n  other:\n    image: alpine:3\n    network_mode: host\n    cap_add: [NET_ADMIN]\n  vpn:\n    image: lscr.io/linuxserver/wireguard:latest\n    cap_add: [NET_ADMIN]\n  sock:\n    image: alpine:3\n    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro", "/etc/localtime:/etc/localtime"]\n  evil:\n    image: ghcr.io/home-assistant/home-assistant-evil:1\n    network_mode: host\n' > "$_POLW/Stacks/zz-own/docker-compose.yml"
+check "policy: allowed for Home Assistant and WireGuard, warned for the others" "0 compose |cap:NET_ADMIN,docker-socket:ro,network:host,network:host|cap:NET_ADMIN,network:host" \
+    "$(_pol "$_POLW/Stacks/zz-own/docker-compose.yml" zz-own COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
+check "policy: an image prefix stops at the name (home-assistant-evil is not home-assistant)" "evil" \
+    "$(_lib eval "set +e; COMPOSE_DIR='$_POLW/Stacks' COMPOSE_POLICY_CACHE='$_POLW/cache.json' _compose_policy_check '$_POLW/Stacks/zz-own/docker-compose.yml' zz-own; jq -r '[.warned[] | select(.rule == \"network:host\") | .service] | map(select(. == \"evil\")) | .[0]' <<< \"\$COMPOSE_POLICY\"")"
+printf 'services:\n  sock:\n    image: alpine:3\n    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]\n  dcs:\n    image: alpine:3\n    volumes: ["%s/.data:/x:ro", "./App-Data/a:/a", "%s/Stacks/other/App-Data:/o"]\n' "$WORK" "$_POLW" > "$_POLW/Stacks/zz-own/docker-compose.yml"
+check "policy: the Docker socket writable and DCS's own folder are refused, a stack's folder is not" "1 compose bind:dcs:ro,docker-socket:rw||" \
+    "$(_pol "$_POLW/Stacks/zz-own/docker-compose.yml" zz-own BASE_DIR="$WORK" COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
+# a link inside the stack's folder is followed to where it leads
+ln -s / "$_POLW/Stacks/zz-own/rootlink"
+printf 'services:\n  a:\n    image: alpine:3\n    volumes: ["./rootlink:/host"]\n' > "$_POLW/Stacks/zz-own/docker-compose.yml"
+check "policy: a link to / in the stack's folder is a mount of /" "1 compose bind:/:rw||" "$(_pol "$_POLW/Stacks/zz-own/docker-compose.yml" zz-own COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
+rm -f "$_POLW/Stacks/zz-own/rootlink"
+# the cache: the same file, .env and policy are judged once; a changed .env is judged again
+printf 'services:\n  a:\n    image: alpine:3\n    volumes: ["${D:-./App-Data}:/d"]\n' > "$_POLW/Stacks/zz-own/docker-compose.yml"; rm -f "$_POLW/cache.json"
+_pcache() { _lib eval "set +e; COMPOSE_DIR='$_POLW/Stacks' COMPOSE_POLICY_CACHE='$_POLW/cache.json' _compose_policy_check '$_POLW/Stacks/zz-own/docker-compose.yml' zz-own; jq -r '\"\(.cached) \([.refused[].rule] | join(\",\"))\"' <<< \"\$COMPOSE_POLICY\""; }
+check "policy cache: judged the first time"   "false " "$(_pcache)"
+check "policy cache: …remembered the second"  "true " "$(_pcache)"
+check "policy cache: …one entry, by hash"      "1 64" "$(jq -r '"\(length) \(keys[0] | length)"' "$_POLW/cache.json" 2>/dev/null)"
+printf 'D=/etc\n' > "$_POLW/Stacks/zz-own/.env"
+check "policy cache: a changed .env is judged again" "false bind:/etc:rw" "$(_pcache)"
+check "policy cache: bounded"                  "3" "$(_lib eval "COMPOSE_POLICY_CACHE='$_POLW/cache.json' COMPOSE_POLICY_CACHE_MAX=3; for i in 1 2 3 4 5; do _compose_policy_cache_put k\$i '{\"refused\":[]}'; done; jq length '$_POLW/cache.json'")"
+rm -rf "$_POLW"
+
+# the API: every path that writes a compose file judges it; the editors get the findings with their lines
+mkdir -p "$WORK/Stacks/zz-pol"; printf 'services:\n  a:\n    image: alpine:3\n' > "$WORK/Stacks/zz-pol/docker-compose.yml"
+_PRIV=$(printf 'services:\n  a:\n    image: alpine:3\n    privileged:\n      true\n')
+_r=$(auth_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c}')")
+check "api: a compose save that is refused answers 422 with the findings" "422 privileged 4 yes" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '"\(.policy.refused[0].rule) \(.policy.refused[0].line)"') $(body_of <<< "$_r" | jq -r .message | grep -q '^refused: line 4: services.a: privileged' && echo yes)"
+check "api: …and nothing is written"             0 "$(grep -c privileged "$WORK/Stacks/zz-pol/docker-compose.yml")"
+_r=$(auth_request POST /stacks/zz-pol/compose/validate "$(jq -nc --arg c "$_PRIV" '{content: $c}')")
+check "api: the editor's check shows the refusal on its line" "200 false yes privileged" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r .valid) $(body_of <<< "$_r" | jq -r .output | grep -q 'line 4' && echo yes) $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule')"
+_r=$(auth_request POST /stacks/zz-pol/compose/validate "$(jq -nc '{content: "services:\n  a:\n    image: alpine:3\n    network_mode: host\n"}')")
+check "api: …and a warning without refusing"     "true network:host" "$(body_of <<< "$_r" | jq -r '"\(.valid) \(.policy.warned[0].rule)"')"
+_r=$(auth_request POST /compose/validate "$(jq -nc --arg c "$_PRIV" '{content: $c}')")
+check "api: POST /compose/validate: refused, as errors" "false true privileged" "$(body_of <<< "$_r" | jq -r '"\(.valid) \(.errors[0] | test("line 4")) \(.policy.refused[0].rule)"')"
+_r=$(auth_request POST /compose/validate "$(jq -nc '{content: "services:\n  a:\n    image: alpine:3\n    cap_add: [NET_ADMIN]\n"}')")
+check "api: …a warning is a warning"             "true 1 cap:NET_ADMIN" "$(body_of <<< "$_r" | jq -r '"\(.valid) \(.warnings | length) \(.policy.warned[0].rule)"')"
+_r=$(auth_request POST /stacks/zz-pol/compose "$(jq -nc '{content: "services:\n  a:\n    image: alpine:3\n    network_mode: host\n"}')")
+check "api: a save with a warning is saved, the warning in the answer" "200 network:host" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.warned[0].rule')"
+check "api: …and in the audit log"               yes "$(grep -q '"compose_policy_warned"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
+# POST /stacks/{s}/files: what the folder would hold is judged; a refusal puts it back as it was
+_keep=$(cat "$WORK/Stacks/zz-pol/docker-compose.yml")
+_r=$(auth_request POST /stacks/zz-pol/files "$(jq -nc --arg c "$(printf 'services:\n  a:\n    image: alpine:3\n    cap_add: [ALL]\n' | base64 -w0)" --arg n "$(printf 'x\n' | base64 -w0)" '{files: [{path: "docker-compose.yml", mode: "644", content: $c}, {path: "new-file.txt", mode: "644", content: $n}]}')")
+check "api: files: a refused compose file answers 422" "422 cap:ALL" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule')"
+check "api: files: …the folder is as it was"     "same gone" "$([[ "$(cat "$WORK/Stacks/zz-pol/docker-compose.yml")" == "$_keep" ]] && echo same || echo changed) $([[ -e "$WORK/Stacks/zz-pol/new-file.txt" ]] && echo there || echo gone)"
+_r=$(auth_request POST /stacks/zz-pol/files "$(jq -nc --arg c "$(printf 'services:\n  a:\n    image: alpine:3\n    volumes: ["${DATA:-./App-Data}:/data"]\n' | base64 -w0)" '{files: [{path: "docker-compose.yml", mode: "644", content: $c}]}')")
+check "api: files: a compose file that passes is written" "200 0" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused | length')"
+# POST /stacks/{s}/env: a ${VAR} the new .env sets to / is refused, the .env stays as it was
+printf 'DATA=./App-Data\n' > "$WORK/Stacks/zz-pol/.env"
+_r=$(auth_request POST /stacks/zz-pol/env '{"content":"DATA=/\n"}')
+check "api: env: a .env that makes a mount of / is refused" "422 bind:/:rw DATA=./App-Data" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $(cat "$WORK/Stacks/zz-pol/.env")"
+_r=$(auth_request POST /stacks/zz-pol/env '{"content":"DATA=./App-Data/other\n"}')
+check "api: env: …another one is saved"          "200 DATA=./App-Data/other" "$(status_of <<< "$_r") $(cat "$WORK/Stacks/zz-pol/.env")"
+# a start does not refuse a file that is already there (a hand edit): it reports it
+printf 'services:\n  a:\n    image: alpine:3\n    privileged: true\n' > "$WORK/Stacks/zz-pol/docker-compose.yml"
+_r=$(auth_request POST /stacks/zz-pol/start "" DOCKER_COMPOSE_CMD=true)
+check "api: start: a refused file on disk starts, the finding in the answer" "200 privileged python" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '"\(.policy.refused[0].rule) \(.policy.engine)"')"
+check "api: start: …and in the audit log"        yes "$(grep '"compose_policy_refused"' "$WORK/.data/audit.jsonl" 2>/dev/null | grep -q 'start of zz-pol' && echo yes || echo no)"
+# the rollback of an archived version is judged like an edit
+# the exceptions of this server: GET/PUT /config/compose-policy (admin only)
+check "api: policy: a viewer cannot read it"     403 "$(viewer_request GET /config/compose-policy | status_of)"
+check "api: policy: a viewer cannot change it"   403 "$(viewer_request PUT /config/compose-policy '{"allow":[]}' | status_of)"
+_r=$(auth_request GET /config/compose-policy)
+check "api: policy: the shipped exceptions and the engine" "200 yes compose" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '(.shipped.allow | length > 20) | if . then "yes" else "no" end') $(body_of <<< "$_r" | jq -r .engine)"
+check "api: policy: an entry without a reason is refused" 400 "$(auth_request PUT /config/compose-policy '{"allow":[{"image":"alpine","rules":["privileged"]}]}' | status_of)"
+check "api: policy: an entry without rules is refused"    400 "$(auth_request PUT /config/compose-policy '{"allow":[{"image":"alpine","rules":[],"reason":"x"}]}' | status_of)"
+check "api: policy: a device that is not in /dev is refused" 400 "$(auth_request PUT /config/compose-policy '{"allow":[],"devices":{"warn":["/etc/x"]}}' | status_of)"
+_r=$(auth_request PUT /config/compose-policy '{"allow":[{"stack":"zz-pol","rules":["privileged"],"reason":"the smoke test runs a privileged container"}]}')
+check "api: policy: this server's own exception is saved" "200 1 600" "$(status_of <<< "$_r") $(jq -r '.allow | length' "$WORK/.data/compose-policy.local.json") $(stat -c %a "$WORK/.data/compose-policy.local.json")"
+_r=$(auth_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c}')")
+check "api: policy: …and the save it allows goes through, with a warning" "200 privileged the smoke test runs a privileged container" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '"\(.policy.warned[0].rule) \(.policy.warned[0].allowed_by)"')"
+check "api: policy: …for that stack only"        "422" "$(auth_request POST /stacks/demo/compose/validate "$(jq -nc --arg c "$_PRIV" '{content: $c}')" | body_of | jq -r 'if .valid == false then "422" else "200" end')"
+auth_request PUT /config/compose-policy '{"allow":[]}' >/dev/null
+# templates: a deploy, an import and an update are judged; the dry-run reports
+mkdir -p "$WORK/.templates/zz-evil"
+printf '{"name":"zz-evil","title":"Evil","category":"other","variables":[{"name":"ROOTDIR","default":"/"}]}\n' > "$WORK/.templates/zz-evil/template.json"
+printf 'services:\n  zz-evil:\n    image: alpine:3\n    volumes:\n      - ${ROOTDIR}:/host\n' > "$WORK/.templates/zz-evil/docker-compose.yml"
+_r=$(auth_request POST /templates/zz-evil/deploy '{"target_stack":"zz-pol"}' DOCKER_COMPOSE_CMD=true)
+check "api: template deploy: refused after its variables are filled in" "422 bind:/:rw 0" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $(grep -c zz-evil "$WORK/Stacks/zz-pol/docker-compose.yml")"
+_r=$(auth_request POST /templates/zz-evil/deploy '{"target_stack":"zz-pol","variables":{"ROOTDIR":"./App-Data/evil"}}' DOCKER_COMPOSE_CMD=true)
+check "api: template deploy: …with a harmless value it goes through" "200 0" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused | length')"
+_r=$(auth_request POST /templates/zz-evil/dry-run '{"target_stack":"zz-pol","variables":{"ROOTDIR":"/"}}')
+check "api: template dry-run: the findings are reported" "yes" "$(body_of <<< "$_r" | jq -r '[.security_warnings[] | select(test("whole file system"))] | if length > 0 then "yes" else "no" end')"
+_r=$(auth_request POST /templates/import "$(jq -nc '{name: "zz-imp", compose: "services:\n  x:\n    image: alpine:3\n    pid: host\n", metadata: {title: "x"}}')")
+check "api: template import: refused"            "422 pid:host no" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $([[ -d "$WORK/.templates/zz-imp" ]] && echo yes || echo no)"
+_r=$(auth_request POST /templates/zz-evil/update "$(jq -nc '{compose: "services:\n  zz-evil:\n    image: alpine:3\n    security_opt: [\"seccomp:unconfined\"]\n"}')")
+check "api: template update: refused, the template unchanged" "422 security_opt:seccomp=unconfined 1" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $(grep -c ROOTDIR "$WORK/.templates/zz-evil/docker-compose.yml")"
+rm -rf "$WORK/.templates/zz-evil" "$WORK/Stacks/zz-pol"
 # API keys: for a dashboard or a script that can only send a fixed header. Made by an admin, shown once, kept as a hash;
 # "read" reads what a viewer may, "operate" also does what a bot may; never an admin, never an account
 key_request() { local hdr="$1" m="$2" p="$3" b="${4:-}"; printf '%s %s HTTP/1.1\r\n%s\r\nContent-Length: %d\r\n\r\n%s' "$m" "$p" "$hdr" "${#b}" "$b" | env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" PATH="$WORK/fakebin:$PATH" "$API" --handle-request 2>/dev/null; }

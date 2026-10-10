@@ -1,0 +1,12 @@
+services:
+  app:
+    image: alpine:3
+    volumes:
+      - hostroot:/host
+volumes:
+  hostroot:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /
