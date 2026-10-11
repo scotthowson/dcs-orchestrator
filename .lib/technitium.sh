@@ -827,28 +827,47 @@ TT_BLOCKED_GROUP="DCS: blocked devices"
 TT_SWEEP_EVERY=300
 TT_DEV_ID_RE='^([0-9a-f]{12}|ip-[0-9]{1,3}(\.[0-9]{1,3}){3})$'
 
-# the icon a device most likely is, from its vendor and its name (a guess until the owner picks one)
+# the icon a device most likely is (a guess until the owner picks one): its names first (the name it gives itself, without
+# its domain, then the nickname), rule by rule in this order, then its vendor. A word like "pi" or "car" counts only
+# between separators (raspberry-pi, not "spider"). Re-guessed on every scan for every device whose icon is a guess.
 # shellcheck disable=SC2016  # jq, not shell
 TT_GUESS_JQ='def guess($vv; $hh):
   ($vv // "" | ascii_downcase) as $v | ($hh // "" | ascii_downcase) as $h
-  | if ($h | test("xbox|playstation|ps[345]|nintendo|switch|steam-?deck")) or ($v | test("nintendo|playstation|valve")) then "console"
-    elif $h | test("ipad|tablet|galaxy-?tab|sm-[tx][0-9]|kindle|fire-?hd|lenovo-?tab|(^|[-_])tab([-_0-9]|$)") then "tablet"
-    elif $h | test("iphone|pixel|android|galaxy|oneplus|phone|moto") then "phone"
-    elif $h | test("macbook|laptop|notebook|thinkpad|xps|zenbook|chromebook") then "laptop"
-    elif ($h | test("watch")) or ($v | test("garmin|fitbit")) then "watch"
-    elif ($h | test("(^|[-_.])tv([-_.0-9]|$)|bravia|roku|chromecast|fire-?tv|apple-?tv|shield|webos|tizen")) or ($v | test("\\b(roku|lg|vizio|hisense|tcl|skyworth|vestel|insignia)\\b")) then "tv"
-    elif ($h | test("echo|homepod|sonos|speaker|nest-?(mini|audio|hub)|google-?home")) or ($v | test("sonos|bose|denon|yamaha|harman|onkyo")) then "speaker"
-    elif ($h | test("cam|doorbell")) or ($v | test("\\b(ring|arlo|wyze|hikvision|dahua|reolink|blink|ezviz|canary)\\b")) then "camera"
-    elif ($h | test("print|^brn|^npi|epson|officejet|laserjet")) or ($v | test("\\b(brother|canon|epson|xerox|lexmark|kyocera|ricoh|konica|zebra|dymo)\\b")) then "printer"
-    elif ($h | test("router|gateway|unifi|eero|homehub|^hub|access-?point|^ap-")) or ($v | test("\\b(ubiquiti|tp-link|netgear|d-link|linksys|eero|mikrotik|zyxel|tenda|mercusys|arris|sagemcom|technicolor|sercomm|askey|plume|vantiva)\\b")) then "router"
-    elif ($h | test("server|nas|pve|proxmox|raspberrypi|^pi[0-9-]|^dns[0-9]")) or ($v | test("raspberry|synology|qnap|proxmox|hardkernel|pine64")) then "server"
-    elif ($h | test("bulb|light|hue")) or ($v | test("philips hue|lifx|nanoleaf|sengled|wiz|yeelight|govee|lutron")) then "lightbulb"
-    elif ($h | test("thermostat|ecobee")) or ($v | test("ecobee|google nest|honeywell|tado|mysa|netatmo")) then "thermostat"
-    elif $v | test("\\b(tesla|ford)\\b") then "car"
-    elif $h | test("imac|mac-?mini|desktop|-pc$|^pc-|workstation|gaming") then "desktop"
+  | "(^|[-_. ])" as $a | "([-_. 0-9]|$)" as $z
+  | if $h | test("tv|roku|shield|fire-?tv|chromecast|apple-?tv|bravia|lgwebos|webos|tizen") then "tv"
+    elif $h | test("ipad|tablet|\($a)tab\($z)|galaxy-?tab|sm-[tx][0-9]|kindle|fire-?hd|(?<!think)pad") then "tablet"
+    elif $h | test("iphone|pixel|galaxy|oneplus-?[0-9]|android|phone|\($a)moto") then "phone"
+    elif $h | test("macbook|laptop|notebook|thinkpad|xps|zenbook|chromebook|surface") then "laptop"
+    elif $h | test("desktop|\($a)pc\($z)|-pc$|ubuntu|fedora|\($a)arch|windows|imac|mac-?(mini|studio|pro)|tower|-rig\($z)|workstation") then "desktop"
+    elif $h | test("xbox|playstation|\($a)ps[345]\($z)|switch|nintendo|steam-?deck") then "console"
+    elif $h | test("echo|alexa|homepod|sonos|nest-?(mini|audio)|google-?home|speaker") then "speaker"
+    elif $h | test("cam|\($a)ring\($z)|doorbell|wyze|reolink") then "camera"
+    elif $h | test("print|brother|epson|hp-?(laserjet|officejet|envy)|laserjet|officejet|^brn|^npi") then "printer"
+    elif $h | test("router|gateway|homehub|unifi|eero|access-?point|^ap-") then "router"
+    elif $h | test("\($a)pi\($z)|raspberry|pihole|proxmox|\($a)pve|server|\($a)nas\($z)|synology|unraid|\($a)hub\($z)|dns") then "server"
+    elif $h | test("^esp|tasmota|shelly|tuya|iot|sensor|plug") then "iot"
+    elif $h | test("hue|lifx|bulb|light") then "lightbulb"
+    elif $h | test("thermostat|ecobee|nest-?thermo") then "thermostat"
+    elif $h | test("watch") then "watch"
+    elif $h | test("tesla|\($a)car\($z)") then "car"
+    elif $v | test("sony") then (if $h | test("ps[345]|playstation") then "console" else "tv" end)
+    elif $v | test("nintendo|microsoft|valve") then "console"
+    elif $v | test("\\b(roku|lg|vizio|tcl|hisense|skyworth|vestel|insignia)\\b") then "tv"
+    elif $v | test("nest") then "thermostat"
+    elif $v | test("samsung|apple|google|oneplus|xiaomi|motorola|huawei|oppo|vivo|realme|honor") then "phone"
+    elif $v | test("raspberry|synology|qnap|hardkernel|pine64") then "server"
+    elif $v | test("\\b(intel|dell|hp|hewlett|lenovo|asus|asustek|micro-star|gigabyte|acer)\\b") then "desktop"
     elif $v | test("espressif|tuya|shelly|sonoff|meross|aqara|silicon labs|nordic|particle|arduino|irobot|ecovacs|roborock|dreame|dyson|whirlpool|bosch|miele|electrolux|haier|midea|chamberlain|rachio|traeger") then "iot"
-    elif ($v | test("microsoft")) and ($h | test("surface")) then "laptop"
-    else "unknown" end;'
+    elif $v | test("amazon|sonos|bose|denon|yamaha|harman|onkyo") then "speaker"
+    elif $v | test("\\b(ring|wyze|arlo|hikvision|dahua|reolink|blink|ezviz|canary)\\b") then "camera"
+    elif $v | test("philips|signify|lifx|nanoleaf|sengled|yeelight|govee|lutron") then "lightbulb"
+    elif $v | test("\\b(ubiquiti|tp-link|netgear|sagemcom|d-link|linksys|eero|mikrotik|zyxel|tenda|mercusys|arris|technicolor|sercomm|askey|plume|vantiva)\\b") then "router"
+    elif $v | test("ecobee|honeywell|tado|mysa|netatmo") then "thermostat"
+    elif $v | test("brother|canon|epson|xerox|lexmark|kyocera|ricoh|konica|zebra|dymo") then "printer"
+    elif $v | test("garmin|fitbit") then "watch"
+    elif $v | test("\\btesla\\b") then "car"
+    else "unknown" end;
+def guess_dev: if .hub then "server" else guess(.vendor; [(.hostname // "" | sub("\\..*$"; "")), (.nickname // "")] | join(" ")) end;'
 # IPv4 as a number, a mask's prefix
 # shellcheck disable=SC2016
 TT_IP4_JQ='def ip4ok: type == "string" and test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") and (split(".") | all(tonumber <= 255));
@@ -1050,12 +1069,12 @@ _tt_scan_locked() {
                 blocked_today: ((if $touched then ($d.blocked_today // 0) else 0 end) + $s.blocked), hub: ($s.hub or ($d.hub // false)),
                 sources: (($d.sources // {}) + ($s.srcs | map({key: ., value: $now}) | from_entries))}) as $n
             | ($n + {vendor: vendor_of($n.mac), mac_random: ($n.mac | randmac)}) as $n
-            | (if $n.icon_guessed then $n + {icon: (if $n.hub then "server" else guess($n.vendor; $n.hostname) end)} else $n end) as $n
             | (if $i != null then .devices[$i] = $n else .devices += [$n] | .added += 1 end)
             | (if $s.mac != null then .devices |= map(select(.id != ("ip-" + $s.ip))) else . end)
             | .forgotten |= del(.[$id], .["ip-" + $s.ip]))
         | .devices |= map(
-            (if $ql_ok and ((.sources // {}) | any(.[]; . == $now) | not) then . + {queries_today: 0, blocked_today: 0} else . end)
+            (if .icon_guessed then .icon = guess_dev else . end)
+            | (if $ql_ok and ((.sources // {}) | any(.[]; . == $now) | not) then . + {queries_today: 0, blocked_today: 0} else . end)
             | (if $dhcp_ok then . + {static: (.mac != null and $resv[.mac] != null), reserved_ip: (if .mac != null then $resv[.mac] else null end)} else . end))
         | .last_scan = {at: $now, found: ($seen | length), new: .added, devices: (.devices | length), swept: $swept,
                         named_by_dhcp: ([$o[] | select(.src == "dhcp" and .hostname != null)] | length),

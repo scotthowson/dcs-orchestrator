@@ -10693,6 +10693,14 @@ check "technitium: a name over mDNS, Espressif is iot" "esp-kitchen.local iot" "
 check "technitium: reverse DNS on the primary, a Raspberry Pi is a server" "pi-hole.home server Raspberry Pi" "$(_dev 192.168.2.70 '' '"\(.hostname) \(.icon) \(.vendor)"')"
 check "technitium: the router (Sagemcom)"          "Sagemcom router" "$(_dev 192.168.2.1 '' '"\(.vendor) \(.icon)"')"
 check "technitium: the hub itself"                 "true server 001122334455" "$(_dev 192.168.2.233 '' '"\(.hub) \(.icon) \(.id)"')"
+# the icon guess: the name it gives itself first (without its domain), then the nickname, then the vendor
+_tgj=$( ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_lib >/dev/null 2>&1; printf '%s' "$TT_GUESS_JQ" ) )
+_tguess() { jq -rn --arg h "$1" --arg v "$2" --arg n "${3:-}" "$_tgj"'  def e: if . == "" then null else . end; {hostname: ($h | e), vendor: ($v | e), nickname: ($n | e), hub: false} | guess_dev'; }
+check "technitium: the icon guess, names before the vendor" "tv desktop phone tv tablet phone tablet unknown laptop console tv router printer desktop speaker unknown phone" "$( {
+    _tguess ScottsTV 'Samsung Electronics'; _tguess Howson-Ubuntu 'Intel Corporate'; _tguess '' 'Samsung Electronics'; _tguess Samsung-TV.home 'Samsung Electronics'
+    _tguess OnePlus-Pad 'Private address'; _tguess OnePlus-15 'Private address'; _tguess iPad Apple; _tguess '' ''; _tguess ThinkPad-X1 Lenovo
+    _tguess PS5-123 'Sony Interactive'; _tguess '' 'Sony Corporation'; _tguess Bell-HomeHub Sagemcom; _tguess HP-LaserJet-M404 'HP Inc.'; _tguess '' 'HP Inc.'
+    _tguess Living-Room-Echo 'Amazon Technologies'; _tguess spider-man ''; _tguess '' 'Private address' "Dad's iPhone"; } | xargs)"
 check "technitium: a client of the query log alone: by its address" "ip-192.168.2.77 null 5" "$(_dev 192.168.2.77 '' '"\(.id) \(.mac) \(.queries_today)"')"
 check "technitium: no loopback, no IPv6 client"   0 "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq '[.devices[] | select(.ip == "127.0.0.1" or (.ip | test(":")))] | length')"
 check "technitium: …busiest first"                 "192.168.2.50" "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '.devices[0].ip')"
@@ -10720,7 +10728,11 @@ check "technitium: …the group holds it by its id"  "192.168.2.50 Tom's tablet 
 check "technitium: …Technitium maps it"            Kids "$(_adv m1 | jq -r '.networkGroupMap["192.168.2.50"]')"
 check "technitium: …the directory says so"         "$GK Kids" "$(_dev 192.168.2.50 '' '"\(.group_id) \(.group_name)"')"
 check "technitium: a group that is not there"      404 "$(tt_req "$TA" PUT /dns/technitium/devices/$TABLET '{"group_id":"gnope"}' | status_of)"
+# an icon picked by hand stays through a scan; a guess is made again on every scan (here: an older, worse guess)
+tt_req "$TA" PUT /dns/technitium/devices/0009bf000060 '{"icon":"tv"}' >/dev/null
+jq '(.devices[] | select(.ip == "192.168.2.1")).icon = "unknown"' "$TW/.data/technitium/devices.json" > "$TW/dj.tmp" && mv -f "$TW/dj.tmp" "$TW/.data/technitium/devices.json"
 tt_req "$TA" POST /dns/technitium/devices/scan '' "$TFP" DCS_TECHNITIUM_NOW=$((MON1000 + 300)) >/dev/null
+check "technitium: a scan keeps a picked icon, guesses again the rest" "tv false router true" "$(_dev 192.168.2.60 $((MON1000 + 300)) '"\(.icon) \(.icon_guessed)"') $(_dev 192.168.2.1 $((MON1000 + 300)) '"\(.icon) \(.icon_guessed)"')"
 check "technitium: the tablet moved to .55: the group follows it" "192.168.2.55 Kids null" "$(jq -r --arg g "$GK" '.groups[] | select(.id == $g) | .devices[0].ip' "$TW/.data/technitium/groups.json") $(_adv m1 | jq -r '.networkGroupMap["192.168.2.55"]') $(_adv m1 | jq -r '.networkGroupMap["192.168.2.50"]')"
 check "technitium: …a sweep again after 5 minutes" 506 "$(wc -l < "$TFB/pings")"
 

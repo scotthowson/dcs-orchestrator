@@ -3,6 +3,19 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Technitium: device icons guessed from what the device plainly says.** The guess reads the name the device gives
+  itself (without its domain, then the nickname) first, rule by rule (tv, tablet, phone, laptop, desktop, console,
+  speaker, camera, printer, router, server, iot, light, thermostat, watch, car), then its vendor (Samsung, Apple, Google,
+  OnePlus, Xiaomi, Motorola, Huawei a phone; Sony a console or a TV; Nintendo, Microsoft a console; Roku, LG, Vizio, TCL,
+  Hisense a TV; Intel, Dell, HP, Lenovo, ASUS a desktop; Amazon, Sonos a speaker; Ring, Wyze a camera; Philips a light;
+  Ubiquiti, TP-Link, Netgear, Sagemcom a router; Nest a thermostat). `ScottsTV`, `Howson-Ubuntu`, `OnePlus-Pad` and a
+  Samsung with no name were unknown before. Every guessed icon is guessed again on each scan, not only the devices that
+  scan saw; an icon picked by hand is never touched.
+
 ## [4.0.50] - 2026-10-10
 
 ### Added

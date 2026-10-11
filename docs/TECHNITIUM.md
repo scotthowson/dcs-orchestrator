@@ -79,8 +79,11 @@ and **Update the vendor list** fetches IEEE's whole list once (`.data/technitium
 private (random) MAC shows *Private address*: Android and iOS do that per network, so the address stays the same on
 this Wi-Fi.
 
-The icon is guessed from the vendor and the name (a Nintendo is a console, a `*-tv` a TV, a Raspberry Pi a server, an
-Espressif board an iot device) until you pick one. A nickname shows everywhere the page names a device: the top
+The icon is guessed until you pick one, again on every scan: from the name the device gives itself (then its nickname)
+first, then its vendor. `ScottsTV` is a TV, `OnePlus-Pad` a tablet, `OnePlus-15` a phone, `Howson-Ubuntu` a desktop,
+`pi-hole` a server; with no telling name a Samsung, Apple or Google device is a phone, a Nintendo a console, a Sagemcom
+or Ubiquiti a router, an Espressif board an iot device. The page draws a guess with a dotted ring; one you picked is never
+guessed over. A nickname shows everywhere the page names a device: the top
 clients, a device's queries, the groups. A group holds its devices by their directory id, so a device that gets
 another address stays in its group. **Forget** drops a device; seen again, it comes back with its nickname and icon
 until the forgotten ones are cleared. **Block until …** blocks every name for one device (bedtime's rule) until a time;
