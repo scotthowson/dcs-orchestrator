@@ -11283,6 +11283,8 @@ _vinv=$(v_req "$VA" POST /auth/invite '{"role":"user"}' | body_of | jq -r '.code
 VU=$(v_req "" POST /auth/register "{\"username\":\"kid\",\"password\":\"kid-pass-12345\",\"invite_code\":\"$_vinv\"}" | body_of | jq -r '.token // empty')
 check "vpn: the accounts"                          "yes yes" "$([[ ${#VA} -ge 32 ]] && printf yes || printf no) $([[ ${#VU} -ge 32 ]] && printf yes || printf no)"
 
+check "vpn: the compose rewriter's self-test (attach, detach byte for byte, ports in and out)" "vpn-compose selftest: ok" "$(python3 -I "$ROOT/.lib/vpn-compose.py" selftest 2>&1)"
+
 # the switch
 _voff=$(v_req "$VA" GET /vpn/status)
 check "vpn: off by default: 404 feature_off"       "404 feature_off" "$(status_of <<< "$_voff") $(body_of <<< "$_voff" | jq -r .code)"
