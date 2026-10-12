@@ -11,6 +11,7 @@ has_key, secret_in_url]], "qbit_prefs": {...}, "addkey": [{pt, pubkey}]}.
 import json
 import os
 import sys
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,7 +30,7 @@ def load():
 
 
 def save(s):
-    tmp = STATE + ".tmp"
+    tmp = "%s.%d.tmp" % (STATE, threading.get_ident())  # one per thread: the latency probe connects in parallel
     with open(tmp, "w") as f:
         json.dump(s, f)
     os.replace(tmp, STATE)

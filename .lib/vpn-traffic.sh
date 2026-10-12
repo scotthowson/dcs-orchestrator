@@ -301,11 +301,12 @@ _vpn_pia_latencies() {
     d=$(mktemp -d "${TMPDIR:-/tmp}/dcs-vpnlat-XXXXXX") || return 1
     while read -r ip id; do
         [[ "$ip" =~ ^[0-9.]+$ && "$id" =~ ^[A-Za-z0-9_-]+$ ]] || continue
-        { curl -o /dev/null -s --connect-timeout 2 -w '%{time_connect}' "http://$ip:$port" > "$d/$id" 2>/dev/null || rm -f "$d/$id"; } &
+        # a meta server may close a plain-http request at once: the TCP connect time counts whatever curl says afterwards
+        { curl -o /dev/null -s --connect-timeout 2 -m 3 -w '%{time_connect}' "http://$ip:$port" > "$d/$id" 2>/dev/null || true; } &
     done < <(jq -r '.regions[] | select(.port_forward == true and ((.servers.wg // []) | length) > 0) | "\(.servers.meta[0].ip // "") \(.id)"' <<< "$list")
     wait
     out=$(for f in "$d"/*; do [[ -f "$f" ]] && printf '%s %s\n' "${f##*/}" "$(cat "$f")"; done \
-        | awk '$2 ~ /^[0-9.]+$/ { printf "%s\"%s\":%d", (n++ ? "," : "{"), $1, $2 * 1000 + 0.5 } END { printf "%s", (n ? "}" : "{}") }')
+        | awk '$2 ~ /^[0-9.]+$/ && $2 > 0 { printf "%s\"%s\":%d", (n++ ? "," : "{"), $1, $2 * 1000 + 0.5 } END { printf "%s", (n ? "}" : "{}") }')
     rm -rf -- "$d"
     (umask 077; jq -nc --argjson m "$out" --argjson now "$(_vpn_now)" '{at: $now, ms: $m}' > "$VPN_LATENCY.tmp" && mv -f "$VPN_LATENCY.tmp" "$VPN_LATENCY") 2>/dev/null
     printf '%s' "$out"
