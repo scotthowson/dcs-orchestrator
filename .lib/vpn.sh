@@ -45,7 +45,9 @@ VPN_WG_PREF=5211                  # before the main table's rule (32766): what c
 VPN_PRIVATE_NETS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
 VPN_RULES='[
  {"trigger":"vpn_down","enabled":true,"priority":"high","name":"VPN: the tunnel is down (the containers behind it are cut off)"},
- {"trigger":"vpn_leak","enabled":true,"priority":"high","name":"VPN: a container behind it shows the home address"}]'
+ {"trigger":"vpn_leak","enabled":true,"priority":"high","name":"VPN: a container behind it shows the home address"},
+ {"trigger":"vpn_reconnected","enabled":false,"priority":"low","name":"VPN: the tunnel came back by itself"},
+ {"trigger":"vpn_weekly_digest","enabled":false,"priority":"low","name":"VPN: the week in one line (traffic, uptime, speed)"}]'
 
 _vpn_now() { if [[ "${DCS_VPN_NOW:-}" =~ ^[0-9]{9,11}$ ]]; then printf '%s' "$DCS_VPN_NOW"; else date +%s; fi; }
 _vpn_state() { _api_state_file "$VPN_STATE" '{}' object >/dev/null 2>&1 || true; jq -c . "$VPN_STATE" 2>/dev/null || printf '{}'; }
@@ -273,6 +275,7 @@ _vpn_attach() {
     _vpn_done "$app0" "$vpn0"
     _vpn_recreate_attached "$c"
     _vpn_audit vpn_attach "$c ($tag) now goes through the VPN, by ${AUTH_USERNAME:-unknown}"
+    _vpn_event attach "$c goes through the VPN (by ${AUTH_USERNAME:-unknown})" "$(jq -nc --arg c "$c" '{container: $c}')"
     _api_policy_audit "putting $c through the VPN"
     _api_cache_clear 2>/dev/null || true
     ans=$(jq -nc --arg c "$c" --argjson t "$targets" --argjson p "$(_api_policy_json)" --arg r "$route" \
@@ -305,6 +308,7 @@ _vpn_detach() {
     rm -f "$sf"
     _vpn_up "$st" --force-recreate "$svc" || { _api_error 500 "The files are back as they were, but $c did not start: start $st from the Stacks page"; return; }
     _vpn_audit vpn_detach "$c ($st/$svc) no longer goes through the VPN, by ${AUTH_USERNAME:-unknown}"
+    _vpn_event detach "$c uses the normal connection again (by ${AUTH_USERNAME:-unknown})" "$(jq -nc --arg c "$c" '{container: $c}')"
     _api_cache_clear 2>/dev/null || true
     _api_success "$(jq -nc --arg c "$c" '{success: true, container: $c, on: false, message: "\($c) uses the normal connection again, with its own ports"}')"
 }
@@ -330,7 +334,8 @@ handle_vpn_status() {
     _api_success "$(jq -nc --arg g "$g" --argjson live "$live" --argjson s "$state" --argjson a "$attached" --argjson now "$now" \
         --arg region "$(_vpn_env VPN_REGION)" --arg server "$(_vpn_env VPN_SERVER_NAME)" --arg pf "$(_vpn_env VPN_PORT_FORWARDING)" \
         --arg dep "$(_vpn_deployed && echo true || echo false)" --arg acct "$(secrets_exists VPN_USER 2>/dev/null && secrets_exists VPN_PASS 2>/dev/null && echo true || echo false)" \
-        --arg key "$(secrets_exists VPN_WG_PRIVATE_KEY 2>/dev/null && echo true || echo false)" '
+        --arg key "$(secrets_exists VPN_WG_PRIVATE_KEY 2>/dev/null && echo true || echo false)" \
+        --arg rid "$(_vpn_env VPN_REGION_ID)" --argjson lat "$(jq -c . "$VPN_LATENCY" 2>/dev/null || echo '{}')" '
         ($g | split(" ")) as $gl
         | {enabled: true, deployed: ($dep == "true"), account_set: ($acct == "true"), configured: ($key == "true"),
            running: ($gl[0] == "true"), paused: ($s.paused // false), container: "Gluetun", stack: "networking-security",
@@ -340,7 +345,10 @@ handle_vpn_status() {
            port_forwarding: ($pf != "off"), qbittorrent_port: ($s.qbit_port // null), qbittorrent_error: ($s.qbit_error // null),
            attached: $a, last_change: ($s.last_change // null), down_since: ($s.down_since // null),
            alerts: [($s.active // {}) | to_entries[] | .value + {key: .key}],
-           wireguard_clients: ($s.wg_clients // {on: false})} + $live')"
+           wireguard_clients: ($s.wg_clients // {on: false}),
+           session_s: (if ($s.link.up // null) == true then $now - $s.link.since else null end),
+           server_latency_ms: ($lat.ms[$rid] // null), last_speed_test: ($s.speed.mbps? // null | if . then $s.speed else null end),
+           last_leak_test: ($s.last_leak // null)} + $live')"
 }
 
 # POST /vpn/pause — Stop the tunnel (Gluetun): the containers behind it have no network at all until it is resumed
@@ -348,6 +356,7 @@ handle_vpn_pause() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _vpn_deployed || { _api_error 409 "The VPN is not set up"; return; }
     _vpn_set '.paused = true'
+    _vpn_event pause "Paused by ${AUTH_USERNAME:-unknown}"
     local -a behind=(); mapfile -t behind < <(jq -r '.[].container' <<< "$(_vpn_attached)")
     _container_mark_intended "$VPN_CONTAINER" "${behind[@]}" 2>/dev/null
     compose_with_secrets "$(_vpn_compose_file)" "$COMPOSE_DIR/$VPN_STACK/.env" stop "$VPN_SERVICE" >/dev/null 2>&1 || { _vpn_set '.paused = false'; _api_error 500 "Gluetun did not stop"; return; }
@@ -363,6 +372,7 @@ handle_vpn_resume() {
     _vpn_recreate_attached
     _vpn_set '.paused = false | .down_since = null'
     _vpn_audit vpn_resume "the VPN was resumed by ${AUTH_USERNAME:-unknown}"
+    _vpn_cause "the resume"; _vpn_event resume "Resumed by ${AUTH_USERNAME:-unknown}"
     _api_success '{"success": true, "paused": false, "message": "The VPN is running again"}'
 }
 
@@ -390,7 +400,12 @@ _vpn_leaks() {
         else v=unknown; fi
         res=$(jq -c --arg c "$c" --arg ip "$ip" --arg v "$v" '. + [{container: $c, ip: (if $ip == "" then null else $ip end), verdict: $v}]' <<< "$res")
     done < <(jq -r '.[].container' <<< "$(_vpn_attached)")
-    _vpn_set --argjson r "$res" --argjson now "$now" '.leaks = (($r | map({key: .container, value: (. + {at: $now})}) | from_entries))'
+    _vpn_set --argjson r "$res" --argjson now "$now" --arg by "${1:-auto}" '.leaks = (($r | map({key: .container, value: (. + {at: $now})}) | from_entries))
+        | .last_leak = {at: $now, by: $by, tested: ($r | length), leaks: ([$r[] | select(.verdict == "leak")] | length), results: $r}'
+    if [[ "${1:-auto}" != auto || -n "$leaked" ]]; then
+        _vpn_event leak_test "Leak test: $(jq -r 'length' <<< "$res") container(s), $(jq -r '[.[] | select(.verdict == "leak")] | length' <<< "$res") leak(s)${leaked:+: ${leaked% }}" \
+            "$(jq -c '{tested: length, leaks: ([.[] | select(.verdict == "leak")] | length)}' <<< "$res")"
+    fi
     if [[ -n "$leaked" ]]; then
         _vpn_raise vpn_leak vpn_leak "A container behind the VPN shows the home address" \
             "${leaked% } reached the internet with this home's address ($home), not the tunnel's: take it out of the VPN and back in, and look at its compose file."
@@ -405,7 +420,7 @@ handle_vpn_leak_test() {
     local r home
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _vpn_deployed || { _api_error 409 "The VPN is not set up"; return; }
-    r=$(_vpn_leaks)
+    r=$(_vpn_leaks "${AUTH_USERNAME:-unknown}")
     _vpn_ctl /v1/publicip/ip && home=$(jq -c 'if type == "object" then . else {} end' <<< "$VPN_BODY" 2>/dev/null)
     [[ -n "${home:-}" ]] || home='{}'
     _api_success "$(jq -nc --argjson r "$r" --argjson ip "$home" \
@@ -431,14 +446,15 @@ _vpn_clear() {
     _fire_notifications "$ev" "headline=$head" "message=$msg" "status=resolved" "fingerprint=$key" >/dev/null 2>&1 || true
 }
 _vpn_seed_rules() {
-    jq -e '.rules_seeded == true' >/dev/null <<< "$(_vpn_state)" && return 0
+    # 2: the rules of 4.0.55 (an install seeded by 4.0.53 gets the new ones, off, and keeps what it changed)
+    jq -e '.rules_seeded == 2' >/dev/null <<< "$(_vpn_state)" && return 0
     _init_notifications_file 2>/dev/null
     _api_jq_update_file "$NOTIFICATIONS_FILE" --argjson r "$VPN_RULES" --arg ts "$(_api_now_iso)" '
         (.rules // []) as $have
         | .rules = $have + [$r[] | select(.trigger as $t | $have | any(.trigger == $t) | not)
             | {id: ("rule_" + .trigger), name, enabled, trigger, target: "*", priority, tags: ["vpn"], title_template: "", message_template: "",
                cooldown_minutes: null, created_at: $ts}]' || return 0
-    _vpn_set '.rules_seeded = true'
+    _vpn_set '.rules_seeded = 2'
 }
 
 # =============================================================================
@@ -491,21 +507,17 @@ _vpn_pia_serverlist() {
 handle_vpn_regions() {
     local s; s=$(_vpn_pia_serverlist)
     [[ -n "$s" ]] || { _api_error 502 "PIA's server list could not be fetched"; return; }
-    _api_success "$(jq -c '{regions: ([.regions[] | select(.port_forward == true and ((.servers.wg // []) | length) > 0)
-        | {id, name, country, geo: (.geo // false)}] | sort_by((if .country == "CA" then 0 else 1 end), .name))}' <<< "$s")"
+    _api_success "$(jq -c --argjson lat "$(jq -c . "$VPN_LATENCY" 2>/dev/null || echo '{}')" '{measured_at: ($lat.at // null), regions: ([.regions[] | select(.port_forward == true and ((.servers.wg // []) | length) > 0)
+        | {id, name, country, geo: (.geo // false), latency_ms: ($lat.ms[.id] // null)}] | sort_by((if .country == "CA" then 0 else 1 end), .name))}' <<< "$s")"
 }
 
 # _vpn_pia_pick REGION_ID|auto SERVERLIST → the region's JSON (auto: the lowest connect time to its meta server)
 _vpn_pia_pick() {
-    local want="$1" list="$2" best="" bt=99 ip id t
+    local want="$1" list="$2" best=""
     if [[ "$want" != auto ]]; then
         jq -c --arg r "$want" '.regions[] | select(.id == $r and .port_forward == true and ((.servers.wg // []) | length) > 0)' <<< "$list" | head -1; return
     fi
-    while read -r ip id; do
-        t=$(curl -o /dev/null -s --connect-timeout 1 -w '%{time_connect}' "http://$ip:443" 2>/dev/null) || t=""
-        [[ "$t" =~ ^0\.[0-9]+$ ]] || continue
-        if awk -v a="$t" -v b="$bt" 'BEGIN{exit !(a < b)}'; then bt="$t"; best="$id"; fi
-    done < <(jq -r '.regions[] | select(.port_forward == true and ((.servers.wg // []) | length) > 0) | "\(.servers.meta[0].ip // "") \(.id)"' <<< "$list")
+    best=$(_vpn_pia_latencies "$list" | jq -r 'to_entries | sort_by(.value) | first.key // empty')
     # none answered (a firewall in the way): Canada's first
     [[ -n "$best" ]] || best=$(jq -r '[.regions[] | select(.port_forward == true and ((.servers.wg // []) | length) > 0)] | sort_by(if .country == "CA" then 0 else 1 end) | first | .id // empty' <<< "$list")
     jq -c --arg r "$best" '.regions[] | select(.id == $r)' <<< "$list" | head -1
@@ -562,6 +574,7 @@ handle_vpn_connect() {
         [[ ${#u} -le 128 && ${#p} -le 256 && "$u$p" != *[$'\n\r']* ]] || { _api_error 400 "The user name or password is not valid"; return; }
     fi
     _vpn_pia_register "$region" "$u" "$p" || { _api_error 502 "$VPN_ERR"; return; }
+    _vpn_cause "a new connection"
     # the account is kept once PIA took it
     if [[ -n "$u" ]] && ! { secrets_set VPN_USER "$u" >/dev/null 2>&1 && secrets_set VPN_PASS "$p" >/dev/null 2>&1; }; then
         _api_error 500 "The account could not be stored in the secrets"; return
@@ -571,6 +584,7 @@ handle_vpn_connect() {
     _vpn_recreate_attached
     _vpn_set --argjson now "$(_vpn_now)" '.paused = false | .down_since = null | .last_change = $now | .rekeyed_at = $now | del(.qbit_port)'
     _vpn_audit vpn_connect "the VPN connected to PIA $(jq -r '"\(.name) (\(.server))"' <<< "$VPN_REGION_JSON"), by ${AUTH_USERNAME:-unknown}"
+    _vpn_event server_change "Connected to $(jq -r '"\(.name) (\(.server))"' <<< "$VPN_REGION_JSON") by ${AUTH_USERNAME:-unknown}" "$(jq -c '{region: .id, server: .server}' <<< "$VPN_REGION_JSON")"
     _api_cache_clear 2>/dev/null || true
     _api_success "$(jq -nc --argjson r "$VPN_REGION_JSON" '{success: true, region: $r, message: "Connecting to \($r.name) (\($r.server)): the tunnel is up in a few seconds"}')"
 }
@@ -698,21 +712,34 @@ _vpn_tick() {
             # Gluetun restarted (or is a new container): the containers behind it lost their network
             while IFS=$'\t' read -r sts svc c; do
                 [[ -n "$c" ]] || continue
+                # stopped on purpose while the tunnel is down: started (or recreated) when it is back
+                jq -e --arg c "$c" '(.policy_stopped // {}) | has($c)' <<< "$(_vpn_state)" >/dev/null && continue
                 _container_mark_intended "$c" 2>/dev/null
                 if [[ "$was" == *" $gid "* ]]; then docker restart "$c" >/dev/null 2>&1; else _vpn_up "$sts" --force-recreate "$svc"; fi
                 n=$((n + 1))
             done < <(jq -r '.[] | [.stack, .service, .container] | @tsv' <<< "$(_vpn_attached)")
             (( n > 0 )) && _vpn_audit vpn_restart_dependents "Gluetun restarted ($gstart): $n container(s) behind it restarted"
+            _vpn_event restart "Gluetun restarted$([[ "$was" == *" $gid "* ]] || printf ' as a new container')$( (( n > 0 )) && printf ': %d container(s) behind it followed' "$n")"
         fi
         _vpn_set --arg g "$g" '.gluetun = $g'
     fi
     [[ "$(jq -r '.wg_clients.on // false' <<< "$st")" == true && "$g" == true\ * ]] && { _vpn_wg_apply || _vpn_audit vpn_error "the WireGuard clients' route: $VPN_ERR"; }
-    [[ "$(jq -r '.paused // false' <<< "$st")" == true ]] && { _vpn_set '.down_since = null'; _vpn_clear vpn_down "The VPN is paused" "Paused on purpose."; return 0; }
+    _vpn_digest
+    if [[ "$(jq -r '.paused // false' <<< "$st")" == true ]]; then
+        _vpn_set '.down_since = null'; _vpn_clear vpn_down "The VPN is paused" "Paused on purpose."
+        _vpn_link paused '{}'; _vpn_traffic_sample p
+        return 0
+    fi
     live='{"connected":false}'; [[ "$g" == true\ * ]] && live=$(_vpn_live)
     if [[ "$(jq -r .connected <<< "$live")" == true ]]; then
         _vpn_set '.down_since = null'
         _vpn_clear vpn_down "The VPN is up again" "The tunnel is up ($(jq -r '.public_ip' <<< "$live")): the containers behind it are online."
+        _vpn_link true "$live"; _vpn_traffic_sample u; _vpn_policy_up
         port=$(jq -r '.forwarded_port // empty' <<< "$live")
+        if [[ "$port" =~ ^[0-9]+$ && "$port" != "$(jq -r '.last_port // ""' <<< "$st")" ]]; then
+            _vpn_set --argjson p "$port" '.last_port = $p'
+            _vpn_event port "PIA forwards port $port" "$(jq -nc --argjson p "$port" '{port: $p}')"
+        fi
         qb=$(jq -r '[.[] | select(.image | test("qbittorrent"; "i")) | .container] | first // empty' <<< "$(_vpn_attached)")
         if [[ "$port" =~ ^[0-9]+$ && -n "$qb" && "$port" != "$(jq -r '.qbit_port // ""' <<< "$st")" ]]; then
             if _vpn_qbit_set "$qb" "$port"; then
@@ -723,7 +750,9 @@ _vpn_tick() {
     else
         local since; since=$(jq -r '.down_since // empty' <<< "$st")
         [[ -n "$since" ]] || { since=$now; _vpn_set --argjson n "$now" '.down_since = $n'; }
+        _vpn_link false "$live"; _vpn_traffic_sample d
         if (( now - since >= VPN_DOWN_AFTER )); then
+            _vpn_policy_down
             local who; who=$(jq -r '[.[].container] | join(", ")' <<< "$(_vpn_attached)")
             _vpn_raise vpn_down vpn_down "The VPN is down" \
                 "The tunnel has been down for $(( (now - since) / 60 )) minutes${who:+: $who are cut off from the internet by the kill switch until it is back}."
@@ -732,6 +761,7 @@ _vpn_tick() {
         if (( now - since >= VPN_REKEY_AFTER )) && secrets_exists VPN_USER 2>/dev/null \
             && (( now - $(jq -r '.rekeyed_at // 0' <<< "$st") >= 1800 )); then
             _vpn_set --argjson n "$now" '.rekeyed_at = $n'
+            _vpn_event rekey "Down for $(( (now - since) / 60 )) minutes: a new WireGuard key is registered with PIA"
             if _vpn_pia_register "$(_vpn_env VPN_REGION_ID | sed 's/^$/auto/')"; then
                 _vpn_up "$VPN_STACK" --force-recreate "$VPN_SERVICE" && _vpn_recreate_attached
                 _vpn_audit vpn_rekey "the VPN was down: a new WireGuard key was registered with PIA"
@@ -740,3 +770,7 @@ _vpn_tick() {
     fi
     return 0
 }
+
+# traffic, history, the speed check, the server switch, the per-container policy
+# shellcheck source=.lib/vpn-traffic.sh
+source "$BASE_DIR/.lib/vpn-traffic.sh"
