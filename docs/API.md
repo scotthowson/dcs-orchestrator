@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `501` in total.
+Every endpoint below is `506` in total.
 
 ## Access levels
 
@@ -580,6 +580,8 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/fleet/members/{id}` | user | One member, with a live check that it answers |
 | GET | `/vpn/status` | user | The VPN: connected, exit address and country, region and server, the forwarded port, Gluetun's uptime, the containers behind it, the alerts |
 | GET | `/vpn/regions` | user | Private Internet Access's regions that forward a port (WireGuard), Canada's first |
+| GET | `/vpn/traffic` | user | The tunnel's traffic: the rates now, today and this month (down and up), 24 hours in 5-minute steps, 30 days by the hour, a year by the day, and each container behind it with its share |
+| GET | `/vpn/history` | user | What the tunnel did: connects, disconnects with the reason, reconnects, server changes, pauses, the forwarded port, leak and speed tests (newest first), uptime over 24 hours and 30 days, the current session |
 | GET | `/feed/status` | admin | The dashboard feed: on or off, and its two addresses (admin). The token itself is shown once, when it is made |
 | GET | `/themes` | user | The themes stored on this server (without their CSS) and the one every dashboard follows (active, "" = the default look) |
 | GET | `/themes/{name}` | user | One stored theme, the whole document (palette and CSS) |
@@ -637,8 +639,11 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/vpn/pause` | admin | Stop the tunnel (Gluetun): the containers behind it have no network at all until it is resumed |
 | POST | `/vpn/resume` | admin | Start the tunnel again; the containers behind it rejoin it |
 | POST | `/vpn/leak-test` | admin | Ask the outside world which address each container behind the VPN has: the tunnel's (good), the home's (a leak), none (the kill switch) |
+| POST | `/vpn/speed-test` | admin | Download a test file through the tunnel from inside Gluetun (VPN_SPEEDTEST_URL, 20 MB from Cloudflare by default) and ping its host: Mbps and the latency, kept in the history; one every 5 minutes |
+| POST | `/vpn/server` | admin | Move the tunnel to another PIA server with the stored account {region: a region id \| "fastest"}: fastest measures every region that forwards a port now and takes the quickest; a new key is registered there and Gluetun restarted |
 | POST | `/fleet/images/check` | admin | Registry check on the hub and on every member at once (each compares digests with its registries, no pulls); the answer counts per DCS |
 | PUT | `/vpn/wireguard-clients` | admin | Route the WireGuard server's clients (wg-easy) out through the VPN, or not {"on": true\|false, "container": "WireGuard"}: the server itself keeps the home address, so they can still connect from outside |
+| PUT | `/vpn/containers/{container}` | admin | What a container behind the VPN does when the tunnel goes down {stop_when_down: true\|false, restart_when_up: true\|false}: stopped after 2 minutes down (the kill switch already cuts it off; this stops the errors piling up), started again when the tunnel is back |
 | PUT | `/themes/active` | admin | The theme every dashboard follows {name} ("" = the default look); it must be stored here first |
 | PUT | `/fleet/members/{id}/api/{path}` | admin | Forward the call (GET, POST, PUT or DELETE) to that member with the hub's account; the caller's own role is checked against the inner path as if it were local (streams and auth are not forwarded) |
 | PUT | `/fleet/members/{id}` | admin | Change a member's name, address, account, the guest it is mapped to, or the stacks it answers for {name?, url?, username?, password?, vmid?, node?, type?, insecure?, stacks?: ["name", …]} (a placement makes the hub forward that stack's requests to this member; a stack the hub runs itself cannot be placed) |

@@ -66,7 +66,7 @@ extract_descriptions() {
             next
         }
         { last=""; hint="" }
-    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh "$BASE_DIR"/.lib/crowdsec-cloudflare.sh "$BASE_DIR"/.lib/chat.sh "$BASE_DIR"/.lib/technitium.sh "$BASE_DIR"/.lib/technitium-local.sh "$BASE_DIR"/.lib/technitium-alerts.sh "$BASE_DIR"/.lib/vpn.sh
+    ' "$API" "$BASE_DIR"/.lib/crowdsec.sh "$BASE_DIR"/.lib/crowdsec-config.sh "$BASE_DIR"/.lib/crowdsec-cloudflare.sh "$BASE_DIR"/.lib/chat.sh "$BASE_DIR"/.lib/technitium.sh "$BASE_DIR"/.lib/technitium-local.sh "$BASE_DIR"/.lib/technitium-alerts.sh "$BASE_DIR"/.lib/vpn.sh "$BASE_DIR"/.lib/vpn-traffic.sh
 }
 
 # Fallback description from the handler name: handle_stack_compose_save → "Stack compose save"
@@ -95,6 +95,7 @@ doc_path() {
         "/stacks/*/compose/history/*")  p="/stacks/{stack}/compose/history/{version}" ;;
         "/stacks/*"*)                   p="${p/\*/\{stack\}}" ;;
         "/containers/*"*)               p="${p/\*/\{container\}}" ;;
+        "/vpn/containers/*")            p="/vpn/containers/{container}" ;;
         "/networks/*"*)                 p="${p/\*/\{network\}}" ;;
         "/volumes/*"*)                  p="${p/\*/\{volume\}}" ;;
         "/images/*"*)                   p="${p/\*/\{image\}}" ;;

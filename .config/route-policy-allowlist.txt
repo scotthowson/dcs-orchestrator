@@ -68,6 +68,7 @@ GET /stacks/*/compose/history
 GET /stacks/*/compose/history/*
 GET /stacks/*/logs
 GET /system/metrics
+GET /vpn/history
 GET /webhooks
 GET /feed/summary
 GET /feed/crowdsec

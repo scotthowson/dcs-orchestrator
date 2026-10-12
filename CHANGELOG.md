@@ -3,6 +3,37 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **VPN: traffic.** `GET /vpn/traffic`: the tunnel's rates now, today and this month (down and up), 24 hours in
+  5-minute steps, 30 days by the hour and a year by the day, from `tun0`'s counters in Gluetun, sampled by the minute
+  clock into `.data/vpn/traffic.json` (bounded). Each container behind the VPN has its own bytes and its share of the
+  month: they share Gluetun's network, so the kernel counts them in Gluetun's `mangle` table (a cgroup match per
+  container that marks its connections, the marks counted on the way back), written by a short-lived helper with the
+  host's cgroup namespace. A kernel without `xt_cgroup` / `xt_connmark` still counts the tunnel and says why the
+  containers are not. The WireGuard clients have their own row.
+- **VPN: history and health.** `GET /vpn/history`: connects, drops with Gluetun's own reason, reconnects (with how long
+  it was down), restarts, server moves, pauses, rekeys, the forwarded port's changes, leak and speed tests, the
+  stop/restart policy (500 kept); uptime over 24 hours and 30 days, the current session, reconnects today, the
+  forwarded port's history, the last leak test.
+- **VPN: speed check.** `POST /vpn/speed-test` downloads a test file from inside Gluetun (`VPN_SPEEDTEST_URL`, 20 MB
+  from `speed.cloudflare.com` by default) and pings its host: Mbps and latency, kept in the history; one every 5
+  minutes.
+- **VPN: another server without the account form.** `POST /vpn/server {region}` moves the tunnel with the stored
+  account; `"fastest"` measures every region that forwards a port at once and takes the quickest. `GET /vpn/regions`
+  shows each region's latency, the status the current server's. Connect's own "fastest" measures in parallel too.
+- **VPN: stop a container while the tunnel is down.** `PUT /vpn/containers/{name} {stop_when_down, restart_when_up}`
+  (both off by default): stopped after 2 minutes down, started (or recreated) when the tunnel is back.
+- **VPN: two new alerts, off by default.** `vpn_reconnected` (the tunnel came back by itself) and `vpn_weekly_digest`
+  (Monday morning: last week's traffic, uptime, reconnects and speed in one line), through the normal notification
+  rules; an install seeded earlier gets them, off.
+- Proof: Gluetun's `custom` WireGuard provider against our own WireGuard server in a Docker-in-Docker sandbox (the
+  tunnel's bytes counted with a download through it, live rates, a disconnect and reconnect with the stop/restart
+  policy acting, the speed check), and the per-container counting rules on a stock Debian 6.12 kernel in a VM (each
+  container's bytes, a process outside them not counted).
+
 ## [4.0.54] - 2026-10-12
 
 ### Fixed

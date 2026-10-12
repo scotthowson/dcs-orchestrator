@@ -11329,6 +11329,9 @@ case "$1" in
     c=$(jq -c --arg n "$n" '.[$n]' "$S")
     case "$fmt" in
       "") echo '[{}]' ;;
+      *'.State.Pid'*) jq -r '"\(.fullid // "") \(.pid // 0)"' <<< "$c" ;;
+      '{{.Id}}') jq -r '.fullid // .id' <<< "$c" ;;
+      '{{.Image}}') echo "sha256:0123456789abcdef" ;;
       *'.State.Running}} {{.Id}}'*) jq -r '"\(.running) \(.id) \(.started) \(.ip // "") \(.net // "")"' <<< "$c" ;;
       *'index .Config.Labels'*) k=$(sed -E 's/.*Labels "([^"]+)".*/\1/' <<< "$fmt"); jq -r --arg k "$k" '.labels[$k] // ""' <<< "$c" ;;
       *'.Config.Image'*) jq -r '.image' <<< "$c" ;;
@@ -11338,7 +11341,15 @@ case "$1" in
     esac ;;
   port) jq -r --arg n "$2" --arg p "$3" '.[$n].ports[$p] // empty' "$S" ;;
   restart) echo "restart $2" >> "$L"; upd --arg n "$2" '.[$n].started = "restarted"' ;;
-  exec) echo "exec ${*:2}" >> "$L"; [[ " $* " == *" wget "* ]] && jq -r --arg n "$2" '.[$n].egress // empty' "$S"; exit 0 ;;
+  stop) echo "stop $2" >> "$L"; upd --arg n "$2" '.[$n].running = false' ;;
+  start) echo "start $2" >> "$L"; upd --arg n "$2" '.[$n].running = true' ;;
+  logs) jq -r '.Gluetun.logs // ""' "$S" ;;
+  info) echo cgroupfs ;;
+  run) echo "run ${*:2}" >> "$L"; printf '%s\n' "${@: -1}" > "$FAKE_DOCKER_DIR/acct-script.txt"; jq -r '.acct_out // empty' "$S"; exit "$(jq -r '.acct_rc // 0' "$S")" ;;
+  exec)
+    if [[ " $* " == *"/proc/uptime"* ]]; then echo "exec $2 speed-test ${*: -2}" >> "$L"; jq -r '.Gluetun.speed // empty' "$S"; exit 0; fi
+    if [[ " $* " == *"/proc/net/dev"* ]]; then jq -r '(.Gluetun.netdev // ""), (.Gluetun.ipt // "")' "$S"; exit 0; fi
+    echo "exec ${*:2}" >> "$L"; [[ " $* " == *" wget "* ]] && jq -r --arg n "$2" '.[$n].egress // empty' "$S"; exit 0 ;;
   network) echo "network ${*:2}" >> "$L" ;;
   *) echo "fake docker: $*" >> "$L"; exit 1 ;;
 esac
@@ -11347,7 +11358,7 @@ chmod +x "$VW/bin/docker"
 cat > "$VW/docker.json" <<JSON
 {"Gluetun": {"running": true, "id": "g0", "started": "2026-10-11T11:00:00.123456Z", "ip": "172.20.0.2", "net": "networking-security_default", "image": "qmcgaw/gluetun:v3",
              "labels": {"com.docker.compose.project.working_dir": "$VW/Stacks/networking-security", "com.docker.compose.service": "gluetun"}, "ports": {"8080/tcp": "0.0.0.0:$VMP"}},
- "qBittorrent": {"running": true, "id": "q0", "started": "x", "image": "lscr.io/linuxserver/qbittorrent:latest", "env": ["PUID=1000", "WEBUI_PORT=8080"], "egress": "198.51.100.7",
+ "qBittorrent": {"running": true, "id": "q0", "fullid": "$(printf 'a%.0s' {1..64})", "pid": 0, "started": "x", "image": "lscr.io/linuxserver/qbittorrent:latest", "env": ["PUID=1000", "WEBUI_PORT=8080"], "egress": "198.51.100.7",
              "labels": {"com.docker.compose.project.working_dir": "$VW/Stacks/media-services", "com.docker.compose.service": "qbittorrent"}},
  "Jackett": {"running": true, "id": "j0", "started": "x", "image": "lscr.io/linuxserver/jackett", "env": [],
              "labels": {"com.docker.compose.project.working_dir": "$VW/Stacks/media-services", "com.docker.compose.service": "jackett"}},
@@ -11491,7 +11502,7 @@ check "vpn: …and its file is as it was"            yes "$(grep -q '      - "91
 
 # the minute clock: the forwarded port into qBittorrent
 _vtick 1791800000
-check "vpn: tick: the rules made once (2, on)"     "2 2" "$(jq -r '[.rules[] | select(.trigger | startswith("vpn_"))] | "\(length) \(map(select(.enabled)) | length)"' "$VW/.api-auth/notifications.json")"
+check "vpn: tick: the rules made once (4, two on: reconnected and the weekly line are off)" "4 2" "$(jq -r '[.rules[] | select(.trigger | startswith("vpn_"))] | "\(length) \(map(select(.enabled)) | length)"' "$VW/.api-auth/notifications.json")"
 check "vpn: tick: PIA's port into qBittorrent (no login asked)" "41234 false false 41234" "$(vm '.qbit_prefs | "\(.listen_port) \(.random_port) \(.upnp)"') $(vst .qbit_port)"
 vmset '.qbit_auth = true | .port = 42000'
 _vtick 1791800060
@@ -11537,6 +11548,96 @@ _vl=$(v_req "$VA" POST /vpn/leak-test '' | body_of)
 check "vpn: …no internet at all (the kill switch): offline, the leak cleared" "offline null" "$(jq -r '.results[0].verdict' <<< "$_vl") $(vst '.active.vpn_leak // null')"
 jq '.qBittorrent.egress = "198.51.100.7"' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
 
+# traffic: tun0 in Gluetun's /proc/net/dev, each container by the counting rules (cgroup + connmark) a helper writes in Gluetun
+_vnet() { jq --arg nd "$(printf 'Inter-|   Receive\n face |bytes packets errs drop fifo frame compressed multicast|bytes\n    lo: 10 1 0 0 0 0 0 0 10 1 0 0 0 0 0 0\n  tun0: %s 10 0 0 0 0 0 0 %s 9 0 0 0 0 0 0\n' "$1" "$2")" \
+    --arg ipt "$(printf 'Chain DCSVPN_OUT (1 references)\n    pkts      bytes target     prot opt in     out     source               destination\n       5 %s CONNMARK   0    --  *      *       0.0.0.0/0            0.0.0.0/0            cgroup /docker/x /* dcs:tx:qBittorrent */ CONNMARK xset 0x1000000/0xff000000\nChain DCSVPN_IN (1 references)\n    pkts      bytes target     prot opt in     out     source               destination\n       7 %s            0    --  *      *       0.0.0.0/0            0.0.0.0/0            connmark match  0x1000000/0xff000000 /* dcs:rx:qBittorrent */\n' "$4" "$3")" \
+    '.Gluetun.netdev = $nd | .Gluetun.ipt = $ipt' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"; }
+VT=1791802020
+_vnet 5000000 1000000 4000000 800000
+: > "$VW/docker.log"
+jq --arg id "$(printf 'b%.0s' {1..64})" '.qBittorrent.fullid = $id' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
+_vtick $VT
+check "traffic: qBittorrent a new container: the counting rules written again by a helper in Gluetun's network, the host's cgroups, NET_ADMIN only" "1 yes yes" \
+    "$(grep -c '^run --rm --network container:Gluetun --cgroupns host --cap-add NET_ADMIN' "$VW/docker.log") $(grep -q -- "-m cgroup --path /docker/$(printf 'b%.0s' {1..64}) -m comment --comment \"dcs:tx:qBittorrent\" -j CONNMARK" "$VW/acct-script.txt" && echo yes || echo no) $(grep -q 'dcs:rx:qBittorrent' "$VW/acct-script.txt" && echo yes || echo no)"
+_vtick $((VT + 60))
+check "traffic: …written once (nothing changed)" 1 "$(grep -c '^run ' "$VW/docker.log")"
+_vnet 65000000 7000000 60000000 5000000
+_vtick $((VT + 120))
+_vtr=$(v_req "$VU" GET /vpn/traffic '' DCS_VPN_NOW=$((VT + 125)) | body_of)
+check "traffic: a viewer reads it: the minute's bytes today (down, up), tun0" "60000000 6000000 tun0 true" "$(jq -r '"\(.totals.today.rx) \(.totals.today.tx) \(.interface) \(.measured)"' <<< "$_vtr")"
+check "traffic: …the rate now (the last minute, per second)" "1000000 100000" "$(jq -r '"\(.live.rx_bps) \(.live.tx_bps)"' <<< "$_vtr")"
+check "traffic: …qBittorrent's own bytes and its share of the month" "56000000 4200000 0.912 true" "$(jq -r '.containers[0] | "\(.today.rx) \(.today.tx) \(.share) \(.measured)"' <<< "$_vtr")"
+check "traffic: …5-minute steps for the sparkline, hours, days" "yes yes yes" "$(jq -r '[(.per_5min | length > 0), (.hourly | length > 0), (.daily | length > 0)] | map(if . then "yes" else "no" end) | join(" ")' <<< "$_vtr")"
+_vnet 2000000 500000 60000000 5000000
+_vtick $((VT + 180))
+check "traffic: a counter that went back (reset) counts from zero" 62000000 "$(v_req "$VU" GET /vpn/traffic '' DCS_VPN_NOW=$((VT + 181)) | body_of | jq -r .totals.today.rx)"
+jq --arg id "$(printf 'c%.0s' {1..64})" '.qBittorrent.fullid = $id | .acct_out = "uncounted qBittorrent"' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
+_vtick $((VT + 200))
+check "traffic: a kernel without the cgroup or connmark match: said, the tunnel still counted" "qBittorrent yes" \
+    "$(vst '.acct.uncounted | join(",")') $(v_req "$VU" GET /vpn/traffic '' DCS_VPN_NOW=$((VT + 201)) | body_of | jq -r '.counting_error | test("xt_cgroup") | if . then "yes" else "no" end')"
+jq '.acct_out = ""' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
+check "traffic: bounded: one bucket a minute"   "yes" "$(jq -r '(.minutes | length) <= 1440 and (.hours | length) <= 720 and (.days | length) <= 366 | if . then "yes" else "no" end' "$VW/.data/vpn/traffic.json")"
+
+# the per-container policy
+check "policy: a viewer cannot set it"          403 "$(v_req "$VU" PUT /vpn/containers/qBittorrent '{"stop_when_down":true}' | status_of)"
+check "policy: booleans only; a container not behind the VPN: 404" "400 400 404" \
+    "$(v_req "$VA" PUT /vpn/containers/qBittorrent '{"stop_when_down":"yes"}' | status_of) $(v_req "$VA" PUT /vpn/containers/qBittorrent '{}' | status_of) $(v_req "$VA" PUT /vpn/containers/Jackett '{"stop_when_down":true}' | status_of)"
+_vp=$(v_req "$VA" PUT /vpn/containers/qBittorrent '{"stop_when_down":true,"restart_when_up":true}')
+check "policy: stop when down, restart when back: set, in the status" "200 true true true true" \
+    "$(status_of <<< "$_vp") $(body_of <<< "$_vp" | jq -r '"\(.stop_when_down) \(.restart_when_up)"') $(v_req "$VU" GET /vpn/status | body_of | jq -r '.attached[0] | "\(.stop_when_down) \(.restart_when_up)"')"
+
+# history: a drop with Gluetun's reason, the policy, the way back
+jq '.Gluetun.logs = "2026-10-12T10:00:00Z INFO [vpn] starting\n2026-10-12T10:00:30Z ERROR [vpn] handshake did not complete after 30s\n"' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
+vmset '.vpn = "stopped"'
+: > "$VW/docker.log"
+_vtick $((VT + 240))
+check "history: down: a disconnect with Gluetun's last error, nothing stopped yet" "[vpn] handshake did not complete after 30s 0" \
+    "$(jq -r '[.events[] | select(.kind == "disconnect")] | last | .reason' "$VW/.data/vpn/history.json") $(grep -c '^stop qBittorrent' "$VW/docker.log")"
+_vtick $((VT + 370))
+check "policy: down 2 minutes: qBittorrent stopped (marked intended), once" "1 true" "$(grep -c '^stop qBittorrent' "$VW/docker.log") $(vst '.policy_stopped | has("qBittorrent")')"
+_vtick $((VT + 430))
+check "policy: …still down: not stopped again" 1 "$(grep -c '^stop qBittorrent' "$VW/docker.log")"
+vmset '.vpn = "running"'
+_vtick $((VT + 490))
+check "policy: back: qBittorrent started again (the same Gluetun: a start)" "1 false" "$(grep -c '^start qBittorrent' "$VW/docker.log") $(vst '.policy_stopped | has("qBittorrent")')"
+_vh=$(v_req "$VU" GET /vpn/history '' DCS_VPN_NOW=$((VT + 500)) | body_of)
+check "history: reconnect (by itself, 250 s down), the policy's stop and start, newest first" "reconnect 250 policy_start policy_stop" \
+    "$(jq -r '[.events[] | select(.kind == "reconnect")][0] | "\(.kind) \(.down_s)"' <<< "$_vh") $(jq -r '[.events[] | select(.kind | startswith("policy_")) | .kind] | join(" ")' <<< "$_vh")"
+check "history: uptime below 100 %, a session of 10 s, two reconnects today (this one and the earlier drop), the forwarded port's history" "yes 10 2 42000" \
+    "$(jq -r '"\(if .uptime.last_24h < 100 then "yes" else "no" end) \(.session.length_s) \(.reconnects_24h) \(.ports[0].port)"' <<< "$_vh")"
+check "history: vpn_reconnected is a rule, off by default" "false" "$(jq -r '.rules[] | select(.trigger == "vpn_reconnected") | .enabled' "$VW/.api-auth/notifications.json")"
+v_req "$VA" PUT /vpn/containers/qBittorrent '{"stop_when_down":false,"restart_when_up":false}' >/dev/null
+
+# the speed check, inside Gluetun
+check "speed: a viewer cannot run it"            403 "$(v_req "$VU" POST /vpn/speed-test '' | status_of)"
+sed -i 's|^VPN_SPEEDTEST_URL=.*|VPN_SPEEDTEST_URL=file:///etc/passwd|' "$VW/.env"
+check "speed: only a plain http(s) address"      400 "$(v_req "$VA" POST /vpn/speed-test '' | status_of)"
+sed -i 's|^VPN_SPEEDTEST_URL=.*|VPN_SPEEDTEST_URL=|' "$VW/.env"
+jq '.Gluetun.speed = "20000000 100.00 101.60 12.345"' "$VW/docker.json" > "$VW/d.tmp" && mv "$VW/d.tmp" "$VW/docker.json"
+_vsp=$(v_req "$VA" POST /vpn/speed-test '')
+check "speed: 20 MB in 1.6 s = 100 Mbps, 12 ms to the host" "200 100.0 12 speed.cloudflare.com" "$(status_of <<< "$_vsp") $(body_of <<< "$_vsp" | jq -r '"\(.mbps) \(.latency_ms) \(.host)"')"
+check "speed: …the default file, from inside Gluetun" yes "$(grep -qF 'exec Gluetun speed-test https://speed.cloudflare.com/__down?bytes=20000000 speed.cloudflare.com' "$VW/docker.log" && echo yes || echo no)"
+_vsp=$(v_req "$VA" POST /vpn/speed-test '')
+check "speed: one every 5 minutes: 429 with the wait" "429 true" "$(status_of <<< "$_vsp") $(body_of <<< "$_vsp" | jq -r '.retry_after > 0 and .retry_after <= 300')"
+check "speed: …in the history and the status" "100.0 100.0" "$(v_req "$VU" GET /vpn/history | body_of | jq -r '.speed_tests[0].mbps') $(v_req "$VU" GET /vpn/status | body_of | jq -r .last_speed_test.mbps)"
+
+# another server with the stored account; the fastest measured now (every region at once)
+check "server: a viewer cannot"                  403 "$(v_req "$VU" POST /vpn/server '{"region":"fastest"}' | status_of)"
+check "server: a region id is checked"           400 "$(v_req "$VA" POST /vpn/server '{"region":"../x"}' | status_of)"
+: > "$VW/docker.log"
+_vsv=$(v_req "$VA" POST /vpn/server '{"region":"fastest"}' DCS_VPN_PIA_PROBE_PORT="$VMP")
+check "server: fastest: a Canadian one (Switzerland does not answer), its latency, Gluetun recreated" "200 yes yes 1" \
+    "$(status_of <<< "$_vsv") $(body_of <<< "$_vsv" | jq -r '.region.id | test("^ca")' | sed 's/true/yes/') $(body_of <<< "$_vsv" | jq -r '.latency_ms | type == "number"' | sed 's/true/yes/') $(grep -c 'up -d --no-deps --force-recreate gluetun' "$VW/docker.log")"
+_vrg=$(v_req "$VU" GET /vpn/regions | body_of)
+check "server: the regions carry the latency measured (none for the silent one)" "yes null" \
+    "$(jq -r '[.regions[] | select(.country == "CA") | .latency_ms | type == "number"] | all | if . then "yes" else "no" end' <<< "$_vrg") $(jq -r '.regions[] | select(.id == "swiss") | .latency_ms' <<< "$_vrg")"
+_vsv=$(v_req "$VA" POST /vpn/server '{"region":"ca"}')
+check "server: a chosen region"                  "200 CA Montreal montreal424" "$(status_of <<< "$_vsv") $(body_of <<< "$_vsv" | jq -r '"\(.region.name) \(.region.server)"')"
+_vtick $((VT + 600))
+check "server: in the history, the tunnel's next minute says why it moved" "server_change yes" \
+    "$(jq -r '[.events[] | select(.kind == "server_change")] | last | .kind' "$VW/.data/vpn/history.json") $(jq -r '[.events[] | select(.kind == "connect")] | last | .message | test("after the switch") | if . then "yes" else "no" end' "$VW/.data/vpn/history.json")"
+check "history: bounded to 500 events" yes "$(jq -r '.events | length <= 500 | if . then "yes" else "no" end' "$VW/.data/vpn/history.json")"
+
 # pause and resume
 : > "$VW/docker.log"
 check "vpn: a viewer cannot pause"                 403 "$(v_req "$VU" POST /vpn/pause '' | status_of)"
@@ -11570,8 +11671,8 @@ check "vpn: …no WireGuard container: 409, says so" "409 yes" "$(status_of <<< 
 check "vpn: no secret in any answer"               0 "$(grep -c -e "$VKEY" -e 'pia-secret-pass' -e 'qb-secret-pass' -e "$( ( set --; source "$VAPI" >/dev/null 2>&1; secrets_get VPN_WG_PRIVATE_KEY ) )" "$VANS" || true)"
 check "vpn: no secret in the logs, .data or .env files" "" "$(grep -rl -e "$VKEY" -e 'pia-secret-pass' -e 'qb-secret-pass' "$VW/logs" "$VW/.api-auth" "$VW/.data" "$VW/.env" "$VW/Stacks" "$VW/docker.log" 2>/dev/null | grep -v '/App-Data/Gluetun-VPN/secrets/')"
 # the route policy as documented
-check "vpn: docs: viewers read, admins act"        "user user admin admin admin admin admin admin" \
-    "$(for r in 'GET /vpn/status' 'GET /vpn/regions' 'POST /vpn/connect' 'POST /vpn/pause' 'POST /vpn/resume' 'POST /vpn/leak-test' 'PUT /containers/{container}/vpn' 'PUT /vpn/wireguard-clients'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+check "vpn: docs: viewers read, admins act"        "user user admin admin admin admin admin admin user user admin admin admin" \
+    "$(for r in 'GET /vpn/status' 'GET /vpn/regions' 'POST /vpn/connect' 'POST /vpn/pause' 'POST /vpn/resume' 'POST /vpn/leak-test' 'PUT /containers/{container}/vpn' 'PUT /vpn/wireguard-clients' 'GET /vpn/traffic' 'GET /vpn/history' 'POST /vpn/speed-test' 'POST /vpn/server' 'PUT /vpn/containers/{container}'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 # a compose deployed by 4.0.53 (its peer's lines written empty by the deploy) heals itself at the next status read
 sed -i -e 's/=${VPN_WG_ENDPOINT_IP}$/=/' -e 's/=${VPN_WG_ENDPOINT_PORT}$/=1337/' -e 's/=${VPN_WG_PUBLIC_KEY}$/=/' -e 's/=${VPN_WG_ADDRESSES}$/=/' \
     -e 's/=${VPN_SERVER_NAME}$/=/' -e 's/"apikey":"${SECRETS_VPN_CONTROL_KEY}"/"apikey":""/' "$VNS/docker-compose.yml"
@@ -11584,6 +11685,9 @@ check "repair: …the missing .env keys back, audited once" "2 1" \
 printf 'services:\n  other:\n    image: alpine\n    environment:\n      - WIREGUARD_ENDPOINT_IP=\n' > "$VW/other.yml"
 check "repair: a file that is not the template is left alone" no \
     "$( ( set --; source "$VAPI" >/dev/null 2>&1; _vpn_lib; _vpn_compose_file() { printf '%s' "$VW/other.yml"; }; _vpn_repair && echo yes || echo no ) )"
+_vmon=$(TZ=UTC date -d '2026-10-19 15:00' +%s)
+( set --; source "$VAPI" >/dev/null 2>&1; export DCS_VPN_NOW="$_vmon" PATH="$VW/bin:$PATH" FAKE_DOCKER_DIR="$VW"; _vpn_lib; _vpn_digest; _vpn_digest ) >/dev/null 2>&1
+check "digest: Monday morning: the weekly line once (vpn_weekly_digest, a rule that is off)" "2026-W43 false" "$(vst .digest_week) $(jq -r '.rules[] | select(.trigger == "vpn_weekly_digest") | .enabled' "$VW/.api-auth/notifications.json")"
 check "vpn: off again: 404"                        "404" "$(v_req "$VA" POST /config '{"VPN_ENABLED":"false"}' >/dev/null; v_req "$VU" GET /vpn/status | status_of)"
 kill "$VM_PID" 2>/dev/null; wait "$VM_PID" 2>/dev/null
 rm -rf "$VW"

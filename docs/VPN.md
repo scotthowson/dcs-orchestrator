@@ -88,6 +88,91 @@ Both events are rules on the Notifications page, made once and on by default.
 **Pause and resume** (`POST /vpn/pause`, `POST /vpn/resume`) stop and start Gluetun. The containers behind it have
 no network while it is paused.
 
+## Traffic
+
+`GET /vpn/traffic` (every account) answers what went through the tunnel. Down (`rx`) is what came in, up (`tx`) is what
+went out, in bytes.
+
+- **The tunnel.** The minute clock reads `tun0`'s counters in Gluetun's `/proc/net/dev` (one `docker exec`) and keeps
+  the difference in `.data/vpn/traffic.json`: per minute for 24 hours, per hour for 30 days, per day for a year. Each
+  bucket also holds the minutes the tunnel was up, so uptime comes from the same file (paused minutes do not count). A
+  counter that starts again from zero (a new Gluetun container, or a tunnel Gluetun rebuilt inside, which gives `tun0`
+  a new `ifindex`) counts from zero, never as a negative.
+- **Each container.** The containers behind the VPN share Gluetun's network, so their own `/proc/net/dev` is the
+  tunnel's. The kernel counts them instead, in Gluetun's `mangle` table: per container, a rule matches what its
+  processes send (`-m cgroup --path <its cgroup>`) and marks the connection (`CONNMARK`, the top byte), and a rule in
+  `INPUT` counts what comes back on a connection with that mark. The cgroup paths are only visible from the host's
+  cgroup namespace, so a short-lived helper writes the rules: Gluetun's own image, `--network container:Gluetun
+  --cgroupns host --cap-add NET_ADMIN`, removed when it is done (label `dcs.helper=vpn-traffic`). It runs again only
+  when Gluetun or a container behind it is a new container. The WireGuard clients (when they go through the VPN) are
+  counted in `FORWARD` by the WireGuard server's address.
+- **A kernel without `xt_cgroup` and `xt_connmark`** (a minimal custom build) still counts the tunnel. The answer's
+  `counting_error` says why the containers are not counted, and the page shows *Not counted* on their rows.
+- **The rates now** come from two readings of the counters a few seconds apart (the page asks every 10 seconds), or
+  from the last minute when there is only one.
+
+The answer: `live {rx_bps, tx_bps, window_s}`, `totals {today, month, last_24h}`, `per_5min` (24 hours, for the
+chart), `hourly`, `daily`, `uptime {last_24h, last_30d}`, `containers [{container, today, month, last_24h, share,
+measured}]` (`share` is of this month's total), `wireguard_clients`.
+
+## History and health
+
+`GET /vpn/history` (every account) keeps the last 500 events in `.data/vpn/history.json`:
+
+| Event | When |
+|---|---|
+| `connect` | The tunnel came up after something DCS did (a connect, a resume, a server move) |
+| `disconnect` | The tunnel went down. The reason is Gluetun's last error or warning line from its log, or "Gluetun is not running" |
+| `reconnect` | The tunnel came back by itself, with how long it was down. Fires `vpn_reconnected` |
+| `restart` | Gluetun restarted, or is a new container, and the containers behind it followed |
+| `server_change`, `rekey` | A connect or a server move (with its latency), a new key after 10 minutes down |
+| `pause`, `resume` | Who did it |
+| `port` | PIA's forwarded port changed |
+| `leak_test`, `speed_test` | A leak test someone ran (or one that found a leak), a speed check |
+| `policy_stop`, `policy_start`, `policy_kept` | The per-container policy below |
+| `attach`, `detach` | A container went behind the VPN or came out |
+
+The answer adds `uptime` (24 hours, 30 days), the current `session` (since when, how long), `reconnects_24h`, the
+forwarded port's history (`ports [{port, from, to}]`), `last_leak_test` and the last 20 `speed_tests`.
+`GET /vpn/status` carries `session_s`, `server_latency_ms`, `last_speed_test` and `last_leak_test` too.
+
+## Speed check
+
+`POST /vpn/speed-test` (admin) downloads a test file from inside Gluetun, so it goes through the tunnel and nowhere
+else. The file is `VPN_SPEEDTEST_URL` in `.env`, or 20 MB from `speed.cloudflare.com` when that is empty; it must be a
+plain `http(s)://` address. The time is read from `/proc/uptime` inside Gluetun on both sides of the download, so
+`docker exec`'s own start-up is not counted. Then it pings the file's host three times through the tunnel. The answer
+is `mbps`, `latency_ms` (null when ping gets no answer), `bytes`, `seconds` and `host`. It is kept in the history.
+One check every 5 minutes: a second one answers `429` with `retry_after`.
+
+## Another server
+
+`POST /vpn/server {"region": "<id>" | "fastest"}` (admin) moves the tunnel with the stored account: a new key is
+registered with that region's server and Gluetun is recreated (the containers behind it are offline for a few
+seconds; the forwarded port changes). `fastest` measures every region that forwards a port at once (the connect time to
+its meta server, two seconds at most) and takes the quickest. The measurements are kept in `.data/vpn/latency.json`:
+`GET /vpn/regions` shows each region's `latency_ms`, and the status shows the current server's.
+
+## Stop a container while the tunnel is down
+
+`PUT /vpn/containers/{name} {"stop_when_down": true, "restart_when_up": true}` (admin), or the two switches under
+the container on the VPN page. Both are off by default. The kill switch already cuts the container's network while
+the tunnel is down; this also stops the container itself after 2 minutes down (the same moment as `vpn_down`), so a
+download client does not pile up errors. When the tunnel is back, the minute clock starts it again (recreates it when
+Gluetun is a new container), or leaves it stopped and says so when `restart_when_up` is off. Pause does not stop
+anything: it is on purpose.
+
+## Alerts
+
+| Event | Default | What |
+|---|---|---|
+| `vpn_down` | on | The tunnel has been down for 2 minutes |
+| `vpn_leak` | on | A container behind the VPN shows the home address |
+| `vpn_reconnected` | off | The tunnel came back by itself (info) |
+| `vpn_weekly_digest` | off | Monday morning: last week's traffic, uptime, reconnects and the last speed check, in one line |
+
+An install seeded by 4.0.53 or 4.0.54 gets the two new rules, off, and keeps what was changed on the first two.
+
 ## Route the WireGuard clients through the VPN
 
 `PUT /vpn/wireguard-clients {"on": true, "container": "WireGuard"}` sends the traffic of the WireGuard server's
@@ -131,14 +216,17 @@ of the house is not affected.
 
 | Method | Path | Who |
 |---|---|---|
-| GET | `/vpn/status`, `/vpn/regions` | every account |
-| POST | `/vpn/connect`, `/vpn/pause`, `/vpn/resume`, `/vpn/leak-test` | admin |
-| PUT | `/containers/{name}/vpn`, `/vpn/wireguard-clients` | admin |
+| GET | `/vpn/status`, `/vpn/regions`, `/vpn/traffic`, `/vpn/history` | every account |
+| POST | `/vpn/connect`, `/vpn/pause`, `/vpn/resume`, `/vpn/leak-test`, `/vpn/speed-test`, `/vpn/server` | admin |
+| PUT | `/containers/{name}/vpn`, `/vpn/wireguard-clients`, `/vpn/containers/{name}` | admin |
 
 ## Tests
 
 - `tests/smoke.sh`, section *VPN*: a stand-in Gluetun control server, qBittorrent and PIA (`tests/mock-gluetun.py`) and
   a stand-in `docker`. It covers the switch, connect, attach and detach (byte for byte), the route, the policy, the
-  port into qBittorrent, restarts, the alerts, leaks, pause, the roles and the secrets.
+  port into qBittorrent, restarts, the alerts, leaks, pause, the roles and the secrets; the traffic (the counting
+  rules, deltas, a counter reset, shares, a kernel without the matches), the history (a drop with Gluetun's reason, a
+  reconnect, uptime, the session, the port), the speed check (its address, the rate limit), the server move
+  (fastest, a region), the stop/restart policy and the weekly line.
 - The real proof was run in a Docker-in-Docker sandbox with a WireGuard server and Gluetun's custom provider. It is
   described under *Unreleased* in `CHANGELOG.md`.
