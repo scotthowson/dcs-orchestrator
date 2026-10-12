@@ -3,6 +3,28 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **VPN: chosen containers through a WireGuard tunnel to Private Internet Access, with a kill switch and the forwarded
+  port in qBittorrent** (Security → VPN, off until Config → Integrations → VPN; docs/VPN.md). A new template
+  `vpn-gluetun` (Gluetun's custom WireGuard provider in `networking-security`); `POST /vpn/connect` registers a
+  WireGuard key with PIA the way PIA's manual-connections scripts do (Gluetun has no native PIA WireGuard), on the
+  fastest region that forwards a port unless one is picked (`GET /vpn/regions`, Canada's first); the account, the key and
+  the control server's key stay in DCS's secrets and reach Gluetun as files (`/run/secrets`), never in a compose file,
+  `.env` or answer. `PUT /containers/{name}/vpn {on}` puts a container through it: its service gets one marked
+  `network_mode: "container:Gluetun"` line, its ports move onto Gluetun (marked, variables filled), its Traefik route
+  follows, both files pass the compose policy, and off gives both files back byte for byte. The minute clock restarts
+  (or recreates) the containers behind Gluetun when Gluetun restarts, raises `vpn_down` (2 minutes) and `vpn_leak` (a
+  container showing the home address), registers a new key after 10 minutes down, and hands PIA's forwarded port to
+  qBittorrent. `POST /vpn/pause|resume`, `POST /vpn/leak-test`, `GET /vpn/status`. `PUT /vpn/wireguard-clients {on}`
+  sends the WireGuard server's clients (wg-easy) out through the tunnel while the server keeps the home address (a
+  policy route for what comes in on wg0; their speed is bound by the home's upload). Proved in a sandbox against a real
+  WireGuard server: the exit address is the tunnel's, nothing leaves when it is down (the kill switch, for the clients
+  too), the web page still answers on its port, Gluetun restarted or recreated → the container is back within a tick,
+  and the compose files round-trip byte for byte. Smoke: 72 checks with stand-ins (`tests/mock-gluetun.py`).
+
 ## [4.0.52] - 2026-10-11
 
 ### Fixed
