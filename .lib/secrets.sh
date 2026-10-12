@@ -86,7 +86,7 @@ secrets_missing() {
 # References the platform may create itself: internal service credentials the
 # operator never types (e.g. the core Redis password). Everything else stays an
 # operator gate — a user-supplied credential is never replaced by a random one.
-SECRETS_AUTO_GENERATED="DCS_REDIS_PASSWORD"
+SECRETS_AUTO_GENERATED="DCS_REDIS_PASSWORD VPN_CONTROL_KEY"
 
 # Create missing values for the auto-generated names FILE... references. Call
 # before secrets_missing so a stack's internal credentials provision themselves
