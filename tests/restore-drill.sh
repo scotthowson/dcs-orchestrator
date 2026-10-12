@@ -143,7 +143,7 @@ fp() {
         else printf 'f %s%s %s %s\n' "$(stat -c %a -- "$p")" "$own" "$(sha256sum -- "$p" | cut -c1-64)" "$p"; fi
     done)
 }
-fp_state() { local f; for f in .env .api-auth/users.json .data/schedules/schedules.json .secrets/A.enc .data/technitium/devices.json .data/technitium/groups.json .data/technitium/state.json .data/technitium/backups/primary-2026-10-10_0300.zip .data/technitium/backups/primary-2026-10-10_0300.json; do printf '%s %s\n' "$( [[ -f "$INST/$f" ]] && sha256sum < "$INST/$f" | cut -c1-64 || echo MISSING)" "$f"; done; }
+fp_state() { local f; for f in .env .api-auth/users.json .data/schedules/schedules.json .secrets/A.enc .data/technitium/devices.json .data/technitium/groups.json .data/technitium/state.json .data/technitium/backups/primary-2026-10-10_0300.zip .data/technitium/backups/primary-2026-10-10_0300.json .data/vpn/state.json .data/vpn/media-services--qbittorrent.json; do printf '%s %s\n' "$( [[ -f "$INST/$f" ]] && sha256sum < "$INST/$f" | cut -c1-64 || echo MISSING)" "$f"; done; }
 # fingerprint of the whole install's data: the stacks (their App-Data inside), the drive, the state
 fp_all() { { echo "== Stacks"; fp "$INST/Stacks"; echo "== drive"; fp "$DRV"; echo "== state"; fp_state; } > "$1"; }
 
@@ -196,10 +196,15 @@ printf '{"house":{"safe_search":true,"youtube":"strict"},"groups":[{"id":"g1","n
 printf '{"bedtime_active":[]}\n' > "$INST/.data/technitium/state.json"
 head -c 4000 /dev/urandom > "$INST/.data/technitium/backups/primary-2026-10-10_0300.zip"
 printf '{"server":"primary","block_list_urls":[]}\n' > "$INST/.data/technitium/backups/primary-2026-10-10_0300.json"
+# the VPN's: what goes through it, and what qBittorrent's service had before (given back when it is switched off)
+mkdir -p "$INST/.data/vpn"
+printf '{"attached":[{"stack":"media-services","service":"qbittorrent","container":"qBittorrent"}]}\n' > "$INST/.data/vpn/state.json"
+printf '{"stack":"media-services","service":"qbittorrent","saved":[[8,"    ports:\\n      - \\"8091:8080\\"\\n"]]}\n' > "$INST/.data/vpn/media-services--qbittorrent.json"
 # web and drive run, proxy is stopped
 container web-1 web run; container drive-1 drive run; container proxy-1 proxy off
 fp_all "$W/fp-source.txt"
 check "the fingerprint holds Technitium's files (devices, groups, state, a backup and its note)" 5 "$(grep -c ' \.data/technitium/' "$W/fp-source.txt" | tr -d ' ')$(grep -q MISSING "$W/fp-source.txt" && echo ' and something MISSING')"
+check "the fingerprint holds the VPN's state and a saved service" 2 "$(grep -c ' \.data/vpn/' "$W/fp-source.txt" | tr -d ' ')"
 check "the fingerprint holds every kind of file" yes "$(grep -q '^l .*current$' "$W/fp-source.txt" && grep -q "my notes.txt" "$W/fp-source.txt" && grep -q 'state.bin$' "$W/fp-source.txt" && echo yes || echo no)"
 
 # =============================================================================
