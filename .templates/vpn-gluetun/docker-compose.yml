@@ -1,0 +1,48 @@
+services:
+  gluetun:
+    container_name: Gluetun
+    image: qmcgaw/gluetun:v3
+    restart: unless-stopped
+    # DCS's VPN (Config → VPN): the containers switched "Through the VPN" share this container's network, so everything
+    # they send leaves through the WireGuard tunnel and nothing leaves when the tunnel is down (the kill switch).
+    # POST /vpn/connect fills the VPN_WG_* values (Private Internet Access: DCS registers a WireGuard key with your account).
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - TZ=${TZ:-UTC}
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT:-1337}
+      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY:-}
+      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES:-}
+      # the private key (and a pre-shared key) and PIA's account are not here: DCS writes them from its secrets as files
+      # into /run/secrets (wireguard_private_key, vpn_port_forwarding_username, vpn_port_forwarding_password), which Gluetun reads
+      # Private Internet Access's port forwarding over WireGuard (gluetun's wiki): the provider and the server's name
+      - VPN_PORT_FORWARDING=${VPN_PORT_FORWARDING:-on}
+      - VPN_PORT_FORWARDING_PROVIDER=private internet access
+      - SERVER_NAMES=${VPN_SERVER_NAME:-}
+      # your own network may still reach the web pages of the apps behind the tunnel (and the WireGuard clients' subnet)
+      - FIREWALL_OUTBOUND_SUBNETS=${VPN_LAN_SUBNETS:-}
+      # the control server DCS reads (the tunnel, the exit address, the forwarded port), with a key DCS makes itself
+      - HTTP_CONTROL_SERVER_ADDRESS=:8000
+      - 'HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE={"auth":"apikey","apikey":"${SECRETS_VPN_CONTROL_KEY:-}"}'
+      - HTTPPROXY=off
+    volumes:
+      - ${APP_DATA_DIR:-./App-Data}/Gluetun-VPN:/gluetun
+      # extra firewall rules DCS writes (Route my WireGuard clients through the VPN), applied every time it starts
+      - ${APP_DATA_DIR:-./App-Data}/Gluetun-VPN/iptables:/iptables
+      - ${APP_DATA_DIR:-./App-Data}/Gluetun-VPN/secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${VPN_CONTROL_PORT:-8899}:8000"
+      # the ports of the containers DCS puts through the VPN are added below, each marked "# moved by DCS for <stack>/<service>"
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s

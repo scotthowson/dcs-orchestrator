@@ -1,0 +1,33 @@
+{
+  "name": "vpn-gluetun",
+  "title": "VPN (Private Internet Access, WireGuard)",
+  "description": "DCS's own VPN: a WireGuard tunnel to Private Internet Access through Gluetun, for the containers you choose and nothing else (qBittorrent, say). Each of them is switched in and out on the VPN page; they reach the internet only through the tunnel (a kill switch: when it is down they are cut off), and PIA's forwarded port is handed to qBittorrent by itself. Everything else on the server keeps its normal connection and speed. After deploying, connect it on Security → VPN with your PIA account.",
+  "category": "vpn",
+  "target_stack": "networking-security",
+  "icon": "🛡️",
+  "tags": ["vpn", "wireguard", "private internet access", "pia", "kill-switch", "port-forwarding", "qbittorrent"],
+  "route_skip": ["gluetun"],
+  "variables": [
+    {
+      "name": "VPN_LAN_SUBNETS",
+      "label": "Your network",
+      "description": "Lets your own network reach the web pages of the apps behind the tunnel, for example 192.168.1.0/24 (comma separated for more than one)",
+      "default": "192.168.0.0/16",
+      "required": false
+    },
+    {
+      "name": "VPN_CONTROL_PORT",
+      "label": "Status port (this machine only)",
+      "description": "Where DCS reads the tunnel's state, on 127.0.0.1 only",
+      "default": "8899",
+      "required": false
+    },
+    {
+      "name": "VPN_PORT_FORWARDING",
+      "label": "Port forwarding",
+      "description": "on: PIA forwards a port to you and DCS gives it to qBittorrent; off: no forwarded port",
+      "default": "on",
+      "required": false
+    }
+  ]
+}
