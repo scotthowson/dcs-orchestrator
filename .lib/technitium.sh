@@ -250,7 +250,7 @@ _tt_safe_addrs() { jq -c --argjson k "$TT_KIDS" '$k.safe_search.fallback + (.saf
 _tt_safe_resolve() {
     local now at t ips map='{}' ty
     now=$(_tt_now); at=$(jq -r '.safe_addrs.at // 0' <<< "$(_tt_state)")
-    [[ "${1:-}" == force ]] || (( now - at >= 86400 || now < at )) || return 0
+    (( now - at >= 86400 || now < at )) || return 0
     jq -e '.groups | any(.safe_search or .youtube != "off")' >/dev/null <<< "$(_tt_model)" || return 0
     _tt_configured primary || return 0
     for t in $(jq -r '.safe_search.fallback | keys[]' <<< "$TT_KIDS"); do
@@ -855,7 +855,7 @@ handle_technitium_group_pause() {
     fi
     now=$(_tt_now); until=$(( now + 10#$m * 60 ))
     if [[ -n "$wid" ]]; then key="window_paused"; set -- "$id/$wid"; else key="bedtime_paused"; set -- "$id"; fi
-    if (( 10#$m == 0 )); then _tt_state_set --arg k "$1" "del(.$key[\$k])"
+    if (( 10#$m == 0 )); then _tt_state_set --arg k "$1" "del(.${key}[\$k])"
     else _tt_state_set --arg k "$1" --argjson u "$until" ".$key = ((.$key // {}) + {(\$k): \$u})"; fi
     _tt_groups_apply "${AUTH_USERNAME:-}" || { _api_error 502 "$TT_APPLY_MSG"; return; }
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_BEDTIME" "${AUTH_USERNAME:-}" "$name: ${wname:-its windows} $([[ "$m" == 0 ]] && printf 'pause ended' || printf 'paused for %s minutes' "$((10#$m))")"
