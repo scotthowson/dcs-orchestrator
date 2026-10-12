@@ -20,6 +20,8 @@ services:
       - WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT:-1337}
       - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY:-}
       - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES:-}
+      # PIA's own WireGuard setup keeps the tunnel alive every 25 seconds (its server forgets a quiet peer)
+      - WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL=25s
       # the private key (and a pre-shared key) and PIA's account are not here: DCS writes them from its secrets as files
       # into /run/secrets (wireguard_private_key, vpn_port_forwarding_username, vpn_port_forwarding_password), which Gluetun reads
       # Private Internet Access's port forwarding over WireGuard (gluetun's wiki): the provider and the server's name
