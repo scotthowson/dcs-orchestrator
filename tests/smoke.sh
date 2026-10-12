@@ -11311,8 +11311,8 @@ check "vpn: regions: only those that forward a port, Canada's first" "CA Montrea
 
 # connect
 check "vpn: a viewer cannot connect"               403 "$(v_req "$VU" POST /vpn/connect '{"region":"auto"}' | status_of)"
-_c=$(v_req "$VA" POST /vpn/connect '{"region":"auto"}')
-check "vpn: no account stored: 502, says so"       "502 yes" "$(status_of <<< "$_c") $(body_of <<< "$_c" | jq -r .message | grep -q 'not stored' && echo yes || echo no)"
+_vnc=$(v_req "$VA" POST /vpn/connect '{"region":"auto"}')
+check "vpn: no account stored: 502, says so"       "502 yes" "$(status_of <<< "$_vnc") $(body_of <<< "$_vnc" | jq -r .message | grep -q 'not stored' && echo yes || echo no)"
 check "vpn: a region id is checked"                400 "$(v_req "$VA" POST /vpn/connect '{"region":"../x"}' | status_of)"
 check "vpn: one half of the account is refused"    400 "$(v_req "$VA" POST /vpn/connect '{"username":"p1234567"}' | status_of)"
 check "vpn: a wrong password: PIA refuses, 502, nothing kept" "502 no" "$(v_req "$VA" POST /vpn/connect '{"username":"p1234567","password":"wrong-pass","region":"ca"}' | status_of) $([[ -e "$VW/.secrets/VPN_PASS.enc" ]] && echo yes || echo no)"

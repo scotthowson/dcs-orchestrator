@@ -23,7 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   policy route for what comes in on wg0; their speed is bound by the home's upload). Proved in a sandbox against a real
   WireGuard server: the exit address is the tunnel's, nothing leaves when it is down (the kill switch, for the clients
   too), the web page still answers on its port, Gluetun restarted or recreated → the container is back within a tick,
-  and the compose files round-trip byte for byte. Smoke: 72 checks with stand-ins (`tests/mock-gluetun.py`).
+  and the compose files round-trip byte for byte. Smoke: 73 checks with stand-ins (`tests/mock-gluetun.py`).
 
 ## [4.0.52] - 2026-10-11
 
