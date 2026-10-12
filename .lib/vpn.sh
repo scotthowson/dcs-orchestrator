@@ -70,7 +70,7 @@ _vpn_deployed() {
 }
 # _vpn_env_ensure ENVFILE: the keys the live lines read, empty until a connect fills them (Compose never warns of a missing one)
 _vpn_env_ensure() {
-    local e="${1:-$COMPOSE_DIR/$VPN_STACK/.env}" k
+    local e="$1" k
     [[ -f "$e" ]] || : > "$e"
     for k in $VPN_ENV_KEYS; do grep -q "^${k}=" "$e" 2>/dev/null || printf '%s=\n' "$k" >> "$e"; done
 }
@@ -91,7 +91,7 @@ _vpn_repair() {
         _vpn_write "$f" < "$bak"; rm -f -- "$bak"; return 1
     fi
     rm -f -- "$bak"
-    _vpn_env_ensure
+    _vpn_env_ensure "$COMPOSE_DIR/$VPN_STACK/.env"
     _vpn_audit vpn_repair "the VPN's compose file (deployed by 4.0.53 with its peer lines written empty) reads the stack's .env again"
     return 0
 }
