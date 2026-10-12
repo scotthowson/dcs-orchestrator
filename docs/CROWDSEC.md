@@ -137,6 +137,19 @@ every allowlist change) looks again, replaces the old network and reloads CrowdS
   DCS asks the internet over IPv6 which address it is seen with, and adds nothing when nothing answers.
 * `docker exec CrowdSec cat /etc/crowdsec/parsers/s02-enrich/dcs-whitelist.yaml` shows the network; `.data/crowdsec-whitelist.json` keeps it as `home_ipv6`.
 
+### When CrowdSec reloads, and when it is down
+
+DCS writes its parser files (the whitelist, the media apps) only when they change, never a whitelist with no address in it (with nothing to trust
+there is no file), and keeps the last known home address when every address lookup fails. Before a reload CrowdSec checks the new files itself
+(`crowdsec -t`); a file it refuses is put back as it was. The reload is a `SIGHUP` to the crowdsec process inside the container, never
+`docker kill -s HUP`: Docker counts any `docker kill` as a stop and would then not restart a CrowdSec that exits. DCS watches CrowdSec for 5 seconds
+after a reload; if it died, the earlier files go back and it is started again.
+
+With the Traefik bouncer in live mode every request asks CrowdSec, so a stopped CrowdSec is a 403 for every visitor. Every minute DCS checks:
+CrowdSec not running raises **`crowdsec_down`** once (Notifications, the activity log, `down_alert` in `GET /crowdsec/status`) with the
+container's state and the last line of its log, and clears it when it runs again. A CrowdSec that exited with an error is started again (a
+parser file of DCS's that it refused is removed first); one stopped on purpose is only reported. *Start CrowdSec* on the page starts it.
+
 ## 6. Discord alerts
 
 Every option of the Discord message is on the **Discord** tab. Nothing is hard-coded: the shipped message is only the default.

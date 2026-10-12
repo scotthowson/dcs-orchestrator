@@ -14364,7 +14364,7 @@ _notify_default_templates() {
         proxmox_vm_started)    NT_TITLE="VM {vm} is running"; NT_MESSAGE="{message}" ;;
         proxmox_vm_*)          NT_TITLE="VM {vm}: {status}"; NT_MESSAGE="{message}" ;;
         health_change)         NT_TITLE="{hostname} is {status}"; NT_MESSAGE="{message}" ;;
-        technitium_*)          NT_TITLE="{headline}"; NT_MESSAGE="{message}" ;;
+        technitium_*|crowdsec_down) NT_TITLE="{headline}"; NT_MESSAGE="{message}" ;;
         *)                     NT_TITLE="DCS — {event}"; NT_MESSAGE="{event} on {stack}: {container} is {status}" ;;
     esac
 }
@@ -22462,6 +22462,7 @@ _discord_event_style() {
         technitium_out_of_sync|technitium_lists_stale|technitium_dhcp_pool) emoji="🧭"; color=$DISCORD_COLOR_WARN; label="Technitium" ;;
         technitium_new_device) emoji="📡"; color=$DISCORD_COLOR_WARN;   label="New device on the network" ;;
         technitium_*)          emoji="🧭"; color=$DISCORD_COLOR_INFO;   label="Technitium" ;;
+        crowdsec_down)         emoji="🛡️"; color=$DISCORD_COLOR_BAD;    label="CrowdSec not running" ;;
         crowdsec_*|auth.crowdsec_*) emoji="🛡️"; color=$DISCORD_COLOR_INFO; label="CrowdSec" ;;
         auth.login_ok)         emoji="🔑"; color=$DISCORD_COLOR_SLATE;  label="Signed in" ;;
         auth.login_fail*)      emoji="🔒"; color=$DISCORD_COLOR_WARN;   label="Failed sign-in" ;;
@@ -22812,6 +22813,8 @@ _dcs_automation_loop() {
             _automation_tick "$now" </dev/null >>"$AUTOMATION_LOG" 2>&1
             _appdata_guard_tick </dev/null >/dev/null 2>&1 || true
             (( minute % 10 == 0 )) && _crowdsec_whitelist_sync >/dev/null 2>&1
+            # CrowdSec not running: said once, and started again when it died on its own (.lib/crowdsec.sh)
+            ( _crowdsec_lib && _cs_down_tick ) </dev/null >/dev/null 2>&1 || true
             _crowdsec_digest_tick </dev/null >/dev/null 2>&1 || true
             # Technitium, when it is on: a kids' group whose bedtime starts or ends, a device's block that ends (re-renders only on a
             # change); every 5 minutes the device directory's scan, in the background (state in .data/technitium)
@@ -22946,16 +22949,24 @@ _crowdsec_config_dir() {
     docker inspect "$1" --format '{{range .Mounts}}{{if eq .Destination "/etc/crowdsec"}}{{.Source}}{{end}}{{end}}' 2>/dev/null
 }
 
+# Tell CrowdSec to reload its parsers, scenarios and profiles: SIGHUP to the crowdsec process inside the container. Never `docker kill -s HUP`:
+# Docker takes a `docker kill` of a container without a StopSignal (the CrowdSec image has none) as a stop, and its restart policy then does not
+# restart the container when it exits - one reload that died on a bad parser file left CrowdSec down for hours, and with it every site behind
+# the Traefik bouncer (2026-10-11). Through the process, a CrowdSec that dies is restarted by Docker as its policy says.
+_crowdsec_hup() { timeout 20 docker exec "$1" kill -HUP 1 >/dev/null 2>&1; }
+
 # Current public address: the DDNS loop's record when it is recent, otherwise
-# a direct lookup (only called from the server loop or an admin request).
+# a direct lookup (only called from the server loop or an admin request): the
+# DDNS answerers, then Cloudflare's trace of this server's own domain.
 _crowdsec_public_ip() {
     local ip=""
     if [[ -f "$DDNS_IP_FILE" ]] && [[ $(( $(date +%s) - $(stat -c %Y "$DDNS_IP_FILE" 2>/dev/null || echo 0) )) -lt 86400 ]]; then
         ip=$(head -c 64 "$DDNS_IP_FILE" 2>/dev/null | tr -d '[:space:]')
     fi
-    if [[ -z "$ip" ]]; then
-        ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null | tr -d '[:space:]')
-        [[ -z "$ip" ]] && ip=$(curl -s --max-time 5 https://ifconfig.me/ip 2>/dev/null | tr -d '[:space:]')
+    [[ -n "$ip" ]] || ip=$(_ddns_get_public_ip 2>/dev/null)
+    # (Cloudflare answers /cdn-cgi/trace itself, for a name it proxies, with ip=<the caller>; any other answer has no ip= line)
+    if [[ -z "$ip" && -n "${PROXY_DOMAIN:-}" && "$PROXY_DOMAIN" != example.com && "$PROXY_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        ip=$(curl -4 -s --max-time 4 "https://$PROXY_DOMAIN/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | head -n 1 | tr -d '[:space:]')
     fi
     _crowdsec_valid_ip "$ip" && printf '%s' "$ip"
 }
@@ -23178,12 +23189,13 @@ _crowdsec_conf_put() {
         return 0
     fi
     rm -f "$target.tmp" 2>/dev/null || true
-    c=$(_crowdsec_container) || c=""
+    c=${CS_CONF_CONTAINER:-$(_crowdsec_container)} || c=""
     [[ -n "$c" ]] || { CS_CONF_ERR="cannot write $rel (the folder belongs to root) and the CrowdSec container is not running"; return 1; }
     tmp=$(mktemp) || { CS_CONF_ERR="no temporary file"; return 1; }
     printf '%s' "$content" > "$tmp"; chmod 644 "$tmp" 2>/dev/null || true
-    if timeout 15 docker exec "$c" mkdir -p "/etc/crowdsec/$(dirname "$rel")" >/dev/null 2>&1 \
-        && timeout 15 docker cp "$tmp" "$c:/etc/crowdsec/$rel" >/dev/null 2>&1; then
+    # (docker cp also reaches a container that is not running: a reload that killed CrowdSec has its earlier files put back that way)
+    timeout 15 docker exec "$c" mkdir -p "/etc/crowdsec/$(dirname "$rel")" >/dev/null 2>&1 || true
+    if timeout 15 docker cp "$tmp" "$c:/etc/crowdsec/$rel" >/dev/null 2>&1; then
         rm -f "$tmp"; return 0
     fi
     rm -f "$tmp"
@@ -23194,16 +23206,95 @@ _crowdsec_conf_put() {
 _crowdsec_conf_rm() {
     local c
     rm -f "$1/$2" 2>/dev/null; [[ -e "$1/$2" ]] || return 0
-    c=$(_crowdsec_container) || return 1
+    # shortcut: through the container only while it runs (docker exec), so a root-owned folder of a stopped CrowdSec keeps the file
+    c=${CS_CONF_CONTAINER:-$(_crowdsec_container)} || return 1
     timeout 15 docker exec "$c" rm -f "/etc/crowdsec/$2" >/dev/null 2>&1 && [[ ! -e "$1/$2" ]]
+}
+
+# The parser files a sync may change keep the version CrowdSec runs with in .data/crowdsec/prev/ (NAME.absent: there was none), so a
+# reload CrowdSec does not survive can put them back. REL paths are stored with / as %.
+CROWDSEC_PREV_DIR="$BASE_DIR/.data/crowdsec/prev"
+_crowdsec_prev_save() {
+    local dir="$1" rel p
+    shift
+    rm -rf "$CROWDSEC_PREV_DIR"; mkdir -p "$CROWDSEC_PREV_DIR" 2>/dev/null || return 1
+    for rel in "$@"; do
+        p="$CROWDSEC_PREV_DIR/${rel//\//%}"
+        if [[ -f "$dir/$rel" ]]; then cp -f "$dir/$rel" "$p" 2>/dev/null || return 1; else : > "$p.absent"; fi
+    done
+}
+# _crowdsec_prev_restore DIR — every kept file back as it was (one that is already right is left alone)
+_crowdsec_prev_restore() {
+    local dir="$1" p n rel content rc=0
+    for p in "$CROWDSEC_PREV_DIR"/*; do
+        [[ -e "$p" ]] || continue
+        n="${p##*/}"; rel="${n//%//}"
+        if [[ "$rel" == *.absent ]]; then
+            rel="${rel%.absent}"; [[ -e "$dir/$rel" ]] || continue
+            _crowdsec_conf_rm "$dir" "$rel" || rc=1
+        else
+            cmp -s "$p" "$dir/$rel" && continue
+            content=$(cat "$p"; printf x)
+            _crowdsec_conf_put "$dir" "$rel" "${content%x}" || rc=1
+        fi
+    done
+    return $rc
+}
+
+# the message of the last fatal line of CrowdSec's log on stdin (else its last line), for a person to read
+_crowdsec_fatal_line() {
+    local all line
+    all=$(cat)
+    line=$(grep 'level=fatal' <<< "$all" | tail -n 1)
+    [[ -n "$line" ]] || line=$(grep -v '^[[:space:]]*$' <<< "$all" | tail -n 1)
+    [[ "$line" =~ msg=\"(([^\"\\]|\\.)*)\" ]] && line="${BASH_REMATCH[1]//\\\"/\"}"
+    printf '%s' "${line:0:300}"
+}
+
+# _crowdsec_reload_guarded CONTAINER DIR — the parser files were just changed (their earlier versions in $CROWDSEC_PREV_DIR): CrowdSec
+# checks its whole configuration first (crowdsec -t: it refuses there what would kill the running engine), then reloads, and must still
+# be the same running process $CROWDSEC_RELOAD_WAIT seconds later. When it refused the files or died anyway, the earlier files go back,
+# a CrowdSec that is down is started again and crowdsec_down says why. 0 when the new files are live; 1 with CS_RELOAD_ERR set.
+CROWDSEC_RELOAD_WAIT="${CROWDSEC_RELOAD_WAIT:-5}"
+_crowdsec_reload_guarded() {
+    local c="$1" dir="$2" out rc before after st i why
+    CS_RELOAD_ERR=""
+    out=$(timeout 60 docker exec "$c" crowdsec -t 2>&1 </dev/null); rc=$?
+    # (only CrowdSec's own verdict counts: a docker exec that could not run - a timeout, an image without the binary - checks nothing)
+    if (( rc != 0 )) && grep -q 'level=fatal' <<< "$out"; then
+        _crowdsec_prev_restore "$dir" || true
+        CS_RELOAD_ERR="CrowdSec refused the new parser files, so it keeps the earlier ones: $(_crowdsec_fatal_line <<< "$out")"
+        return 1
+    fi
+    before=$(timeout 10 docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$c" 2>/dev/null </dev/null)
+    _crowdsec_hup "$c" || { CS_RELOAD_ERR="CrowdSec could not be told to reload"; return 1; }
+    sleep "$CROWDSEC_RELOAD_WAIT"
+    after=$(timeout 10 docker inspect -f '{{.State.Status}} {{.State.StartedAt}} {{.RestartCount}}' "$c" 2>/dev/null </dev/null)
+    [[ -n "$before" && "$after" == "running $before" ]] && return 0
+    [[ -n "$after" ]] || return 0      # Docker did not answer: nothing is known, nothing is undone
+    why=$(timeout 10 docker logs --tail 20 "$c" 2>&1 </dev/null | _crowdsec_fatal_line)
+    CS_CONF_CONTAINER="$c" _crowdsec_prev_restore "$dir" || true
+    st="${after%% *}"
+    [[ "$st" == running ]] || timeout 60 docker start "$c" >/dev/null 2>&1 </dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        st=$(timeout 5 docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null </dev/null); [[ "$st" == running ]] && break
+        sleep 2
+    done
+    CS_RELOAD_ERR="CrowdSec died reloading the new parser files${why:+ ($why)}; DCS put the earlier files back and started it again (it is ${st:-unknown})"
+    _crowdsec_lib; _cs_down_raise "it died reloading the new parser files${why:+ ($why)}; DCS put the earlier files back and started it again (it is ${st:-unknown} now)"
+    return 1
 }
 
 # Write parsers/s02-enrich/dcs-whitelist.yaml and reload CrowdSec when the set
 # of addresses changed, and keep this server's own public address and home IPv6
 # network in CrowdSec's DCS allowlist too: AppSec (the WAF) runs no parsers and
 # only honours allowlists (_cs_allowlist_home_sync). Returns 0 when in sync, 1
-# when CrowdSec is absent.
+# when CrowdSec is absent. One sync at a time: a reload is watched for a few seconds.
 _crowdsec_whitelist_sync() {
+    mkdir -p "$BASE_DIR/.data/crowdsec" 2>/dev/null
+    { flock -w 90 9 || true; _crowdsec_whitelist_sync_locked; } 9>"$BASE_DIR/.data/crowdsec/.whitelist.lock"
+}
+_crowdsec_whitelist_sync_locked() {
     local container dir
     container=$(_crowdsec_container) || return 1
     [[ -n "$container" ]] || return 1
@@ -23213,6 +23304,13 @@ _crowdsec_whitelist_sync() {
     local -a ips=() cidrs=()
     local public_ip home6="" a v6off=0
     public_ip=$(_crowdsec_public_ip) || public_ip=""
+    # every lookup failed (it happens: 2026-10-11 both answerers blipped at once): the address of the last sync stays trusted, it is not dropped
+    if [[ -z "$public_ip" && -f "$CROWDSEC_SYNC_STATE" ]]; then
+        public_ip=$(jq -r '.public_ip // "" | strings' "$CROWDSEC_SYNC_STATE" 2>/dev/null) || public_ip=""
+        _crowdsec_valid_ip "$public_ip" || public_ip=""
+        [[ -n "$public_ip" ]] && printf '%s CrowdSec whitelist: the public address lookup failed, keeping %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$public_ip" \
+            >> "${API_LOG_FILE:-$BASE_DIR/logs/api-server.log}" 2>/dev/null
+    fi
     # the home network over IPv6 (its prefix follows the provider's delegation: every sync looks again). The setting is read from .env, as below
     home6=$(_api_load_env_file "$BASE_DIR/.env"; _crowdsec_home_ipv6_net) || home6=""
     (_api_load_env_file "$BASE_DIR/.env"; _crowdsec_home_ipv6_len >/dev/null) || v6off=1
@@ -23228,13 +23326,19 @@ _crowdsec_whitelist_sync() {
     content+="whitelist:"$'\n'"  reason: \"trusted by DCS\""$'\n'
     if [[ ${#ips[@]} -gt 0 ]]; then content+="  ip:"$'\n'; for a in "${ips[@]}"; do content+="    - $a"$'\n'; done; fi
     if [[ ${#cidrs[@]} -gt 0 ]]; then content+="  cidr:"$'\n'; for a in "${cidrs[@]}"; do content+="    - $a"$'\n'; done; fi
-    [[ ${#ips[@]} -eq 0 && ${#cidrs[@]} -eq 0 ]] && content+="  ip: []"$'\n'
 
-    local target="$dir/parsers/s02-enrich/dcs-whitelist.yaml"
+    local rel=parsers/s02-enrich/dcs-whitelist.yaml
+    local target="$dir/$rel"
     local changed=false werr=""
+    _crowdsec_prev_save "$dir" "$rel" parsers/s02-enrich/dcs-media-apps.yaml || werr="the earlier parser files could not be kept"
+    if [[ ${#ips[@]} -eq 0 && ${#cidrs[@]} -eq 0 ]]; then
+        # nothing to trust: no file at all. CrowdSec refuses a whitelist with no address in it ("Node is empty") and dies reloading one
+        if [[ -e "$target" ]]; then
+            if _crowdsec_conf_rm "$dir" "$rel"; then changed=true; else werr="${werr:+$werr; }cannot remove $rel"; fi
+        fi
     # ($(cat) drops the newline the content ends with: without putting it back the two never matched and every sync reloaded CrowdSec)
-    if [[ ! -f "$target" ]] || [[ "$(cat "$target" 2>/dev/null)"$'\n' != "$content" ]]; then
-        if _crowdsec_conf_put "$dir" parsers/s02-enrich/dcs-whitelist.yaml "$content"; then changed=true; else werr="$CS_CONF_ERR"; fi
+    elif [[ ! -f "$target" ]] || [[ "$(cat "$target" 2>/dev/null)"$'\n' != "$content" ]]; then
+        if _crowdsec_conf_put "$dir" "$rel" "$content"; then changed=true; else werr="${werr:+$werr; }$CS_CONF_ERR"; fi
     fi
     # the media-app tuning is a parser file beside this one: the same sync keeps it, and one reload covers both. The loops that call this keep the .env they
     # started with, so the setting is read from the file each time: every caller agrees, and none undoes the change another has seen
@@ -23242,7 +23346,7 @@ _crowdsec_whitelist_sync() {
     apps=$(_api_load_env_file "$BASE_DIR/.env"; printf '%s' "${CROWDSEC_MEDIA_APPS-jellyfin}")
     CS_CONF_ERR=""
     if CROWDSEC_MEDIA_APPS="$apps" _crowdsec_media_apps_sync "$dir"; then changed=true; elif [[ -n "$CS_CONF_ERR" ]]; then werr="${werr:+$werr; }$CS_CONF_ERR"; fi
-    [[ "$changed" == true ]] && { docker kill -s HUP "$container" >/dev/null 2>&1 || true; }
+    if [[ "$changed" == true ]] && ! _crowdsec_reload_guarded "$container" "$dir"; then changed=false; werr="${werr:+$werr; }$CS_RELOAD_ERR"; fi
     # the same two addresses on CrowdSec's own allowlist, for AppSec (an allowlist applies at once: no reload)
     local allow
     _crowdsec_lib

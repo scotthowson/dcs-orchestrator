@@ -598,6 +598,74 @@ _cs_enforcement_json() {
 }
 
 # =============================================================================
+# CrowdSec not running: said once (crowdsec_down), cleared when it runs again
+# =============================================================================
+
+# With the Traefik bouncer in live mode every request asks CrowdSec, and a CrowdSec that is gone is a 403 for every visitor: on
+# 2026-10-11 a reload killed it, Docker did not restart it (see _crowdsec_hup) and the sites answered 403 for hours with nothing said.
+# State: .data/crowdsec/down.json {active: {since, reason, message} | null, rule_seeded}.
+CS_DOWN_FILE="$CROWDSEC_STATE_DIR/down.json"
+_cs_down_state() { jq -c . "$CS_DOWN_FILE" 2>/dev/null || printf '{}'; }
+_cs_down_set() { mkdir -p "$CROWDSEC_STATE_DIR" 2>/dev/null; _api_state_file "$CS_DOWN_FILE" '{}' object >/dev/null 2>&1 || true; _api_jq_update_file "$CS_DOWN_FILE" "$@" >/dev/null 2>&1 || true; }
+
+# the event's rule, made once (on, high): the Notifications page lists and switches it like every other
+_cs_down_seed_rule() {
+    jq -e '.rule_seeded == true' >/dev/null 2>&1 <<< "$(_cs_down_state)" && return 0
+    _init_notifications_file 2>/dev/null
+    _api_jq_update_file "$NOTIFICATIONS_FILE" --arg ts "$(_api_now_iso)" '
+        if any((.rules // [])[]; .trigger == "crowdsec_down") then . else .rules = (.rules // []) + [{id: "rule_crowdsec_down", name: "CrowdSec: not running",
+            enabled: true, trigger: "crowdsec_down", target: "*", priority: "high", tags: ["crowdsec"], title_template: "", message_template: "",
+            cooldown_minutes: null, created_at: $ts}] end' >/dev/null 2>&1 || return 0
+    _cs_down_set '.rule_seeded = true'
+}
+
+# _cs_down_raise REASON — once, until it is cleared: the activity log, the notification, down.json (the CrowdSec status carries it)
+_cs_down_raise() {
+    local msg
+    jq -e '.active != null' >/dev/null 2>&1 <<< "$(_cs_down_state)" && return 0
+    msg="CrowdSec is not running: $1. With the Traefik bouncer in live mode every visitor gets 403 until it is back."
+    _cs_down_seed_rule
+    _cs_down_set --arg r "$1" --arg m "$msg" --argjson now "$(date +%s)" '.active = {since: $now, reason: $r, message: $m}'
+    _audit_log crowdsec_down "$msg" 2>/dev/null
+    _fire_notifications crowdsec_down "headline=CrowdSec is not running" "message=$msg" "status=raised" "fingerprint=crowdsec_down" 2>/dev/null
+    return 0
+}
+_cs_down_clear() {
+    local msg="CrowdSec is running again: the bouncer can check visitors against it."
+    jq -e '.active != null' >/dev/null 2>&1 <<< "$(_cs_down_state)" || return 0
+    _cs_down_set '.active = null'
+    _audit_log crowdsec_down "$msg" 2>/dev/null
+    _fire_notifications crowdsec_down "headline=CrowdSec is running again" "message=$msg" "status=resolved" "fingerprint=crowdsec_down" 2>/dev/null
+    return 0
+}
+
+# The minute clock. A CrowdSec that died on one of DCS's own parser files loses that file (the next sync writes it again, right: 4.0.51
+# wrote a whitelist with no address in it when the address lookup failed), and one that exited with an error is started again: Docker's
+# restart policy does not restart a container `docker kill` signalled since it last started, which DCS's reloads did up to 4.0.51. One
+# that was stopped (exit code 0 or a stop signal's, or by DCS a moment ago) is left as it is, and only said.
+_cs_down_tick() {
+    _cs_probe || return 0                 # Docker not answering is its own alert
+    [[ -z "$CS_NAME" ]] || _cs_down_seed_rule    # (a server without CrowdSec gets no rule about it)
+    if [[ -z "$CS_NAME" || "$CS_RSTATE" == running ]]; then _cs_down_clear; return 0; fi
+    _container_intended "$CS_NAME" "$CS_PROJECT" && return 0
+    local last dir f
+    last=$(_cs_log_tail 10 | _crowdsec_fatal_line)
+    _cs_down_raise "the container $CS_NAME is $CS_RSTATE$([[ "$CS_RSTATE" == exited ]] && printf ' (exit code %s)' "$CS_EXIT")${last:+, its log says: $last}"
+    dir=$(_crowdsec_config_dir "$CS_NAME")
+    for f in dcs-whitelist dcs-media-apps; do
+        [[ -n "$dir" && "$last" == *"'custom/$f'"* ]] || continue
+        CS_CONF_CONTAINER="$CS_NAME" _crowdsec_conf_rm "$dir" "parsers/s02-enrich/$f.yaml" \
+            && _audit_log crowdsec_down "removed parsers/s02-enrich/$f.yaml, which CrowdSec refused (DCS writes it again at the next sync)" 2>/dev/null
+    done
+    case "$CS_RSTATE:$CS_EXIT" in
+        exited:0|exited:130|exited:137|exited:143|exited:) ;;
+        exited:*) timeout 60 docker start "$CS_NAME" >/dev/null 2>&1 </dev/null \
+                      && _audit_log crowdsec_start "DCS started $CS_NAME again: it had exited with code $CS_EXIT" 2>/dev/null ;;
+    esac
+    return 0
+}
+
+# =============================================================================
 # The status: which state is CrowdSec in, and what to do about it
 # =============================================================================
 
@@ -746,7 +814,7 @@ _cs_status_core() {
                 fixes="[$(_cs_fix logs "Show the log" ui "" "" null true), $(_cs_fix restart "Restart" api POST /crowdsec/service '{"action":"restart"}' false)]" ;;
             *)
                 state=stopped; title="CrowdSec is stopped"
-                detail="The container $CS_NAME is $CS_RSTATE${CS_EXIT:+ (exit code $CS_EXIT)}. While it is down nothing watches the logs and the bouncer keeps the bans it already has."
+                detail="The container $CS_NAME is $CS_RSTATE${CS_EXIT:+ (exit code $CS_EXIT)}. While it is down nothing watches the logs, and a Traefik bouncer in live mode refuses every visitor (403) until it is back."
                 fixes="[$(_cs_fix start "Start CrowdSec" api POST /crowdsec/service '{"action":"start"}' true), $(_cs_fix logs "Show the log" ui "" "" null false)]" ;;
         esac
         if [[ -z "${state:-}" ]]; then
@@ -856,7 +924,8 @@ handle_crowdsec_status() {
             if [[ "$v" == "$client" ]] || { [[ "$v" == */* ]] && _cs_covers "$v" "$client"; }; then banned=true; break; fi
         done < <(jq -r '(.decisions // [])[] | select(.simulated | not) | .value' <<< "$core")
     fi
-    local trusted state='{}' cfb='{"enabled": false}'
+    local trusted state='{}' cfb='{"enabled": false}' down
+    down=$(jq -c '.active // null' "$CS_DOWN_FILE" 2>/dev/null) || down=null; [[ -n "$down" ]] || down=null
     trusted=$(_crowdsec_trusted_list | jq -R . | jq -sc .)
     [[ -f "$CROWDSEC_SYNC_STATE" ]] && state=$(cat "$CROWDSEC_SYNC_STATE" 2>/dev/null)
     [[ "$state" == \{* ]] || state='{}'
@@ -865,8 +934,8 @@ handle_crowdsec_status() {
         _crowdsec_cf_lib; cfb=$(_cfb_brief 2>/dev/null) || cfb=""
         [[ "$cfb" == \{* ]] || cfb='{"enabled": false}'
     fi
-    _api_success "$(jq -c --arg ip "$client" --argjson banned "$banned" --argjson trusted "$trusted" --argjson wl "$state" --argjson cfb "$cfb" \
-        '. + {client_ip: $ip, client_banned: $banned, trusted: $trusted, whitelist: $wl, decision_count: ((.decisions // []) | length), cloudflare: $cfb,
+    _api_success "$(jq -c --arg ip "$client" --argjson banned "$banned" --argjson trusted "$trusted" --argjson wl "$state" --argjson cfb "$cfb" --argjson down "$down" \
+        '. + {client_ip: $ip, client_banned: $banned, trusted: $trusted, whitelist: $wl, decision_count: ((.decisions // []) | length), cloudflare: $cfb, down_alert: $down,
               message: (if .state == "not_deployed" then "CrowdSec is not running. Deploy it from the CrowdSec page to enable protection." else .title end)}
          | if $cfb.enabled and ($cfb.health == "stale" or $cfb.health == "error") and (($cfb.error.code // "") != "rate_limited") then .issues = ((.issues // []) + [{code: "cloudflare_sync", severity: "warning",
               title: (if $cfb.health == "error" then "Cloudflare is not getting the bans" else "The bans at Cloudflare are not up to date" end),
@@ -1942,7 +2011,7 @@ handle_crowdsec_service() {
             timeout 120 docker restart "$CS_NAME" >/dev/null 2>&1 || { _api_error 502 "docker could not restart $CS_NAME"; return; } ;;
         reload)
             [[ "$CS_RSTATE" == running ]] || { _api_error 409 "CrowdSec is not running"; return; }
-            timeout 20 docker kill -s HUP "$CS_NAME" >/dev/null 2>&1 || { _api_error 502 "docker could not signal $CS_NAME"; return; } ;;
+            _crowdsec_hup "$CS_NAME" || { _api_error 502 "docker could not signal $CS_NAME"; return; } ;;
     esac
     # a moment for the container to be up (health follows on its own; the page polls)
     for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -1951,6 +2020,7 @@ handle_crowdsec_service() {
         sleep 1
     done
     _cs_cache_clear
+    [[ "$st" == running ]] && _cs_down_clear
     _api_audit_log "${CLIENT_IP:-unknown}" "CROWDSEC_SERVICE" "${AUTH_USERNAME:-}" "$action $CS_NAME"
     _api_success "$(jq -nc --arg a "$action" --arg s "${st:-unknown}" '{success: true, action: $a, state: $s, message: (if $a == "reload" then "CrowdSec reloaded its parsers, scenarios and allowlists" elif $a == "start" then "CrowdSec is starting" else "CrowdSec restarted" end)}')"
 }
@@ -2032,7 +2102,7 @@ handle_crowdsec_hub() {
 }
 
 # _cs_hub_reload — make CrowdSec pick up hub changes (SIGHUP reloads parsers, scenarios and profiles)
-_cs_hub_reload() { timeout 20 docker kill -s HUP "$CS_NAME" >/dev/null 2>&1 || true; sleep 2; }
+_cs_hub_reload() { _crowdsec_hup "$CS_NAME" || true; sleep 2; }
 
 # POST /crowdsec/hub/update — Fetch the newest hub index (needs internet on the server)
 handle_crowdsec_hub_update() {

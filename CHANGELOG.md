@@ -3,6 +3,32 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **CrowdSec: the home whitelist can no longer take CrowdSec down, and CrowdSec down is no longer silent.** This took a
+  server down on 2026-10-11: both public address lookups failed at once, DCS wrote a whitelist with no address in it
+  (`ip: []`), told CrowdSec to reload, and CrowdSec 1.8.1 refused the file ("Node is empty") and exited. Docker did not
+  restart it, and with the Traefik bouncer in live mode every visitor of every site got 403 for hours while DCS said
+  nothing. Now:
+  - With nothing to trust there is no whitelist file at all (an existing one is removed); a file that would not change is
+    not written and CrowdSec is not reloaded.
+  - A failed lookup keeps the address the last sync learned (and says so once in the API log); the lookup asks four
+    services, then Cloudflare's trace of this server's domain.
+  - Before a reload CrowdSec checks the new files itself (`crowdsec -t`): a file it refuses is put back as it was and the
+    running CrowdSec is never touched. After a reload DCS watches it for 5 seconds; if it died anyway the earlier files go
+    back, CrowdSec is started again and you are told.
+  - Why Docker did not restart it: DCS reloaded CrowdSec with `docker kill -s HUP`, and Docker treats any `docker kill` of a
+    container without a stop signal (the CrowdSec image has none) as a stop, so its `unless-stopped` policy no longer
+    applied once CrowdSec exited. The reload now signals the process inside the container (`docker exec … kill -HUP 1`),
+    and a CrowdSec that dies is restarted by Docker as the policy says (the page's Reload and hub changes too).
+  - A new `crowdsec_down` event (on by default, high): every minute, CrowdSec not running is said once, with the
+    container's state and the last line of its log, and cleared when it runs again. A CrowdSec that exited with an error
+    is started again, and a parser file of DCS's that CrowdSec refused is removed first (the next sync writes it right);
+    one stopped on purpose is only reported. `GET /crowdsec/status` carries it as `down_alert`, next to the existing
+    *Start CrowdSec* fix (`POST /crowdsec/service {"action": "start"}`, which also clears it).
+
 ## [4.0.51] - 2026-10-11
 
 ### Fixed

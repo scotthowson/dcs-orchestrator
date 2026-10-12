@@ -3865,7 +3865,52 @@ def config_test(st, fs, conf):
             yaml_load_all(txt)
         except YamlError as e:
             return 'crowdsec init: while loading acquisition config: while parsing %s: %s' % (f, e)
+    return parsers_test(fs, conf)
+
+
+def parsers_test(fs, conf):
+    """the local parser files (parsers/<stage>/*.yaml|yml): a node with nothing in it is fatal, as in 1.8.1 (a whitelist with no ip, cidr or
+    expression entry: "Node is empty"). Files with another extension are not read."""
+    base = conf['config_dir'].rstrip('/') + '/parsers'
+    for stage in sorted(fs.listdir(base) or []):
+        for fn in sorted(fs.listdir(base + '/' + stage) or []):
+            if not fn.endswith(('.yaml', '.yml')):
+                continue
+            f = '%s/%s/%s' % (base, stage, fn)
+            try:
+                docs = yaml_load_all(fs.read(f) or '')
+            except YamlError as e:
+                return 'crowdsec init: while loading parsers: failed to load parser config: %s: %s' % (f, e)
+            for d in docs:
+                if not isinstance(d, dict):
+                    continue
+                wl = d.get('whitelist') if isinstance(d.get('whitelist'), dict) else {}
+                if not any(d.get(k) for k in ('grok', 'statics', 'nodes', 'stash')) and not any(wl.get(k) for k in ('ip', 'cidr', 'expression')):
+                    return "crowdsec init: while loading parsers: failed to load parser config: failed to compile node '%s' in '%s' : Node is empty" % (d.get('name', ''), f)
     return None
+
+
+def crowdsec_sighup(run, c, via_docker_kill):
+    """SIGHUP to the crowdsec process: it reloads, or dies on a configuration it cannot load. Docker restarts a process that died (the
+    policy is unless-stopped) - unless the signal came from `docker kill`, which Docker counts as a stop (no StopSignal in the image)."""
+    st = run.st
+    fs = FS(st)
+    t = now()
+    conf = crowdsec_conf(fs)
+    log_add(st, t, 'info', 'SIGHUP received, reloading')
+    fatal = config_test(st, fs, conf)
+    if fatal is None and '# fake-crowdsec: crash on start' in (fs.read(conf['profiles_path']) or ''):
+        fatal = 'fake-crowdsec: crash on start'
+    if fatal is None:
+        log_add(st, t + 0.002, 'info', 'Reload is finished')
+        run.touch()
+    elif via_docker_kill:
+        log_add(st, t + 0.002, 'fatal', 'reload handler failure: ' + fatal.replace('crowdsec init: ', 'unable to init crowdsec: '))
+        c.update({'status': 'exited', 'exit_code': 1, 'finished': t + 0.003})
+        st['crash_note'] = fatal
+        run.touch()
+    else:
+        boot_crowdsec(run, c)
 
 
 def boot_crowdsec(run, c, why='start'):
@@ -3936,15 +3981,7 @@ def docker_lifecycle(run, verb, argv):
                 rc = 1
                 continue
             if c['name'] == 'CrowdSec' and sig in ('HUP', '1'):
-                fs = FS(st)
-                conf = crowdsec_conf(fs)
-                log_add(st, t, 'info', 'SIGHUP received, reloading')
-                fatal = config_test(st, fs, conf)
-                if fatal or '# fake-crowdsec: crash on start' in (fs.read(conf['profiles_path']) or ''):
-                    boot_crowdsec(run, c)
-                else:
-                    log_add(st, t + 0.002, 'info', 'Reload is finished')
-                    run.touch()
+                crowdsec_sighup(run, c, True)
             else:
                 c.update({'status': 'exited', 'exit_code': {'TERM': 143, '15': 143, 'INT': 130, '2': 130}.get(sig, 137), 'finished': t})
                 if c['name'] == 'CrowdSec':
@@ -4253,6 +4290,9 @@ def exec_util(run, cmd):
         unsupported(run, ['exec', 'CrowdSec'] + cmd)
     if prog in ('id', 'whoami'):
         out('uid=0(root) gid=0(root)' if prog == 'id' else 'root')
+        raise Exit(0)
+    if prog == 'kill' and args in (['-HUP', '1'], ['-1', '1'], ['-s', 'HUP', '1']):     # busybox kill: the crowdsec process is PID 1
+        crowdsec_sighup(run, find_container(run.st, 'CrowdSec'), False)
         raise Exit(0)
     unsupported(run, ['exec', 'CrowdSec'] + cmd)
 

@@ -4567,6 +4567,7 @@ cst_setup() {
 printf '%s\n' "\$(printf '%q ' "\$@")" >> "$CST/argv.log"      # one write per call: parallel calls do not mix their lines
 [[ "\$1" == cp ]] && printf '%s %s\n' "\$(stat -c %a "\$2" 2>/dev/null)" "\$3" >> "$CST/cp-modes.log"
 [[ "\$1 \$2" == "restart Traefik" && -e "$CST/fail-traefik-restart" ]] && { echo "Error response from daemon: cannot restart container Traefik" >&2; exit 1; }
+[[ "\$*" == "exec CrowdSec crowdsec -t" && -e "$CST/no-config-test" ]] && { echo 'OCI runtime exec failed: exec: "crowdsec": executable file not found in \$PATH: unknown' >&2; exit 127; }
 export FAKE_CS_DIR="$CST/fake"
 exec python3 "$CST_MOCK_RUN" "\$@"
 SH
@@ -5874,7 +5875,7 @@ cst_allowlist_parser() {
     hook="$CST/fake/rootfs/etc/crowdsec/parsers/s02-enrich/dcs-whitelist.yaml"
     check "allowlist/parser: CrowdSec's whitelist parser has them all" "192.0.2.66 198.51.100.9 2a00:1450:4001::5 198.18.0.0/16" \
         "$(sed -n 's/^    - //p' "$hook" | tr '\n' ' ' | sed 's/ $//')"
-    check "allowlist/parser: …and CrowdSec was told to reload" yes "$(grep -q 'kill -s HUP CrowdSec' <(sed 's/\\//g' "$CST/argv.log") && echo yes || echo no)"
+    check "allowlist/parser: …and CrowdSec was told to reload" yes "$(grep -q 'exec CrowdSec kill -HUP 1' <(sed 's/\\//g' "$CST/argv.log") && echo yes || echo no)"
     cst_call admin DELETE /crowdsec/allowlist/192.0.2.66
     cst_is "allowlist/parser: remove" 200
     cst_call admin DELETE /crowdsec/allowlist/198.18.0.0/16
@@ -5930,10 +5931,10 @@ cst_home_ipv6() {
     mark=$(cst_argv_n)
     cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
     check "home IPv6: a new prefix replaces the old one" "1 0" "$(grep -c '2001:db8:99:5::/64' "$w") $(grep -c '2001:db8:77:5::' "$w")"
-    check "home IPv6: …CrowdSec reloads once" 1 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'kill -s HUP CrowdSec')"
+    check "home IPv6: …CrowdSec reloads once" 1 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'exec CrowdSec kill -HUP 1')"
     mark=$(cst_argv_n)
     cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
-    check "home IPv6: …and the same prefix again changes nothing" 0 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'kill -s HUP CrowdSec')"
+    check "home IPv6: …and the same prefix again changes nothing" 0 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'exec CrowdSec kill -HUP 1')"
     # -- a router that hands out several /64s: the setting widens the network
     cst_env CROWDSEC_HOME_IPV6_PREFIX 56
     cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.2"}'
@@ -6043,7 +6044,7 @@ cst_home_allowlist() {
 # ---- media apps: CROWDSEC_MEDIA_APPS is a parser file beside the whitelist's (what CrowdSec makes of it is tests/crowdsec-media-apps.sh) ----------------
 
 cst_ma_names() { sed -n 's/^.*service_addr) in \[\(.*\)\]$/\1/p' "$1" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//'; }       # the backends a file lists, as written
-cst_hups_since() { cst_argv_since "$1" | sed 's/\\//g' | grep -c 'kill -s HUP CrowdSec'; }                                        # how often CrowdSec was told to reload since a mark
+cst_hups_since() { cst_argv_since "$1" | sed 's/\\//g' | grep -c 'exec CrowdSec kill -HUP 1'; }                                        # how often CrowdSec was told to reload since a mark
 cst_ma_sync() { cst_call admin POST /crowdsec/trust '{"ip":"198.18.70.1"}'; }                                                     # (a request that runs the sync)
 
 cst_media_apps() {
@@ -6226,6 +6227,105 @@ cst_part_mediaapps() {
     cst_media_apps
 }
 
+# ---- the whitelist never takes CrowdSec down (2026-10-11: a failed address lookup wrote a whitelist with no address in it, the reload killed
+# CrowdSec, Docker did not restart it, and the Traefik bouncer answered 403 to every visitor for hours) ----------------------------------------
+
+# cst_src CODE — CODE run inside the API's own functions (sourced, as the minute clock runs them), with the stand-in as docker
+cst_src() { local code="$1"; ( set +u; export BASE_DIR="$CST" PATH="$CST/bin:$PATH"; unset CROWDSEC_MEDIA_APPS CROWDSEC_TRUSTED_IPS; set --; source "$CST_API" >/dev/null 2>&1; set +eu; eval "$code" ) 2>>"$CST/api-stderr.log"; }
+cst_cs_state() { cst_dk inspect -f '{{.State.Status}} {{.State.ExitCode}}' CrowdSec 2>/dev/null; }
+cst_audit_since() { tail -n +$(( $1 + 1 )) "$CST/.data/audit.jsonl" 2>/dev/null | grep -c "$2" || true; }
+
+cst_wl_safety() {
+    local w m state mark a0 ino st0 before bad
+    w="$CST/fake/rootfs/etc/crowdsec/parsers/s02-enrich/dcs-whitelist.yaml"
+    m="$CST/fake/rootfs/etc/crowdsec/parsers/s02-enrich/dcs-media-apps.yaml"
+    state="$CST/.data/crowdsec-whitelist.json"
+    bad='_crowdsec_media_apps_yaml() { printf "name: custom/dcs-media-apps\nwhitelist:\n  reason: \"x\"\n"; }'      # a parser file CrowdSec cannot load
+    cst_world data
+
+    # -- nothing to trust (no public address known, the trusted list emptied): no file, never one with no address in it
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.80.1"}'
+    cst_is "whitelist safety: a trusted address" 200
+    check "whitelist safety: …it is in the file" 1 "$(grep -c '^    - 198.18.80.1$' "$w")"
+    ino=$(stat -c %i "$w"); mark=$(cst_argv_n)
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.80.1"}'
+    check "whitelist safety: the same sync again writes nothing and reloads nothing" "$ino 0 0" "$(stat -c %i "$w") $(cst_hups_since "$mark") $(cst_argv_since "$mark" | grep -c 'crowdsec -t')"
+    mark=$(cst_argv_n)
+    cst_call admin DELETE /crowdsec/trust/198.18.80.1
+    cst_is "whitelist safety: the last address goes" 200
+    check "whitelist safety: …no address left: the file is removed, not written empty" no "$([[ -e "$w" ]] && echo yes || echo no)"
+    check "whitelist safety: …CrowdSec checked it, reloaded once and runs" "1 1 running 0" "$(cst_argv_since "$mark" | grep -c 'exec CrowdSec crowdsec -t') $(cst_hups_since "$mark") $(cst_cs_state)"
+    check "whitelist safety: …the sync says so" "true null []" "$(jq -c -r '"\(.reloaded) \(.error) \(.addresses)"' "$state")"
+    check "whitelist safety: …no ip: [] anywhere" 0 "$(grep -rl 'ip: \[\]' "$CST/fake/rootfs/etc/crowdsec/parsers" 2>/dev/null | wc -l | tr -d ' ')"
+    mark=$(cst_argv_n)
+    cst_call admin DELETE /crowdsec/trust/198.18.80.1
+    check "whitelist safety: …still nothing to trust: no file and no reload" "no 0" "$([[ -e "$w" ]] && echo yes || echo no) $(cst_hups_since "$mark")"
+
+    # -- every address lookup fails: the address an earlier sync learned stays trusted
+    jq -n '{public_ip: "198.51.100.77", addresses: ["198.51.100.77"]}' > "$state"
+    rm -f "$CST/.data/ddns-current-ip"
+    cst_call admin POST /crowdsec/trust '{"ip":"198.18.80.2"}'
+    cst_is "whitelist safety: a sync whose lookup fails" 200
+    check "whitelist safety: …the last known public address stays in the file" "198.18.80.2 198.51.100.77" "$(sed -n 's/^    - //p' "$w" | sort | tr '\n' ' ' | sed 's/ $//')"
+    check "whitelist safety: …and in the sync's state" 198.51.100.77 "$(jq -r .public_ip "$state")"
+    check "whitelist safety: …the log says it once" 1 "$(grep -c 'public address lookup failed, keeping 198.51.100.77' "$CST/logs/api-server.log" 2>/dev/null || true)"
+
+    # -- a file CrowdSec refuses: crowdsec -t says so before any reload, the earlier file stays, CrowdSec is not touched
+    before=$(cat "$m"); st0=$(cst_dk inspect -f '{{.RestartCount}} {{.State.StartedAt}}' CrowdSec); mark=$(cst_argv_n)
+    cst_src "$bad; _crowdsec_whitelist_sync"
+    check "whitelist safety: a file CrowdSec refuses is put back before any reload" yes "$([[ "$(cat "$m")" == "$before" ]] && echo yes || echo no)"
+    check "whitelist safety: …no reload, the same CrowdSec runs" "0 $st0" "$(cst_hups_since "$mark") $(cst_dk inspect -f '{{.RestartCount}} {{.State.StartedAt}}' CrowdSec)"
+    check "whitelist safety: …the sync says why" yes "$(jq -r .error "$state" | grep -q 'CrowdSec refused the new parser files.*Node is empty' && echo yes || echo no)"
+
+    # -- no crowdsec -t to ask (an image without it): the reload kills CrowdSec; the earlier file goes back, CrowdSec is started and runs, it is said
+    : > "$CST/no-config-test"; a0=$(wc -l < "$CST/.data/audit.jsonl"); mark=$(cst_argv_n)
+    cst_src "$bad; _crowdsec_whitelist_sync"
+    rm -f "$CST/no-config-test"
+    check "whitelist safety: the reload killed CrowdSec: the earlier file is back" yes "$([[ "$(cat "$m")" == "$before" ]] && echo yes || echo no)"
+    check "whitelist safety: …CrowdSec was started again and runs" "1 running 0" "$(cst_argv_since "$mark" | grep -c '^start CrowdSec') $(cst_cs_state)"
+    check "whitelist safety: …crowdsec_down is raised once, with the reason" 1 "$(cst_audit_since "$a0" '"action":"crowdsec_down".*died reloading the new parser files (.*Node is empty')"
+    check "whitelist safety: …the sync says what happened" yes "$(jq -r .error "$state" | grep -q 'died reloading.*put the earlier files back' && echo yes || echo no)"
+    cst_uncache
+    cst_call admin GET /crowdsec/status
+    cst_j "whitelist safety: the status carries the alert" '.down_alert.reason | test("died reloading")' true '.down_alert.message | test("every visitor gets 403")' true
+    a0=$(wc -l < "$CST/.data/audit.jsonl")
+    cst_src '_crowdsec_lib; _cs_down_tick'
+    check "whitelist safety: …the minute clock clears it (CrowdSec runs)" "1 null" "$(cst_audit_since "$a0" '"action":"crowdsec_down".*running again') $(jq -c .active "$CST/.data/crowdsec/down.json")"
+    check "whitelist safety: the event has its rule (on, high), made once" "1 true high" \
+        "$(jq -r '[.rules[] | select(.trigger == "crowdsec_down")] | "\(length) \(.[0].enabled) \(.[0].priority)"' "$CST/.api-auth/notifications.json")"
+    check "whitelist safety: …its Discord style" "🛡️|CrowdSec not running" "$(cst_src '_discord_event_style crowdsec_down' | awk -F'|' '{print $1 "|" $3}')"
+    check "whitelist safety: nothing signals CrowdSec with docker kill (Docker would not restart it after)" 0 "$(grep -c '^kill ' "$CST/argv.log")"
+
+    # -- the outage as it happened: 4.0.51's empty whitelist and docker kill -s HUP; Docker does not restart the dead CrowdSec
+    printf 'name: custom/dcs-whitelist\nwhitelist:\n  reason: "trusted by DCS"\n  ip: []\n' > "$w"
+    cst_dk kill -s HUP CrowdSec >/dev/null 2>&1
+    check "outage: CrowdSec died on the reload and stays down" "exited 1" "$(cst_cs_state)"
+    a0=$(wc -l < "$CST/.data/audit.jsonl"); mark=$(cst_argv_n)
+    cst_src '_crowdsec_lib; _cs_down_tick'
+    check "outage: the minute clock says it, with the reason" 1 "$(cst_audit_since "$a0" '"action":"crowdsec_down".*CrowdSec is not running: the container CrowdSec is exited (exit code 1).*Node is empty.*every visitor gets 403')"
+    check "outage: …removes DCS's refused file and starts CrowdSec: it runs" "no 1 running 0" "$([[ -e "$w" ]] && echo yes || echo no) $(cst_argv_since "$mark" | grep -c '^start CrowdSec') $(cst_cs_state)"
+    a0=$(wc -l < "$CST/.data/audit.jsonl")
+    cst_src '_crowdsec_lib; _cs_down_tick'
+    check "outage: …and clears it at the next minute" 1 "$(cst_audit_since "$a0" '"action":"crowdsec_down".*running again')"
+
+    # -- stopped by a person (a stop signal's exit code): said, not started behind their back; Start CrowdSec on the page starts it and clears it
+    cst_mock --mock-set status=exited
+    a0=$(wc -l < "$CST/.data/audit.jsonl"); mark=$(cst_argv_n)
+    cst_src '_crowdsec_lib; _cs_down_tick'; cst_src '_crowdsec_lib; _cs_down_tick'
+    check "stopped: said once, and left stopped" "1 0 exited 137" "$(cst_audit_since "$a0" '"action":"crowdsec_down".*not running') $(cst_argv_since "$mark" | grep -c '^start CrowdSec') $(cst_cs_state)"
+    cst_uncache
+    cst_call admin GET /crowdsec/status
+    cst_j "stopped: the status offers the start" '.state' stopped '.fixes[0].label' 'Start CrowdSec' '.fixes[0].path' /crowdsec/service '.fixes[0].body.action' start '.down_alert != null' true
+    cst_call admin POST /crowdsec/service '{"action":"start"}'
+    cst_is "stopped: Start CrowdSec" 200
+    check "stopped: …it runs and the alert is cleared at once" "running 0 null" "$(cst_cs_state) $(jq -c .active "$CST/.data/crowdsec/down.json")"
+}
+
+cst_part_wlsafety() {
+    echo "CrowdSec page: the whitelist never takes CrowdSec down; CrowdSec down is said and fixed"
+    cst_wl_safety
+}
+
 # ---- bouncers, machines, the container, its log, the community list ------------------------------------------------------------------
 
 cst_services_bouncers() {
@@ -6360,7 +6460,7 @@ cst_services_service() {
     cst_j "service: reload (a HUP, no restart)" '.action' reload '.state' running
     cst_call admin POST /crowdsec/service '{"action":"start"}'
     cst_j "service: start when it runs already" '.success' true '.state' running
-    check "service: reload signalled the container, and restarted nothing" "1 0" "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'kill -s HUP CrowdSec') $(cst_argv_since "$mark" | grep -c 'restart CrowdSec')"
+    check "service: reload signalled the container, and restarted nothing" "1 0" "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'exec CrowdSec kill -HUP 1') $(cst_argv_since "$mark" | grep -c 'restart CrowdSec')"
     check "service: it is audited" $(( a0 + 1 )) "$(cst_audit_n '"action":"auth.crowdsec_service".*restart CrowdSec')"
     cst_mock --mock-set status=exited
     cst_call admin POST /crowdsec/service '{"action":"reload"}'
@@ -6834,7 +6934,7 @@ cst_hub_change() {
     cst_j "hub/install" '.success' true '.action' install '.type' collections '.name' crowdsecurity/nginx '.message | test("crowdsecurity/nginx installed")' true '.message | test("reloaded")' true
     cst_call admin GET /crowdsec/hub
     cst_j "hub/install: it is there, with what it brings" '.counts.collections' 7 '.counts.scenarios' 54 '.counts.parsers' 12 '.installed.collections | map(.name) | index("crowdsecurity/nginx") != null' true
-    check "hub/install: CrowdSec was told to reload" 1 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'kill -s HUP CrowdSec')"
+    check "hub/install: CrowdSec was told to reload" 1 "$(cst_argv_since "$mark" | sed 's/\\//g' | grep -c 'exec CrowdSec kill -HUP 1')"
     check "hub/install: it is audited" 1 "$(grep -c '"action":"auth.crowdsec_hub".*install collections crowdsecurity/nginx' "$CST/.data/audit.jsonl")"
     cst_call admin POST /crowdsec/hub/install '{"type":"collections","name":"crowdsecurity/nginx"}'
     cst_is "hub/install: again is not an error" 200
@@ -9095,7 +9195,7 @@ cst_security_injection() {
     cst_call admin GET '/crowdsec/decisions?limit=100'
     check "injection/free text: the notes are in the list, cleaned of control characters" yes "$(jq -e '[.decisions[] | select(.value | startswith("198.18.81.")) | .scenario] | length >= 12' <<< "$CST_BODY" >/dev/null 2>&1 && echo yes || echo no)"
     # no shell is ever started in the container, only the programs the page needs
-    check "injection: every call to the container runs one of the known programs, never a shell" 0 "$(sed 's/\\//g' "$CST/argv.log" | awk '$1 == "exec" { i = 2; if ($i == "-i") i++; if ($(i+1) !~ /^(cscli|crowdsec|cat|ls|rm|mkdir|test)$/) print }' | wc -l | tr -d ' ')"
+    check "injection: every call to the container runs one of the known programs, never a shell" 0 "$(sed 's/\\//g' "$CST/argv.log" | awk '$1 == "exec" { i = 2; if ($i == "-i") i++; if ($(i+1) !~ /^(cscli|crowdsec|cat|ls|rm|mkdir|test|kill)$/) print }' | wc -l | tr -d ' ')"
     check "injection: …and docker itself is asked only for what the page needs" "" "$(awk '{print $1}' "$CST/argv.log" | sort -u | grep -vxE 'ps|inspect|exec|cp|restart|start|logs|kill|version|compose|info' | tr '\n' ' ')"
 }
 
@@ -10160,8 +10260,8 @@ cst_main() {
     mkdir -p "$CST_ROOT"
     # the stand-in is a script of 7000 lines and every docker call of every request starts it: from its bytecode that costs a third
     python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' "$CST_MOCK" "$CST_ROOT/mock.pyc" 2>/dev/null && CST_MOCK_RUN="$CST_ROOT/mock.pyc"
-    local -a lanes=("a:status allowlist alerts units" "b:bans" "c:settings" "d:notify" "e:services hub" "f:security" "g:large mediaapps" "h:plugin" "i:importbig" "j:cloudflare")
-    [[ "${SMOKE_CS_LANES:-}" != 1 ]] || lanes=("all:status bans alerts allowlist services hub settings notify security units large plugin importbig mediaapps cloudflare")
+    local -a lanes=("a:status allowlist alerts units" "b:bans" "c:settings" "d:notify" "e:services hub" "f:security" "g:large mediaapps wlsafety" "h:plugin" "i:importbig" "j:cloudflare")
+    [[ "${SMOKE_CS_LANES:-}" != 1 ]] || lanes=("all:status bans alerts allowlist services hub settings notify security units large plugin importbig mediaapps wlsafety cloudflare")
     for lane in "${lanes[@]}"; do
         name="${lane%%:*}"; want=""
         for part in ${lane#*:}; do
