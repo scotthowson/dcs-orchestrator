@@ -3,6 +3,37 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Technitium: the house's rules, with the devices that do not follow them.** A **House** card on the Kids tab: the same
+  rules as a group (categories, time windows, SafeSearch, YouTube, exceptions, extras, pause) for every device of the
+  house, as Advanced Blocking's group for `0.0.0.0/0` and `::/0` (`POST /dns/technitium/house`). A kids' group gets the
+  house's rules and its own together and can only add to them (its exception never undoes a house block). Per device, on
+  the Devices tab and in the drawer: **Follows the house rules** (`house_exempt`: off for your own PC and phone: nothing of
+  the house's, a kids' group's rules still apply; Technitium's own ad and threat lists stay global), **In group…**, its own
+  **allow list** (wins over the house and its group) and **block list**, and its own **extra categories, YouTube and one
+  window** (`override`): such a device is a group of its own in Advanced Blocking. **Quick actions** in the Kids tab's
+  header, each undoable, audited and ended by the minute clock: *Pause the house 30 min* (no rule for anyone; a device
+  blocked by hand stays blocked), *Bedtime now* (every group's bedtime until its usual end), *Allow <site> for an hour*
+  (from a device's activity, for that device or the whole house) (`POST /dns/technitium/house/pause`, `/house/bedtime`,
+  `/house/allow`). Proven on `technitium/dns-server` 15.6.1: a house block hits a device in no group and a kid in a group
+  (with the group's own), the exempt PC resolves as usual, a device's own exception and an hour's exception win.
+- **Technitium: more YouTube control.** `youtube` is now off, moderate, strict, **kids_only** (YouTube blocked, YouTube Kids
+  and the names it needs left alone) or **blocked** (every YouTube name, YouTube Kids too: the new **youtube** category,
+  which a window can also block alone). A time window can carry a YouTube of its own (strict at night, blocked during
+  homework). The editor says what DNS cannot do: no Shorts, channel, comment or ad control.
+- **Technitium: more grouping control.** A time window can be a **week grid** (7 days × 24 hours, painted with the mouse or
+  a finger) instead of from/to/days. **Clone** a group (`POST /dns/technitium/groups/{id}/clone`), a **colour and icon** per
+  group (on its card, its devices' rows and the Dashboard tile), and the **weekly digest** (`technitium_weekly_digest`, off
+  by default: Monday 08:00, per group and for the house, the lookups, blocked, top 5, top blocked and the names first seen
+  this week, through the notification rules).
+- **Nothing changes at the update.** The house starts empty and no device is exempt or has rules of its own: the config the
+  minute clock renders is the one 4.0.54 wrote, so nothing is written. The whole-house SafeSearch switch
+  (`POST /dns/technitium/safesearch`) is now the house's SafeSearch and YouTube: the Forwarder zones an older DCS made for
+  it are removed once, and the house group answers the safe names instead.
+
 ## [4.0.54] - 2026-10-12
 
 ### Fixed

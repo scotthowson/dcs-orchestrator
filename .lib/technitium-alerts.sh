@@ -7,8 +7,8 @@
 # up), each raised once and cleared when it is over, through the notification rules (Discord, ntfy) and the activity
 # log: a server not answering (two checks in a row), the two out of step (fingerprints different for 10 minutes and a
 # sync that failed), blocklists not updated for 48 hours or failing, the DHCP pool over 80 %, a device seen for the
-# first time (one digest when more than 5 come at once), and two that are off by default (a kids' group entering or
-# leaving bedtime, a device's block running out). Their rules are made once, the first time the clock runs, so they
+# first time (one digest when more than 5 come at once), and three that are off by default (a kids' group entering or
+# leaving bedtime, a device's block running out, the weekly digest of each kids' group and the house). Their rules are made once, the first time the clock runs, so they
 # show (and switch) on the Notifications page like every other event.
 #
 # What /dns/technitium/status adds per server (_tta_more): the version and whether Technitium has a newer one
@@ -49,7 +49,8 @@ TTA_RULES='[
  {"trigger":"technitium_dhcp_pool","enabled":true,"priority":"high","name":"Technitium: DHCP pool nearly full"},
  {"trigger":"technitium_new_device","enabled":true,"priority":"high","name":"Technitium: a new device on the network"},
  {"trigger":"technitium_bedtime","enabled":false,"priority":"low","name":"Technitium: a group entered or left bedtime"},
- {"trigger":"technitium_device_blocked_expired","enabled":false,"priority":"low","name":"Technitium: a device block ran out"}]'
+ {"trigger":"technitium_device_blocked_expired","enabled":false,"priority":"low","name":"Technitium: a device block ran out"},
+ {"trigger":"technitium_weekly_digest","enabled":false,"priority":"low","name":"Technitium: the week of each kids group and the house"}]'
 
 _tta_state() { _api_state_file "$TTA_STATE" '{}' object >/dev/null 2>&1 || true; jq -c . "$TTA_STATE" 2>/dev/null || printf '{}'; }
 _tta_set() { mkdir -p "$TT_DIR" 2>/dev/null; _api_state_file "$TTA_STATE" '{}' object >/dev/null 2>&1 || true; _api_jq_update_file "$TTA_STATE" "$@" || true; }
@@ -197,16 +198,20 @@ _tta_clear() {
     return 0
 }
 
-# the events' rules, made once (the five that matter on, bedtime and a block running out off): the Notifications page lists and switches them
+# the events' rules, each made once (the five that matter on; bedtime, a block running out and the weekly digest off): the
+# Notifications page lists and switches them, and a rule deleted there stays deleted (rules_seeded: the events seeded already;
+# true from before the list: the first seven)
 _tta_seed_rules() {
-    jq -e '.rules_seeded == true' >/dev/null <<< "$(_tta_state)" && return 0
+    local seeded
+    seeded=$(jq -c --argjson r "$TTA_RULES" 'if .rules_seeded == true then [$r[:7][].trigger] else (.rules_seeded // []) end' <<< "$(_tta_state)")
+    jq -e --argjson r "$TTA_RULES" --argjson d "$seeded" '[$r[].trigger] - $d | length == 0' >/dev/null <<< '{}' && return 0
     _init_notifications_file 2>/dev/null
-    _api_jq_update_file "$NOTIFICATIONS_FILE" --argjson r "$TTA_RULES" --arg ts "$(_api_now_iso)" '
+    _api_jq_update_file "$NOTIFICATIONS_FILE" --argjson r "$TTA_RULES" --argjson d "$seeded" --arg ts "$(_api_now_iso)" '
         (.rules // []) as $have
-        | .rules = $have + [$r[] | select(.trigger as $t | $have | any(.trigger == $t) | not)
+        | .rules = $have + [$r[] | select(.trigger as $t | ($have | any(.trigger == $t) | not) and ($d | index($t) | not))
             | {id: ("rule_" + .trigger), name, enabled, trigger, target: "*", priority, tags: ["technitium"], title_template: "", message_template: "",
                cooldown_minutes: null, created_at: $ts}]' || return 0
-    _tta_set '.rules_seeded = true'
+    _tta_set --argjson r "$TTA_RULES" '.rules_seeded = [$r[].trigger]'
 }
 
 # =============================================================================
@@ -243,6 +248,7 @@ _tta_tick_locked() {
     _tta_check_devices "$now"
     _tta_check_bedtime
     _tta_check_blocks "$now"
+    _tta_check_digest "$now"
     _tta_backup_nightly "$now"
     _tta_set --argjson now "$now" '.last_tick = $now'
     return 0
@@ -343,7 +349,7 @@ _tta_check_bedtime() {
     active=$(jq -c '.bedtime_active // []' <<< "$(_tt_state)")
     seen=$(jq -c '.bedtime_seen // null' <<< "$(_tta_state)")
     # the groups' names, kept: a group deleted while in bedtime is still named when it leaves it
-    names=$(jq -c --argjson k "$(jq -c '.group_names // {}' <<< "$(_tta_state)")" '$k + ([.groups[] | {key: .id, value: .name}] | from_entries)' <<< "$(_tt_model)")
+    names=$(jq -c --argjson k "$(jq -c '.group_names // {}' <<< "$(_tta_state)")" '$k + {house: "House"} + ([.groups[] | {key: .id, value: .name}] | from_entries)' <<< "$(_tt_model)")
     _tta_set --argjson a "$active" --argjson n "$names" '.bedtime_seen = $a | .group_names = $n'
     [[ "$seen" != null && "$seen" != "$active" ]] || return 0
     while IFS=$'\t' read -r g name; do
@@ -368,6 +374,23 @@ _tta_check_blocks() {
     done < <(jq -r --argjson s "$seen" --argjson now "$now" '.devices[]? | select(.id as $i | $s[$i] != null and (.blocked_until // 0) == $s[$i] and $s[$i] <= $now)
         | (.nickname // .hostname // .ip // .id)' "$TT_DEVICES")
     _tta_set --argjson c "$cur" '.blocked_seen = $c'
+}
+
+# the weekly digest (technitium_weekly_digest, off by default: nothing is asked of Technitium while its rule is off): on Monday
+# from 08:00 (local time) to the next morning, once, one message per kids' group and one for the house (_tt_digest)
+_tta_check_digest() {
+    local now="${1:-$(_tt_now)}" dow mon out name head msg
+    jq -e '[.rules[]? | select(.trigger == "technitium_weekly_digest" and .enabled == true)] | length > 0' "$NOTIFICATIONS_FILE" >/dev/null 2>&1 || return 0
+    dow=$(date -d "@$now" +%u)
+    mon=$(( now - (dow - 1) * 86400 - 10#$(date -d "@$now" +%H) * 3600 - 10#$(date -d "@$now" +%M) * 60 - 10#$(date -d "@$now" +%S) + 8 * 3600 ))
+    (( now >= mon && now < mon + 86400 )) || return 0
+    (( $(jq -r '.digest_at // 0' <<< "$(_tta_state)") < mon )) || return 0
+    _tta_set --argjson now "$now" '.digest_at = $now'
+    out=$(_tt_digest "$now") || return 0
+    while IFS=$'\t' read -r name head msg; do
+        [[ -n "$name" ]] || continue
+        _fire_notifications technitium_weekly_digest "group=$name" "headline=$head" "message=$msg" "status=digest" "fingerprint=digest-$name-$mon" 2>/dev/null
+    done < <(jq -r '.[] | [.name, .headline, .message] | @tsv' <<< "$out")
 }
 
 # =============================================================================
