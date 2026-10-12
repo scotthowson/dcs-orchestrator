@@ -145,7 +145,7 @@ MQTT, DNS), *Optional* services can be left out.
 | 🧰 [Tools](#tools) | 18 | IT-Tools, Stirling-PDF, Apache Guacamole, BentoPDF |
 | 📝 [Productivity](#productivity) | 27 | Paperless-ngx, Mealie, BookStack, Actual Budget |
 | ⚙️ [Automation](#automation) | 14 | n8n, Home Assistant, Node-RED, ntfy |
-| 🛡️ [Security](#security) | 8 | Vaultwarden, Authelia, CrowdSec, WireGuard Easy |
+| 🛡️ [Security](#security) | 9 | Vaultwarden, Authelia, CrowdSec, WireGuard Easy |
 | 🔌 [Network](#network) | 9 | Pi-hole, AdGuard Home, Blocky, Cloudflare Tunnel |
 | 💾 [Storage](#storage) | 8 | Nextcloud, MinIO Object Storage, Duplicati, File Browser |
 | ⬇️ [Download](#download) | 8 | qBittorrent, SABnzbd, autobrr, Deluge |
@@ -358,8 +358,8 @@ MQTT, DNS), *Optional* services can be left out.
 | 🛰️ **Headscale**<br>[`headscale`](../.templates/headscale) | Headscale is a self-hosted Tailscale control server: your own mesh VPN with MagicDNS and no account at Tailscale | 8585 | `networking-security` | Own sign-in |
 | 🔎 **SearXNG**<br>[`searxng`](../.templates/searxng) | Privacy-respecting metasearch engine | 8888 | `web-applications` |  |
 | 🔗 **Tailscale**<br>[`tailscale`](../.templates/tailscale) | Joins this host to your Tailscale network (or a Headscale one) so you reach it from anywhere without opening ports | — | `networking-security` |  |
-| 🛡️ **VPN (Private Internet Access, WireGuard)**<br>[`vpn-gluetun`](../.templates/vpn-gluetun) | DCS's own VPN: chosen containers through a WireGuard tunnel to PIA, with a kill switch and the forwarded port in qBittorrent (docs/VPN.md) | — | `networking-security` | Not routed: `gluetun`; connect on Security → VPN |
 | 🔐 **Vaultwarden**<br>[`vaultwarden`](../.templates/vaultwarden) | Lightweight, self-hosted Bitwarden-compatible password manager written in Rust | 8222 | `networking-security` | Own sign-in |
+| 🛡️ **VPN (Private Internet Access, WireGuard)**<br>[`vpn-gluetun`](../.templates/vpn-gluetun) | DCS's own VPN: a WireGuard tunnel to Private Internet Access through Gluetun, for the containers you choose and nothing else (qBittorrent, say) | 8899 | `networking-security` | Not routed: `gluetun` |
 | 🔒 **WireGuard Easy**<br>[`wg-easy`](../.templates/wg-easy) | Simplest way to run WireGuard VPN with a web-based management UI | — | `networking-security` |  |
 
 ### Network
