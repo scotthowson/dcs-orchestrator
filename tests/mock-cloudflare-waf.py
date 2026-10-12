@@ -16,9 +16,12 @@ Cloudflare (under /client/v4, Bearer token):
 CrowdSec's local API (X-Api-Key, checked against the bouncers of the mock-crowdsec state when it is given, else against "lapi_keys"):
     GET  /v1/decisions?type=&scopes=&origins=                 the decisions set with POST /_mock/decisions ("null" when none, like CrowdSec)
 Control (no auth): POST /_mock/config {…merged into the configuration}, POST /_mock/decisions [...], GET /_mock/state.
+    POST /_mock/config {"stick_lists": true} marks every list there now as stuck (a bulk operation that never ends at Cloudflare):
+    each PUT/POST of its items answers 429 (10040) with retry-after: 60 while the ratelimit header shows the budget untouched; a list
+    made later is not stuck. "retry_after": N adds retry-after: N to the 429 of ratelimit_puts.
 Every request is appended to state["calls"] as "METHOD path" (the Authorization and X-Api-Key headers are kept apart, in
 state["auth_seen"], so a test can say which token reached the API)."""
-import http.server, json, sys, urllib.parse, pathlib, itertools, threading, ipaddress
+import http.server, json, sys, urllib.parse, pathlib, itertools, threading, ipaddress, re
 
 PORTF, STATEF = sys.argv[1], pathlib.Path(sys.argv[2])
 CS_STATE = pathlib.Path(sys.argv[3]) if len(sys.argv) > 3 else None
@@ -66,11 +69,13 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, obj):
+    def _send(self, code, obj, headers=None):
         body = (json.dumps(obj) if not isinstance(obj, (bytes, str)) else obj)
         body = body.encode() if isinstance(body, str) else body
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -96,9 +101,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._lapi(method, p, q)
             auth = self.headers.get('Authorization', '')
             S['auth_seen'].append(auth[7:] if auth.startswith('Bearer ') else '(none)')
+            self.extra = {}
             code, obj = self._cf(method, p, q, body, auth[7:] if auth.startswith('Bearer ') else '')
             save()
-            self._send(code, obj)
+            self._send(code, obj, self.extra)
 
     def do_GET(self): self._route('GET')
     def do_POST(self): self._route('POST')
@@ -109,6 +115,10 @@ class H(http.server.BaseHTTPRequestHandler):
     # ---- control --------------------------------------------------------------------------------------------
     def _control(self, method, p, body):
         if p == '/_mock/config' and method == 'POST' and isinstance(body, dict):
+            if body.pop('stick_lists', False):
+                for ls in S['lists'].values():
+                    for l in ls:
+                        l['stuck'] = True
             S['config'].update(body); save(); return self._send(200, S['config'])
         if p == '/_mock/decisions' and method == 'POST' and isinstance(body, list):
             S['decisions'] = body; save(); return self._send(200, {'n': len(body)})
@@ -231,8 +241,11 @@ class H(http.server.BaseHTTPRequestHandler):
             l = next((x for x in lists if x['id'] == rest[0]), None)
             if not l:
                 return err(404, 10001, 'list not found')
+            if len(rest) == 2 and rest[1] == 'items' and method in ('PUT', 'POST') and l.get('stuck'):
+                self.extra = {'ratelimit': '"default";r=1199;t=1', 'retry-after': '60'}
+                return err(429, 10040, 'you have been ratelimited please wait and try again')
             if len(rest) == 1 and method == 'DELETE':
-                ref = any(('$' + l['name']) in r['expression'] for rs in S['rulesets'].values() for r in rs['rules'])
+                ref = any(self._names(r['expression'], l['name']) for rs in S['rulesets'].values() for r in rs['rules'])
                 if ref:
                     return err(400, 10017, 'list is referenced by one or more filters')
                 lists.remove(l)
@@ -245,6 +258,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     if S['config'].get('ratelimit_puts', 0) > 0:
                         S['config']['ratelimit_puts'] -= 1
                         if S['config'].get('ratelimit_mode', 'http') == 'http':
+                            if S['config'].get('retry_after'):
+                                self.extra = {'retry-after': str(S['config']['retry_after'])}
                             return err(429, 971, 'you have been ratelimited please wait and try again')
                         op = hexid(); S['ops'][op] = {'polls': 0, 'error': 'you have been ratelimited please wait and try again'}
                         return env(200, {'operation_id': op})
@@ -332,12 +347,17 @@ class H(http.server.BaseHTTPRequestHandler):
                 return "filter parsing error: could not find list '%s'" % word.strip('()$')
         return ''
 
+    @staticmethod
+    def _names(expr, name):
+        # $dcs_crowdsec_bans_2 does not name $dcs_crowdsec_bans
+        return re.search(r'\$' + re.escape(name) + r'(?![A-Za-z0-9_])', expr or '') is not None
+
     def _rule_in(self, r):
         return {'id': hexid(), 'version': '1', 'ref': r.get('ref') or '', 'expression': r.get('expression', ''), 'action': r.get('action'),
                 'enabled': r.get('enabled', True), 'description': r.get('description', ''), 'last_updated': '2026-10-09T12:00:00Z'}
 
     def _list_out(self, l):
-        refs = sum(1 for rs in S['rulesets'].values() for r in rs['rules'] if ('$' + l['name']) in r['expression'])
+        refs = sum(1 for rs in S['rulesets'].values() for r in rs['rules'] if self._names(r['expression'], l['name']))
         return {'id': l['id'], 'name': l['name'], 'kind': l['kind'], 'description': l['description'], 'num_items': len(l['items']),
                 'num_referencing_filters': refs, 'created_on': '2026-10-09T12:00:00Z', 'modified_on': '2026-10-09T12:00:00Z'}
 

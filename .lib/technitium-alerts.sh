@@ -85,7 +85,8 @@ _tta_lists() {
     _tt_api "$role" dashboard/stats/get type=LastHour utc=true && total=$(jq -c '.response.stats.blockListZones // null' <<< "$TT_BODY")
     log=$(mktemp "${TMPDIR:-/tmp}/dcs-tta-log-XXXXXX") || return 1
     if [[ "$urls" != '[]' ]] && _tt_api "$role" logs/list; then
-        files=$(jq -r '[.response.logFiles // [] | .[].fileName] | sort | reverse | .[0:3] | .[]' <<< "$TT_BODY" 2>/dev/null)
+        # the newest three, read oldest first: the lines are then in the order they were written
+        files=$(jq -r '[.response.logFiles // [] | .[].fileName] | sort | reverse | .[0:3] | reverse | .[]' <<< "$TT_BODY" 2>/dev/null)
         for f in $files; do
             [[ "$f" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || continue
             TT_CALL_TIMEOUT=10 _tta_curl "$role" "logs/download?fileName=$f&limit=1" "$log.part" && cat "$log.part" >> "$log"
@@ -107,9 +108,14 @@ _tta_lists() {
         # Technitium plans the next update when one ran: the one before it is the plan minus the interval
         | (($s.blockListNextUpdatedOn | epoch) as $n | if $n == null or ($urls | length) == 0 then null else $n - (($s.blockListUpdateIntervalHours // 24) * 3600) end) as $planned
         | [$urls[] as $u | [$ev[] | select(.u == $u)] as $e
-           | ([$e[] | select(.k == "ok") | .at] | max) as $ok | ([$e[] | select(.k == "err")] | max_by(.at)) as $err
+           | ([$e[] | select(.k == "ok") | .at] | max) as $ok
+           # the health is the latest download of the list (in the order of the log), never an older failure a success came after, nor
+           # one from before the last update run of Technitium (it sends the first MB of the log of a day only: the later lines of a busy
+           # server, those of that run among them, are not in what DCS reads)
+           | ([$e[] | select(.k == "ok" or .k == "err")] | last) as $last
            | {url: $u, entries: ([$e[] | select(.k == "read")] | max_by(.at) | .n // null), last_updated: $ok,
-              error: (if $err != null and ($ok == null or $err.at > $ok) then (if ($err.e // "") == "" then "The last download failed" else $err.e end) else null end)}] as $lists
+              error: (if ($last.k // "") == "err" and ($planned == null or (($last.at | epoch) // $planned) >= $planned - 60)
+                      then (if ($last.e // "") == "" then "The last download failed" else $last.e end) else null end)}] as $lists
         | ([$lists[].last_updated | epoch | select(. != null)] + (if $planned != null and $planned <= $now then [$planned] else [] end) | max) as $up
         | {lists: $lists, total: $total, per_list: any($lists[]; .entries != null),
            updated_at: (if $up == null then null else ($up | todate) end),

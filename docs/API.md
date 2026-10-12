@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `501` in total.
+Every endpoint below is `502` in total.
 
 ## Access levels
 
@@ -352,6 +352,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/crowdsec/cloudflare/enable` | admin | Turn Push bans to Cloudflare on: {token? (kept as the secret CLOUDFLARE_BOUNCER_TOKEN), capacity?, community?, domains?}. Checks the token's rights first (400 with what is missing, nothing changed), registers the bouncer dcs-cloudflare-bouncer in CrowdSec, makes the list dcs_crowdsec_bans and the blocking custom rule in each zone, and starts the first push in the background (the answer does not wait for it: first_sync "running"; the community blocklist only when the body asks for it) |
 | POST | `/crowdsec/cloudflare/disable` | admin | Turn Push bans to Cloudflare off: the background sync stops, the bouncer dcs-cloudflare-bouncer is deleted in CrowdSec; {cleanup: true} also deletes the custom rule of each zone and the list at Cloudflare (otherwise they stay, frozen, with the last bans), {forget_token: true} deletes the stored token. Safe to repeat (cleanup after an earlier off) |
 | POST | `/crowdsec/cloudflare/sync` | admin | Sync with Cloudflare now (pull the bans, push them when they changed, read the list and the rules back and repair them) and answer the status; within a minute of the last sync the list is not read back, and a change waits for Cloudflare's one change a minute (message says so: "Already synced N s ago", "The change goes to Cloudflare in N s") |
+| POST | `/crowdsec/cloudflare/recreate` | admin | Make the list at Cloudflare afresh (the fix when Cloudflare refuses every change to it: a change of the list got stuck there): a new list gets the bans and the rule of each zone is pointed at it before the old one is deleted; on a plan of one list (the free plan) the list is deleted and made again, the rule off for a few seconds. Answers the status |
 | POST | `/crowdsec/cloudflare/settings` | admin | Change how many addresses go to Cloudflare and which: {capacity? (1-500000; the free plan holds 10000), community? (also the community blocklist, within the capacity), domains? (the domains whose zones are protected; [] = all of this server's)}. Nothing is sent from the request: the next sync (within seconds, when it is on) works the items out afresh and sends one change when they differ |
 | PUT | `/crowdsec/settings` | admin | Change the ban profile: {profile: {duration, range_duration, escalate: {enabled, max}, overrides: [{pattern, duration}]}, manual_duration, take_over}; validates with CrowdSec, restarts it and rolls back on failure |
 | PUT | `/crowdsec/notifications` | admin | Save and apply the Discord alert settings: {settings: {…any part…}, webhook_url?: "https://discord.com/api/webhooks/…", clear_custom_webhook?: true}; the URL is stored as a secret and never sent back |
