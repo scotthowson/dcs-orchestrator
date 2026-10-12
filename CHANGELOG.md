@@ -3,6 +3,28 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Push bans to Cloudflare: a list Cloudflare got stuck on is made afresh.** When a change of the list stays stuck at
+  Cloudflare, it answers every later change of that list (even one address) with "you have been ratelimited" (HTTP 429,
+  code 10040) while the account's own budget is untouched. DCS took that for a real slow-down and tried again every 15
+  minutes for ever, so the bans at Cloudflare stopped following CrowdSec. DCS now counts these refusals; once they have
+  lasted two hours while Cloudflare's `ratelimit` header shows the budget is not the reason, it says so ("Cloudflare
+  refuses every change to the list …") and makes a fresh list: with room for a second list, a new one
+  (`dcs_crowdsec_bans_2`, or back to `dcs_crowdsec_bans`) gets the bans, the rule of each zone is pointed at it and the old
+  list is deleted, so the sites are never without the rule; on the free plan (one list per account) the rule is taken
+  out, the list deleted and made again under its name and the rule put back, a gap of seconds. Both are in the audit log.
+  Needs you gets a **Make a fresh list** button, and `POST /crowdsec/cloudflare/recreate` (admin) does it by hand.
+- **Push bans to Cloudflare: Cloudflare's `retry-after` is honoured.** A "slow down" that says when to come back (60 s,
+  say) is retried then, not after the fixed 2, 5 or 15 minutes.
+- **Technitium: a blocklist failure that is over no longer keeps the alert up.** The list health now looks at the latest
+  download of each list in the log only: a failure a success came after (a download cut by a restart, "Could not find
+  file '…/<hash>.downloading'") is history, and so is a failure from before Technitium's last update run, whose own lines
+  can be beyond the first MB of a day's log that Technitium hands out. The alert clears at the next look once the latest
+  download worked, also right after Update lists.
+
 ## [4.0.54] - 2026-10-12
 
 ### Fixed

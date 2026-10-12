@@ -10167,6 +10167,71 @@ cst_cloudflare_slowdown() {
     cst_env CLOUDFLARE_BOUNCER_PUSH_GAP 0
 }
 
+# -- a list Cloudflare got stuck on: every change refused with "slow down" (429, its retry-after 60 s) while the account's budget is untouched
+cfb_list_ips() { cfb_st "[.lists[][] | select(.name == \"$1\") | .items[].ip] | sort | join(\" \")"; }
+cfb_plan() { cfb_cfg "{\"max_lists\": $2, \"zones\": [{\"id\": \"zone-example-test\", \"name\": \"example.test\", \"account\": {\"id\": \"acc-lab\", \"name\": \"Lab account\"}, \"plan\": \"$1\"}]}"; }   # the zone's plan, the lists it holds
+cst_cloudflare_stuck() {
+    local now until a0
+    cfb_dec '[{"id": 170, "value": "198.51.100.70", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/stuck: a list to start from" "198.51.100.70" "$(cfb_items)"
+    cfb_cfg '{"stick_lists": true}'
+    cfb_dec '[{"id": 171, "value": "198.51.100.71", "origin": "crowdsec"}]'
+    now=$(date +%s)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/stuck: within the two hours it is a slow down" '.error.code' rate_limited
+    until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
+    check "cloudflare/retry-after: Cloudflare's 60 s, not the 2 minutes of the ladder" yes "$( (( until >= now + 55 && until <= now + 90 )) && echo yes || echo no)"
+    cst_t "cloudflare/retry-after: …and says so" '.error.message | test("next try in 1 min")'
+    check "cloudflare/stuck: the refusal is counted" 1 "$(jq -r '.rl_streak.count' "$CST/.data/crowdsec/cloudflare.json")"
+    # the streak began more than two hours ago, room for a second list (Pro): a new list, filled, the rule pointed at it, the old one deleted
+    cfb_plan pro 10
+    cfb_stset '.backoff.until = 0 | .rl_streak.since = (now - 7300 | floor)'
+    a0=$(cst_audit_n crowdsec_cloudflare_recreate)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/stuck: made afresh" '.error' null '.health' ok '.cloudflare.list' dcs_crowdsec_bans_2
+    check "cloudflare/stuck: the new list holds the bans" "198.51.100.71" "$(cfb_list_ips dcs_crowdsec_bans_2)"
+    check "cloudflare/stuck: …the rule blocks it" 'block|true|ip.src in $dcs_crowdsec_bans_2' "$(cfb_rules)"
+    check "cloudflare/stuck: …the stuck list is gone" "dcs_crowdsec_bans_2" "$(cfb_st '[.lists[][] | .name] | join(" ")')"
+    check "cloudflare/stuck: …the state is clean" "null null dcs_crowdsec_bans_2" "$(jq -r '"\(.rl_streak) \(.recreate_requested) \(.list_name)"' "$CST/.data/crowdsec/cloudflare.json")"
+    check "cloudflare/stuck: …audited" "$((a0 + 1))" "$(cst_audit_n crowdsec_cloudflare_recreate)"
+    cst_t "cloudflare/stuck: …and named on the page" '.sync.repaired.what | join(" ") | test("fresh list dcs_crowdsec_bans_2")'
+    cfb_dec '[{"id": 172, "value": "198.51.100.72", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/stuck: the next change is taken" '.error' null
+    check "cloudflare/stuck: …by the new list" "198.51.100.72" "$(cfb_list_ips dcs_crowdsec_bans_2)"
+    # the free plan's one list: the rule out, the list deleted and made again under its name, the rule back
+    cfb_plan free 1; cfb_cfg '{"stick_lists": true}'
+    cfb_dec '[{"id": 173, "value": "198.51.100.73", "origin": "crowdsec"}]'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/stuck, one list: a slow down first" '.error.code' rate_limited
+    cfb_stset '.backoff.until = 0 | .rl_streak.since = (now - 7300 | floor)'
+    a0=$(cst_audit_n crowdsec_cloudflare_recreate)
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    cst_j "cloudflare/stuck, one list: made again" '.error' null '.cloudflare.list' dcs_crowdsec_bans_2
+    cst_t "cloudflare/stuck, one list: …said so" '.sync.repaired.what | join(" ") | test("made again")'
+    check "cloudflare/stuck, one list: one list, the bans in it" "dcs_crowdsec_bans_2|198.51.100.73" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_list_ips dcs_crowdsec_bans_2)"
+    check "cloudflare/stuck, one list: …not the stuck one" "false" "$(cfb_st '[.lists[][] | .stuck // false] | any')"
+    check "cloudflare/stuck, one list: …the rule is back" 'block|true|ip.src in $dcs_crowdsec_bans_2' "$(cfb_rules)"
+    check "cloudflare/stuck, one list: …audited" "$((a0 + 1))" "$(cst_audit_n crowdsec_cloudflare_recreate)"
+    # by hand (Needs you's button): admins only; back to dcs_crowdsec_bans when there is room
+    cst_call viewer POST /crowdsec/cloudflare/recreate ''
+    cst_is "cloudflare/recreate: a viewer may not" 403
+    cfb_plan pro 10
+    cst_call admin POST /crowdsec/cloudflare/recreate ''
+    cst_is "cloudflare/recreate: by hand" 200
+    cst_j "cloudflare/recreate: the list" '.cloudflare.list' dcs_crowdsec_bans '.error' null
+    cst_t "cloudflare/recreate: …the answer says what was done" '.message | test("^Made afresh: a fresh list dcs_crowdsec_bans ")'
+    check "cloudflare/recreate: one list, the bans, the rule" "dcs_crowdsec_bans|198.51.100.73|block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_items)|$(cfb_rules)"
+    cfb_plan free 1
+    # Needs you: a list that could not be made afresh names the fix
+    cfb_stset '.error = {code: "list_stuck", message: "Cloudflare refuses every change to the list dcs_crowdsec_bans.", at: (now | floor), since: (now | floor)}'
+    cst_call admin GET /crowdsec/status
+    cst_j "cloudflare/stuck: Needs you has the button" '[.issues[] | select(.code == "cloudflare_sync")][0].fix.path' /crowdsec/cloudflare/recreate \
+        '[.issues[] | select(.code == "cloudflare_sync")][0].fix.method' POST
+    cfb_stset '.error = null'
+}
+
 cst_cloudflare_offswitch() {
     # off, keeping what is at Cloudflare
     cst_call admin POST /crowdsec/cloudflare/enable '{}'
@@ -10237,6 +10302,7 @@ cst_part_cloudflare() {
     cst_cloudflare_sync
     cst_cloudflare_errors
     cst_cloudflare_slowdown
+    cst_cloudflare_stuck
     cst_cloudflare_scale
     cst_cloudflare_locks
     cst_cloudflare_listener
@@ -11156,6 +11222,19 @@ mreq "$M1" _mock/listfail url=; mreq "$M1" _mock/clock "at=[2026-10-12 11:45:00 
 tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
 _tta $((SN + 240)) _tta_tick
 check "safety: …the lists update again: said once, the alert gone" "1 0" "$(_fired 'technitium_lists_stale server=primary.*status=resolved') $(_tstat $((SN + 240)) | jq '.alerts | length')"
+# only the latest download of a list counts: a failure (a download cut by a restart) a success came after is history, not health
+_tlog() { local u; u=$(m1 '.settings.blockListUrls[1]'); mreq "$M1" _mock/log clear=1
+    mreq "$M1" _mock/log "line=[2026-10-12 11:50:00 UTC] DNS Server $1: $u"; [[ "$1" == failed* ]] && mreq "$M1" _mock/log "line=System.IO.FileNotFoundException: Could not find file '/etc/dns/blocklists/0a1b.downloading'."
+    mreq "$M1" _mock/log "line=[2026-10-12 11:55:00 UTC] DNS Server $2: $u"; [[ "$2" == failed* ]] && mreq "$M1" _mock/log "line=System.IO.FileNotFoundException: Could not find file '/etc/dns/blocklists/0a1b.downloading'."
+    jq 'del(.lists)' "$TW/.data/technitium/alerts.json" > "$TW/tta.tmp" && mv "$TW/tta.tmp" "$TW/.data/technitium/alerts.json"; }
+_tlog "failed to download block list and will use previously downloaded file (if available)" "successfully downloaded block list (1.2 MB)"
+check "safety: an old failure, a newer success: healthy" "null" "$(_tstat $((SN + 250)) | jq -r '.primary.lists.lists[1].error')"
+_tlog "successfully downloaded block list (1.2 MB)" "failed to download block list and will use previously downloaded file (if available)"
+check "safety: an old success, a newer failure: stale" "yes" "$(_tstat $((SN + 250)) | jq -r '.primary.lists.lists[1].error | test("Could not find file") | if . then "yes" else "no" end')"
+# a failure from before Technitium's last update run (11:45), that run's own lines not in the part of the log DCS gets: history too
+mreq "$M1" _mock/log clear=1; mreq "$M1" _mock/log "line=[2026-10-11 09:00:00 UTC] DNS Server failed to download block list and will use previously downloaded file (if available): $(m1 '.settings.blockListUrls[1]')"
+jq 'del(.lists)' "$TW/.data/technitium/alerts.json" > "$TW/tta.tmp" && mv "$TW/tta.tmp" "$TW/.data/technitium/alerts.json"
+check "safety: a failure before the last update run: healthy" "null" "$(_tstat $((SN + 250)) | jq -r '.primary.lists.lists[1].error')"
 mreq "$M1" _mock/log clear=1; mreq "$M1" _mock/clock "at=[2026-10-09 09:00:00 UTC]"
 tt_req "$TA" POST /dns/technitium/lists/update '' >/dev/null
 _tta $((SN + 300)) _tta_tick

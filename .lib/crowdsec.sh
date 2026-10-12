@@ -941,7 +941,8 @@ handle_crowdsec_status() {
               title: (if $cfb.health == "error" then "Cloudflare is not getting the bans" else "The bans at Cloudflare are not up to date" end),
               detail: ((if $cfb.health == "error" then ($cfb.error.message // "The last sync failed.") else "The last sync with Cloudflare succeeded more than 10 minutes ago." end)
                 + " Cloudflare keeps refusing the addresses it holds; new bans reach it once the sync works again."),
-              fix: {id: "open_bouncers", label: "Open Bouncers", kind: "ui", method: "", path: "", body: null, primary: false}}]) else . end' <<< "$core")"
+              fix: (if ($cfb.error.code // "") == "list_stuck" then {id: "cloudflare_recreate", label: "Make a fresh list", kind: "api", method: "POST", path: "/crowdsec/cloudflare/recreate", body: null, primary: true}
+                    else {id: "open_bouncers", label: "Open Bouncers", kind: "ui", method: "", path: "", body: null, primary: false} end)}]) else . end' <<< "$core")"
 }
 
 # =============================================================================
