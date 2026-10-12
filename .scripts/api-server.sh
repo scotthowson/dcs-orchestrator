@@ -19393,6 +19393,8 @@ handle_template_deploy() {
             done
         fi
     fi
+    # the VPN reads its peer from the stack's .env (plain ${VAR} lines the deploy leaves alone): the keys, empty until a connect
+    [[ "$name" == "vpn-gluetun" ]] && { _vpn_lib; _vpn_env_ensure "$target_dir/.env"; }
 
     # Build JSON array of added service names
     local services_json="["

@@ -11417,10 +11417,21 @@ check "vpn: the admin turns it on"                 "200 true" "$(v_req "$VA" POS
 check "vpn: not deployed yet: the status says so, a container cannot go in" "false 409" \
     "$(v_req "$VU" GET /vpn/status | body_of | jq -r .deployed) $(v_req "$VA" PUT /containers/qBittorrent/vpn '{"on":true}' | status_of)"
 
-# the template, as the gallery deploys it into networking-security (its control port is the stand-in's)
-command cp -f "$ROOT/.templates/vpn-gluetun/docker-compose.yml" "$VW/Stacks/networking-security/docker-compose.yml"
-command cp -f "$VW/Stacks/networking-security/docker-compose.yml" "$VW/vpn.orig"
-printf 'VPN_LAN_SUBNETS=192.168.0.0/16\nVPN_CONTROL_PORT=%s\nVPN_PORT_FORWARDING=on\n' "$VMP" > "$VW/Stacks/networking-security/.env"
+# the template, deployed the way the dashboard deploys it (POST /templates/vpn-gluetun/deploy into networking-security, not started,
+# no route; its control port is the stand-in's): the peer's lines must stay live references to the stack's .env
+printf 'services:\n  whoami:\n    container_name: whoami\n    image: traefik/whoami\n' > "$VW/Stacks/networking-security/docker-compose.yml"
+: > "$VW/Stacks/networking-security/.env"
+_vdep=$(v_req "$VA" POST /templates/vpn-gluetun/deploy "{\"target_stack\":\"networking-security\",\"auto_start\":false,\"routes\":false,\"variables\":{\"VPN_CONTROL_PORT\":\"$VMP\"}}")
+VNS="$VW/Stacks/networking-security"
+check "vpn: deploy: the real deploy handler takes the template" 200 "$(status_of <<< "$_vdep")"
+check "vpn: deploy: the peer's lines read the stack's .env (plain \${VAR}, kept by the deploy)" "1 1 1 1 1 1" \
+    "$(for l in 'WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP}' 'WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}' 'WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}' 'WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}' 'SERVER_NAMES=${VPN_SERVER_NAME}' '"apikey":"${SECRETS_VPN_CONTROL_KEY}"'; do grep -cF -- "$l" "$VNS/docker-compose.yml"; done | tr '\n' ' ' | sed 's/ $//')"
+check "vpn: deploy: nothing written empty, the template's own variables filled in" "0 yes" \
+    "$(grep -cE 'WIREGUARD_ENDPOINT_IP=$|SERVER_NAMES=$|"apikey":""' "$VNS/docker-compose.yml") $(grep -q "127.0.0.1:$VMP:8000" "$VNS/docker-compose.yml" && echo yes || echo no)"
+check "vpn: deploy: the .env has the peer's keys, empty until a connect" "VPN_WG_ENDPOINT_IP= VPN_WG_ENDPOINT_PORT= VPN_WG_PUBLIC_KEY= VPN_WG_ADDRESSES= VPN_SERVER_NAME=" \
+    "$(grep -E '^(VPN_WG_ENDPOINT_IP|VPN_WG_ENDPOINT_PORT|VPN_WG_PUBLIC_KEY|VPN_WG_ADDRESSES|VPN_SERVER_NAME)=' "$VNS/.env" | tr '\n' ' ' | sed 's/ $//')"
+check "vpn: deploy: not started (auto_start false)" 0 "$(grep -c 'up -d' "$VW/docker.log")"
+command cp -f "$VNS/docker-compose.yml" "$VW/vpn.orig"
 check "vpn: the template passes the compose policy" 0 "$( ( set --; source "$VAPI" >/dev/null 2>&1; _compose_policy_check "$VW/Stacks/networking-security/docker-compose.yml" networking-security >/dev/null 2>&1; echo $? ) )"
 ( set --; source "$VAPI" >/dev/null 2>&1; secrets_set VPN_CONTROL_KEY "$VKEY" >/dev/null 2>&1 )
 _vs=$(v_req "$VU" GET /vpn/status | body_of)
@@ -11561,6 +11572,18 @@ check "vpn: no secret in the logs, .data or .env files" "" "$(grep -rl -e "$VKEY
 # the route policy as documented
 check "vpn: docs: viewers read, admins act"        "user user admin admin admin admin admin admin" \
     "$(for r in 'GET /vpn/status' 'GET /vpn/regions' 'POST /vpn/connect' 'POST /vpn/pause' 'POST /vpn/resume' 'POST /vpn/leak-test' 'PUT /containers/{container}/vpn' 'PUT /vpn/wireguard-clients'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+# a compose deployed by 4.0.53 (its peer's lines written empty by the deploy) heals itself at the next status read
+sed -i -e 's/=${VPN_WG_ENDPOINT_IP}$/=/' -e 's/=${VPN_WG_ENDPOINT_PORT}$/=1337/' -e 's/=${VPN_WG_PUBLIC_KEY}$/=/' -e 's/=${VPN_WG_ADDRESSES}$/=/' \
+    -e 's/=${VPN_SERVER_NAME}$/=/' -e 's/"apikey":"${SECRETS_VPN_CONTROL_KEY}"/"apikey":""/' "$VNS/docker-compose.yml"
+sed -i '/^VPN_WG_ADDRESSES=/d; /^VPN_SERVER_NAME=/d' "$VNS/.env"
+check "repair: the flattened file (as 4.0.53 deployed it)" "1 0" "$(grep -c '^      - WIREGUARD_ENDPOINT_IP=$' "$VNS/docker-compose.yml") $(grep -c 'VPN_WG_ENDPOINT_IP}' "$VNS/docker-compose.yml")"
+check "repair: the status read says deployed"       true "$(v_req "$VU" GET /vpn/status | body_of | jq -r .deployed)"
+check "repair: …the file is the template's again, byte for byte" same "$(cmp -s "$VW/vpn.orig" "$VNS/docker-compose.yml" && echo same || echo different)"
+check "repair: …the missing .env keys back, audited once" "2 1" \
+    "$(grep -cE '^(VPN_WG_ADDRESSES|VPN_SERVER_NAME)=$' "$VNS/.env") $(v_req "$VU" GET /vpn/status >/dev/null; grep -c '"vpn_repair"' "$VW/.data/audit.jsonl")"
+printf 'services:\n  other:\n    image: alpine\n    environment:\n      - WIREGUARD_ENDPOINT_IP=\n' > "$VW/other.yml"
+check "repair: a file that is not the template is left alone" no \
+    "$( ( set --; source "$VAPI" >/dev/null 2>&1; _vpn_lib; _vpn_compose_file() { printf '%s' "$VW/other.yml"; }; _vpn_repair && echo yes || echo no ) )"
 check "vpn: off again: 404"                        "404" "$(v_req "$VA" POST /config '{"VPN_ENABLED":"false"}' >/dev/null; v_req "$VU" GET /vpn/status | status_of)"
 kill "$VM_PID" 2>/dev/null; wait "$VM_PID" 2>/dev/null
 rm -rf "$VW"

@@ -3,6 +3,20 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **VPN: Connect said "Deploy the VPN template first" right after deploying it.** A template deploy fills in every
+  `${VAR:-default}` for good, so 4.0.53's `vpn-gluetun` landed with its peer lines empty (`WIREGUARD_ENDPOINT_IP=`,
+  `WIREGUARD_ADDRESSES=`, `SERVER_NAMES=`, `"apikey":""`): DCS did not recognise it, and what Connect writes to the
+  stack's `.env` could never have reached Gluetun. The template now uses plain `${VPN_WG_ENDPOINT_IP}`,
+  `${VPN_WG_ENDPOINT_PORT}`, `${VPN_WG_PUBLIC_KEY}`, `${VPN_WG_ADDRESSES}`, `${VPN_SERVER_NAME}` and
+  `${SECRETS_VPN_CONTROL_KEY}`, which a deploy leaves alone; the deploy writes those keys to the stack's `.env`, empty until a
+  connect. A stack deployed by 4.0.53 is repaired in place the first time the VPN is looked at (the page, Connect, the
+  minute clock): the six lines get their live form back through the compose policy, the missing keys are added, and
+  the audit log says so. No redeploy needed.
+
 ## [4.0.53] - 2026-10-12
 
 ### Added

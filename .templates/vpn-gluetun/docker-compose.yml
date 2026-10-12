@@ -16,10 +16,12 @@ services:
       - TZ=${TZ:-UTC}
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=wireguard
-      - WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP:-}
-      - WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT:-1337}
-      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY:-}
-      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES:-}
+      # The peer is read from the stack's .env each time Gluetun starts (POST /vpn/connect writes it there): plain ${VAR}
+      # on purpose, because a template deploy fills every ${VAR:-default} in for good
+      - WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP}
+      - WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
+      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
+      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
       # PIA's own WireGuard setup keeps the tunnel alive every 25 seconds (its server forgets a quiet peer)
       - WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL=25s
       # the private key (and a pre-shared key) and PIA's account are not here: DCS writes them from its secrets as files
@@ -27,12 +29,12 @@ services:
       # Private Internet Access's port forwarding over WireGuard (gluetun's wiki): the provider and the server's name
       - VPN_PORT_FORWARDING=${VPN_PORT_FORWARDING:-on}
       - VPN_PORT_FORWARDING_PROVIDER=private internet access
-      - SERVER_NAMES=${VPN_SERVER_NAME:-}
+      - SERVER_NAMES=${VPN_SERVER_NAME}
       # your own network may still reach the web pages of the apps behind the tunnel (and the WireGuard clients' subnet)
       - FIREWALL_OUTBOUND_SUBNETS=${VPN_LAN_SUBNETS:-}
       # the control server DCS reads (the tunnel, the exit address, the forwarded port), with a key DCS makes itself
       - HTTP_CONTROL_SERVER_ADDRESS=:8000
-      - 'HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE={"auth":"apikey","apikey":"${SECRETS_VPN_CONTROL_KEY:-}"}'
+      - 'HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE={"auth":"apikey","apikey":"${SECRETS_VPN_CONTROL_KEY}"}'
       - HTTPPROXY=off
     volumes:
       - ${APP_DATA_DIR:-./App-Data}/Gluetun-VPN:/gluetun

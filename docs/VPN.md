@@ -22,7 +22,9 @@ hidden and every `/vpn/*` route, and `PUT /containers/{name}/vpn`, answers `404 
      picks the region with the lowest connect time to its meta server. When none answers, it picks a Canadian one.
   3. It makes a fresh X25519 key (openssl) and registers it with the region's WireGuard server (`addKey` on :1337,
      checked against PIA's CA in `.lib/vpn-pia-ca.crt`).
-  4. It writes the peer to the stack's `.env` (`VPN_WG_ENDPOINT_IP/PORT`, `VPN_WG_PUBLIC_KEY`, `VPN_WG_ADDRESSES`,
+  4. It writes the peer to the stack's `.env` (the template reads it there with plain `${VAR}` lines, which a template
+     deploy leaves alone, unlike `${VAR:-default}`; a stack deployed by 4.0.53 with those lines empty is repaired the
+     first time the VPN is looked at) (`VPN_WG_ENDPOINT_IP/PORT`, `VPN_WG_PUBLIC_KEY`, `VPN_WG_ADDRESSES`,
      `VPN_SERVER_NAME`, `VPN_REGION`, `VPN_REGION_ID`) and recreates Gluetun.
 
   The account is stored only after PIA accepts it. `GET /vpn/regions` lists the regions that forward a port,

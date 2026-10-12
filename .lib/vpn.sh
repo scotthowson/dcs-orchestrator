@@ -52,8 +52,49 @@ _vpn_state() { _api_state_file "$VPN_STATE" '{}' object >/dev/null 2>&1 || true;
 _vpn_set() { (umask 077; mkdir -p "$VPN_DIR") 2>/dev/null; _api_state_file "$VPN_STATE" '{}' object >/dev/null 2>&1 || true; _api_jq_update_file "$VPN_STATE" "$@" || true; }
 _vpn_compose_file() { printf '%s' "$COMPOSE_DIR/$VPN_STACK/docker-compose.yml"; }
 _vpn_env() { envfile_get "$COMPOSE_DIR/$VPN_STACK/.env" "$1" 2>/dev/null || true; }
-# the vpn-gluetun template is in the stack (its service and the line only it has)
-_vpn_deployed() { local f; f=$(_vpn_compose_file); grep -qE "^  ${VPN_SERVICE}:[[:space:]]*\$" "$f" 2>/dev/null && grep -q 'WIREGUARD_ENDPOINT_IP=\${VPN_WG_ENDPOINT_IP' "$f" 2>/dev/null; }
+# The template's lines that read the stack's .env when Gluetun starts. They are plain ${VAR}: a template deploy fills in every
+# ${VAR:-default} (and the template's own variables) for good, and leaves a plain ${VAR} that is not a template variable alone.
+# 4.0.53's template had ${VAR:-} there, so its deploy wrote these lines empty; _vpn_repair puts the live form back.
+VPN_ENV_KEYS="VPN_WG_ENDPOINT_IP VPN_WG_ENDPOINT_PORT VPN_WG_PUBLIC_KEY VPN_WG_ADDRESSES VPN_SERVER_NAME"
+VPN_LIVE_LINES='WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP}
+WIREGUARD_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
+WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
+WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
+SERVER_NAMES=${VPN_SERVER_NAME}'
+# the vpn-gluetun template is in the stack (its service and the lines only it has); one deployed by 4.0.53 is repaired first
+_vpn_deployed() {
+    local f; f=$(_vpn_compose_file)
+    grep -qE "^  ${VPN_SERVICE}:[[:space:]]*\$" "$f" 2>/dev/null || return 1
+    grep -qF 'WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP' "$f" 2>/dev/null && return 0
+    _vpn_repair
+}
+# _vpn_env_ensure ENVFILE: the keys the live lines read, empty until a connect fills them (Compose never warns of a missing one)
+_vpn_env_ensure() {
+    local e="${1:-$COMPOSE_DIR/$VPN_STACK/.env}" k
+    [[ -f "$e" ]] || : > "$e"
+    for k in $VPN_ENV_KEYS; do grep -q "^${k}=" "$e" 2>/dev/null || printf '%s=\n' "$k" >> "$e"; done
+}
+# _vpn_repair: a compose that 4.0.53's deploy flattened (WIREGUARD_ENDPOINT_IP=, SERVER_NAMES=, "apikey":"" …) gets its live lines
+# back, in place, through the compose policy; 1 when the file is not that template
+_vpn_repair() {
+    local f bak line key
+    f=$(_vpn_compose_file)
+    grep -qF 'VPN_PORT_FORWARDING_PROVIDER=private internet access' "$f" 2>/dev/null && grep -qF 'HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE=' "$f" 2>/dev/null \
+        && grep -qE '^[[:space:]]+- WIREGUARD_ENDPOINT_IP=[^$]*$' "$f" || return 1
+    bak=$(_vpn_backup "$f") || return 1
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        sed -i -E "s|^([[:space:]]+- )${key}=[^\$]*\$|\\1${line}|" "$f"
+    done <<< "$VPN_LIVE_LINES"
+    sed -i -E 's|("apikey":")[^"$]*(")|\1${SECRETS_VPN_CONTROL_KEY}\2|' "$f"
+    if ! grep -qF 'WIREGUARD_ENDPOINT_IP=${VPN_WG_ENDPOINT_IP}' "$f" || ! _compose_policy_check "$f" "$VPN_STACK"; then
+        _vpn_write "$f" < "$bak"; rm -f -- "$bak"; return 1
+    fi
+    rm -f -- "$bak"
+    _vpn_env_ensure
+    _vpn_audit vpn_repair "the VPN's compose file (deployed by 4.0.53 with its peer lines written empty) reads the stack's .env again"
+    return 0
+}
 _vpn_up() {
     [[ "$1" == "$VPN_STACK" ]] && { _vpn_render_secrets || return 1; secrets_ensure_generated "$(_vpn_compose_file)" "$COMPOSE_DIR/$VPN_STACK/.env" "$BASE_DIR/.env" 2>/dev/null; }
     compose_with_secrets "$COMPOSE_DIR/$1/docker-compose.yml" "$COMPOSE_DIR/$1/.env" up -d --no-deps "${@:2}" >/dev/null 2>&1
