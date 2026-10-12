@@ -88,3 +88,7 @@ GET /dns/technitium/dhcp
 # the local names (route hosts and the hub's LAN address, the devices' .home names): what the DNS & routes page and the
 # device rows show a viewer; switching them is the admin's
 GET /dns/technitium/local
+
+# Technitium's Advanced Blocking app downloads a kids' group's SafeSearch lists (the search engines' exact names, nothing
+# secret) from here, without a token: public on purpose (404 while Technitium is off).
+GET /dns/technitium/kids-lists/*.txt

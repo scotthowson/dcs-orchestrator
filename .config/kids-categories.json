@@ -1,0 +1,404 @@
+{
+  "_about": "The kids' controls of the Technitium page (.lib/technitium.sh, docs/TECHNITIUM.md). categories: what a group can block, each backed by maintained lists (urls, downloaded by Technitium's Advanced Blocking app; one domain a line or a hosts file, a domain blocks its subdomains) and/or a short built-in set (domains, with their subdomains) where no good list exists. allowlist_sites: the sites an allow-list group can be given, one switch each. essentials: what an allow-list tablet needs to work at all. safe_search: the names forced to a search engine's safe answer (exact names only).",
+  "categories": [
+    {
+      "id": "adult",
+      "name": "Adult content",
+      "description": "Pornography and other adult sites (Hagezi NSFW)",
+      "urls": [
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt"
+      ],
+      "domains": [],
+      "sources": [
+        "https://github.com/hagezi/dns-blocklists#nsfw"
+      ]
+    },
+    {
+      "id": "gambling",
+      "name": "Gambling",
+      "description": "Betting, casinos and lotteries (Hagezi Gambling)",
+      "urls": [
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt"
+      ],
+      "domains": [],
+      "sources": [
+        "https://github.com/hagezi/dns-blocklists#gambling"
+      ]
+    },
+    {
+      "id": "social",
+      "name": "Social media",
+      "description": "Facebook, Instagram, TikTok, X, Snapchat, Reddit, Discord, Threads (Facebook's list also holds WhatsApp)",
+      "urls": [
+        "https://blocklistproject.github.io/Lists/facebook.txt",
+        "https://blocklistproject.github.io/Lists/tiktok.txt",
+        "https://blocklistproject.github.io/Lists/twitter.txt"
+      ],
+      "domains": [
+        "instagram.com",
+        "cdninstagram.com",
+        "snapchat.com",
+        "sc-cdn.net",
+        "reddit.com",
+        "redd.it",
+        "redditmedia.com",
+        "discord.com",
+        "discord.gg",
+        "discordapp.com",
+        "threads.net"
+      ],
+      "sources": [
+        "https://github.com/blocklistproject/Lists",
+        "built in: the services' own domains"
+      ]
+    },
+    {
+      "id": "video",
+      "name": "Video and streaming",
+      "description": "Netflix, Twitch, TikTok, Disney+, Crave and Prime Video (YouTube has its own setting)",
+      "urls": [],
+      "domains": [
+        "netflix.com",
+        "nflxvideo.net",
+        "nflximg.net",
+        "nflxext.com",
+        "twitch.tv",
+        "ttvnw.net",
+        "jtvnw.net",
+        "tiktok.com",
+        "tiktokcdn.com",
+        "tiktokv.com",
+        "disneyplus.com",
+        "dssott.com",
+        "bamgrid.com",
+        "disney-plus.net",
+        "crave.ca",
+        "primevideo.com",
+        "aiv-cdn.net"
+      ],
+      "sources": [
+        "built in: the services' own domains"
+      ]
+    },
+    {
+      "id": "games",
+      "name": "Games",
+      "description": "Roblox, Fortnite and Epic, Minecraft, Steam and EA online (consoles: keep them out of the group, Xbox and PlayStation are not blocked)",
+      "urls": [],
+      "domains": [
+        "roblox.com",
+        "rbxcdn.com",
+        "rbx.com",
+        "fortnite.com",
+        "epicgames.com",
+        "epicgames.dev",
+        "unrealengine.com",
+        "minecraft.net",
+        "mojang.com",
+        "minecraftservices.com",
+        "steampowered.com",
+        "steamcommunity.com",
+        "steamstatic.com",
+        "steamserver.net",
+        "ea.com"
+      ],
+      "sources": [
+        "built in: the games' own domains; xboxlive.com and playstation.com are left out on purpose (they break the consoles)"
+      ]
+    },
+    {
+      "id": "chat",
+      "name": "Chat",
+      "description": "WhatsApp, Discord, Messenger and Telegram",
+      "urls": [
+        "https://blocklistproject.github.io/Lists/whatsapp.txt"
+      ],
+      "domains": [
+        "discord.com",
+        "discord.gg",
+        "discordapp.com",
+        "discordapp.net",
+        "messenger.com",
+        "telegram.org",
+        "telegram.me",
+        "t.me"
+      ],
+      "sources": [
+        "https://github.com/blocklistproject/Lists",
+        "built in: the services' own domains"
+      ]
+    },
+    {
+      "id": "shopping",
+      "name": "Shopping",
+      "description": "Amazon, eBay, Temu, AliExpress and Shein (an Amazon Fire tablet needs Amazon: not for one of those)",
+      "urls": [],
+      "domains": [
+        "amazon.com",
+        "amazon.ca",
+        "ebay.com",
+        "ebay.ca",
+        "temu.com",
+        "aliexpress.com",
+        "shein.com"
+      ],
+      "sources": [
+        "built in: the shops' own domains"
+      ]
+    },
+    {
+      "id": "nosafesearch",
+      "name": "Search engines without SafeSearch",
+      "description": "Search engines that cannot be made safe (Hagezi No SafeSearch)",
+      "urls": [
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nosafesearch-onlydomains.txt"
+      ],
+      "domains": [],
+      "sources": [
+        "https://github.com/hagezi/dns-blocklists#safesearch"
+      ]
+    },
+    {
+      "id": "proxy-vpn",
+      "name": "VPNs, proxies and other DNS",
+      "description": "The ways around the filter: VPNs, proxies, encrypted DNS (Hagezi DoH/VPN/TOR/Proxy bypass)",
+      "urls": [
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt"
+      ],
+      "domains": [],
+      "sources": [
+        "https://github.com/hagezi/dns-blocklists#bypass"
+      ]
+    },
+    {
+      "id": "piracy",
+      "name": "Piracy",
+      "description": "Torrent sites, pirate streaming and warez (Hagezi Anti Piracy)",
+      "urls": [
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt"
+      ],
+      "domains": [],
+      "sources": [
+        "https://github.com/hagezi/dns-blocklists#piracy"
+      ]
+    }
+  ],
+  "allowlist_sites": [
+    {
+      "id": "youtubekids",
+      "name": "YouTube Kids",
+      "description": "The YouTube Kids app and site (videos, thumbnails); its API answers in YouTube's restricted mode when the group's YouTube setting is on",
+      "domains": [
+        "youtubekids.com",
+        "googlevideo.com",
+        "ytimg.com",
+        "ggpht.com"
+      ],
+      "youtube_api": true
+    },
+    {
+      "id": "pbskids",
+      "name": "PBS Kids",
+      "description": "PBS Kids games and videos",
+      "domains": [
+        "pbskids.org",
+        "pbs.org",
+        "pbskids.com"
+      ]
+    },
+    {
+      "id": "khan",
+      "name": "Khan Academy Kids",
+      "description": "Khan Academy and Khan Academy Kids",
+      "domains": [
+        "khanacademy.org",
+        "khanacademykids.org",
+        "kastatic.org",
+        "kasandbox.org"
+      ]
+    },
+    {
+      "id": "netflix",
+      "name": "Netflix",
+      "description": "Netflix (its Kids profile is set in Netflix)",
+      "domains": [
+        "netflix.com",
+        "netflix.net",
+        "nflxvideo.net",
+        "nflximg.net",
+        "nflximg.com",
+        "nflxext.com",
+        "nflxso.net"
+      ]
+    },
+    {
+      "id": "disney",
+      "name": "Disney+",
+      "description": "Disney+ (its Kids profile is set in Disney+)",
+      "domains": [
+        "disneyplus.com",
+        "dssott.com",
+        "bamgrid.com",
+        "disney-plus.net",
+        "cdn.registerdisney.go.com",
+        "disneystreaming.com"
+      ]
+    },
+    {
+      "id": "roblox",
+      "name": "Roblox",
+      "description": "Roblox (its own parental controls are set in Roblox)",
+      "domains": [
+        "roblox.com",
+        "rbxcdn.com",
+        "rbx.com"
+      ]
+    }
+  ],
+  "essentials": {
+    "description": "What an Android tablet needs with everything else blocked: the connectivity check (else it says there is no internet), the clock, Google sign-in, Google Play (installs, updates, app icons) and push messages",
+    "domains": [
+      "connectivitycheck.gstatic.com",
+      "connectivitycheck.android.com",
+      "clients1.google.com",
+      "clients3.google.com",
+      "clients4.google.com",
+      "www.gstatic.com",
+      "ssl.gstatic.com",
+      "fonts.gstatic.com",
+      "time.android.com",
+      "android.pool.ntp.org",
+      "accounts.google.com",
+      "www.googleapis.com",
+      "android.googleapis.com",
+      "firebaseinstallations.googleapis.com",
+      "fcm.googleapis.com",
+      "mtalk.google.com",
+      "play.google.com",
+      "play.googleapis.com",
+      "play-fe.googleapis.com",
+      "play-lh.googleusercontent.com",
+      "android.clients.google.com",
+      "gvt1.com",
+      "gvt2.com",
+      "gvt3.com"
+    ],
+    "subdomains": [
+      "gvt1.com",
+      "gvt2.com",
+      "gvt3.com",
+      "android.pool.ntp.org"
+    ]
+  },
+  "safe_search": {
+    "google": {
+      "hosts": [
+        "www.google.com",
+        "www.google.ca"
+      ],
+      "target": "forcesafesearch.google.com"
+    },
+    "bing": {
+      "hosts": [
+        "www.bing.com"
+      ],
+      "target": "strict.bing.com"
+    },
+    "duckduckgo": {
+      "hosts": [
+        "duckduckgo.com",
+        "www.duckduckgo.com",
+        "start.duckduckgo.com"
+      ],
+      "target": "safe.duckduckgo.com"
+    },
+    "youtube": {
+      "hosts": [
+        "www.youtube.com",
+        "m.youtube.com",
+        "youtubei.googleapis.com",
+        "youtube.googleapis.com",
+        "www.youtube-nocookie.com"
+      ],
+      "target": {
+        "strict": "restrict.youtube.com",
+        "moderate": "restrictmoderate.youtube.com"
+      }
+    },
+    "fallback": {
+      "forcesafesearch.google.com": [
+        "216.239.38.120",
+        "2001:4860:4802:32::78"
+      ],
+      "strict.bing.com": [
+        "150.171.27.16",
+        "150.171.28.16"
+      ],
+      "safe.duckduckgo.com": [
+        "52.149.247.1"
+      ],
+      "restrict.youtube.com": [
+        "216.239.38.120",
+        "2001:4860:4802:32::78"
+      ],
+      "restrictmoderate.youtube.com": [
+        "216.239.38.119",
+        "2001:4860:4802:32::77"
+      ]
+    }
+  },
+  "window_presets": [
+    {
+      "id": "homework",
+      "name": "Homework",
+      "title": "Homework: games and video blocked 16:00–18:00 Mon–Fri",
+      "enabled": false,
+      "from": "16:00",
+      "to": "18:00",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "scope": "categories",
+      "categories": [
+        "games",
+        "video"
+      ]
+    },
+    {
+      "id": "no-internet",
+      "name": "No internet",
+      "title": "No internet 16:00–18:00 Mon–Fri",
+      "enabled": false,
+      "from": "16:00",
+      "to": "18:00",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "scope": "all",
+      "categories": []
+    }
+  ],
+  "allowlist_presets": [
+    {
+      "id": "little-ones",
+      "name": "Little ones",
+      "description": "For the youngest: YouTube Kids, PBS Kids, Khan Academy Kids, Netflix, Disney+ and Roblox, each a switch",
+      "sites": [
+        "youtubekids",
+        "pbskids",
+        "khan",
+        "netflix",
+        "disney",
+        "roblox"
+      ]
+    }
+  ]
+}

@@ -10554,7 +10554,7 @@ mkdir -p "$TW/.scripts" "$TW/.lib" "$TW/.config" "$TW/Stacks" "$TW/.data" "$TW/l
 cp "$ROOT/.scripts/api-server.sh" "$ROOT/.scripts/api-dispatch.sh" "$TW/.scripts/"; cp "$ROOT/VERSION" "$TW/"
 cp -r "$ROOT/.lib/." "$TW/.lib/"; cp -r "$ROOT/.config/." "$TW/.config/"
 grep -vE '^(API_BIND|API_AUTH_ENABLED|API_INSECURE_NO_AUTH|API_TRUSTED_PROXIES|API_IP_WHITELIST|API_PORT|PROXY_DOMAIN)=' "$ROOT/.env.example" > "$TW/.env"
-printf 'API_PORT=9876\nMETRICS_ENABLED=false\nAPI_RESPONSE_CACHE=false\n' >> "$TW/.env"
+printf 'API_PORT=9876\nMETRICS_ENABLED=false\nAPI_RESPONSE_CACHE=false\nFLEET_SELF_URL=http://192.0.2.10:9876\n' >> "$TW/.env"
 TAPI="$TW/.scripts/api-server.sh"; TANS="$TW/answers.txt"; : > "$TANS"
 TT1=$(head -c 32 /dev/urandom | xxd -p -c 64); TT2=$(head -c 32 /dev/urandom | xxd -p -c 64)
 python3 "$ROOT/tests/mock-technitium.py" "$TW/m1.port" "$TW/m1.json" "$TT1" dns1 >/dev/null 2>&1 & TT_PIDS="$!"
@@ -10644,7 +10644,7 @@ check "technitium: …on both"                       "ads.example.net ads.exampl
 check "technitium: allow a name, on both"          "example.com example.com" "$(tt_req "$TA" POST /dns/technitium/allow '{"domain":"example.com"}' >/dev/null; m1 '.allowed | join(",")') $(m2 '.allowed | join(",")')"
 check "technitium: not a name"                     400 "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"no spaces.com"}' | status_of)"
 check "technitium: a viewer cannot block"          403 "$(tt_req "$TU" POST /dns/technitium/block '{"domain":"x.example"}' | status_of)"
-check "technitium: lists"                          "3 example.com ads.example.net 5" "$(tt_req "$TU" GET /dns/technitium/lists | body_of | jq -r '"\(.blocklists | length) \(.allowed | join(",")) \(.blocked | join(",")) \(.categories | length)"')"
+check "technitium: lists"                          "3 example.com ads.example.net 10" "$(tt_req "$TU" GET /dns/technitium/lists | body_of | jq -r '"\(.blocklists | length) \(.allowed | join(",")) \(.blocked | join(",")) \(.categories | length)"')"
 check "technitium: unblock, on both"               "0 0" "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"ads.example.net","remove":true}' >/dev/null; m1 '.blocked | length') $(m2 '.blocked | length')"
 
 # pause / resume
@@ -10671,8 +10671,8 @@ check "technitium: a bedtime of 25:00"             400 "$(tt_req "$TA" POST /dns
 check "technitium: a name taken"                   409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"boys"}' | status_of)"
 check "technitium: a device in two groups"         409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"Girls","devices":[{"ip":"192.168.2.50"}]}' | status_of)"
 check "technitium: a viewer cannot add a group"    403 "$(tt_req "$TU" POST /dns/technitium/groups '{"name":"Mine"}' | status_of)"
-check "technitium: a viewer reads the groups"      "200 Boys false 5" "$(R=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '"\(.groups[0].name) \(.groups[0].in_bedtime) \(.categories | length)"')")"
-check "technitium: SafeSearch is the house's"      house "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r '.safe_search_scope')"
+check "technitium: a viewer reads the groups"      "200 Boys false 10" "$(R=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '"\(.groups[0].name) \(.groups[0].in_bedtime) \(.categories | length)"')")"
+check "technitium: SafeSearch is a group's"        "group strict false" "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r '"\(.safe_search_scope) \(.groups[0].youtube) \(.groups[0].safe_search)"')"
 
 # bedtime by the minute clock (a fake clock: DCS_TECHNITIUM_NOW, UTC)
 _ttick() { local t="$1"; ( set --; source "$TAPI" >/dev/null 2>&1; _technitium_lib; DCS_TECHNITIUM_NOW="$t" TZ=UTC _tt_tick ) >/dev/null 2>&1; }
@@ -10717,6 +10717,128 @@ check "technitium: YouTube strict replaces the zone" "restrict.youtube.com 1" "$
 check "technitium: SafeSearch off removes its zones, YouTube stays" "5 5 null" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":false}' >/dev/null; m1 '.zones | length') $(m2 '.zones | length') $(m1 '.zones["www.google.com"]')"
 check "technitium: a mode that is not one"         400 "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"loud"}' | status_of)"
 tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"off"}' >/dev/null
+
+# >>> the kids' controls: SafeSearch and YouTube per group (Advanced Blocking answers the safe names with their addresses), time
+# windows (bedtime, a categories window, pauses), categories, allow-list mode, exceptions, the report, the migration. The stand-in
+# answers as the app would for one client (GET /api/_mock/answer), so a kid's address and the owner's are told apart.
+_ans() { curl -s -H "Authorization: Bearer $TT1" "$M1/api/_mock/answer?client=$1&name=$2&type=${3:-A}" | jq -r '.response | "\(.rcode) \(.answer | join(","))"'; }
+_ml() { curl -s -H "Authorization: Bearer $TT1" --data-urlencode "url=$1" --data-urlencode "content=$2" "$M1/api/_mock/lists" >/dev/null; }
+_kids() { tt_req "$TA" POST /dns/technitium/groups "$1" "DCS_TECHNITIUM_NOW=${2:-$MON1000}"; }
+_kg() { _adv m1 | jq -c --arg n "$1" '.groups[] | select(.name == $n)'; }
+MON1700=$((MON1000 + 7 * 3600)); SAT1700=$((MON1700 + 5 * 86400)); TUE1000=$((MON1000 + 86400))
+_kl=$(tt_req "" GET /dns/technitium/kids-lists/google.txt)
+check "kids: the SafeSearch lists are public, the exact names" '200 text/plain ^www\.google\.com$ ^www\.google\.ca$' "$(printf '%s %s %s' "$(status_of <<< "$_kl")" "$(grep -io -m1 'text/plain' <<< "$_kl")" "$(body_of <<< "$_kl" | grep -v '^#' | tr '\n' ' ' | sed 's/ $//')")"
+check "kids: …a list that is not one: 404"        404 "$(tt_req "" GET /dns/technitium/kids-lists/nope.txt | status_of)"
+# Technitium downloaded them (from the address the config names) and the social category's list
+for _n in google bing duckduckgo youtube; do _ml "http://192.0.2.10:9876/dns/technitium/kids-lists/$_n.txt" "$(tt_req "" GET "/dns/technitium/kids-lists/$_n.txt" | body_of)"; done
+_ml https://blocklistproject.github.io/Lists/facebook.txt $'# Facebook\n0.0.0.0 facebook.com\n0.0.0.0 fbcdn.net'
+KIDS='{"name":"Kids","devices":[{"ip":"192.168.2.60","label":"Tablet 7"}],"categories":["games"],"safe_search":true,
+  "windows":[{"name":"Bedtime","enabled":true,"from":"20:30","to":"07:00","scope":"all"},
+             {"name":"Homework","enabled":true,"from":"16:00","to":"18:00","days":[1,2,3,4,5],"scope":"categories","categories":["video","social"]}],
+  "blocked":["CoolMathGames.com"]}'
+_tk=$(_kids "$KIDS" | body_of); GK=$(jq -r '.group.id' <<< "$_tk")
+check "kids: a group: YouTube strict unless said, windows get ids, names tidied" "strict w1,w2 coolmathgames.com filter" "$(jq -r '.group | "\(.youtube) \(.windows | map(.id) | join(",")) \(.blocked | join(",")) \(.mode)"' <<< "$_tk")"
+check "kids: …the safe names' addresses resolved by the primary" "yes 216.239.38.120,2001:4860:4802:32::78" "$([[ $(m1 .resolves) -ge 5 ]] && echo yes || echo no) $(_kg Kids | jq -r '.regexBlockListUrls[] | select(.url | endswith("/google.txt")) | .blockingAddresses | join(",")')"
+check "kids: …four regex lists from this API, each with its addresses, not NXDOMAIN" "4 false http://192.0.2.10:9876/dns/technitium/kids-lists/youtube.txt" "$(_kg Kids | jq -r '"\(.regexBlockListUrls | length) \(.regexBlockListUrls | map(.blockAsNxDomain) | unique | join(",")) \(.regexBlockListUrls[3].url)"')"
+check "kids: …the group's own blocks stay NXDOMAIN"   'true [] ["coolmathgames.com","epicgames.com"]' "$(_kg Kids | jq -c '.blockAsNxDomain, .blockingAddresses, (.blocked | map(select(. == "coolmathgames.com" or . == "epicgames.com")))' | tr '\n' ' ' | sed 's/ $//')"
+check "kids: the kid's Google is SafeSearch, the owner's is not" "NoError 216.239.38.120|NoError 198.51.100.7" "$(_ans 192.168.2.60 www.google.com)|$(_ans 192.168.2.99 www.google.com)"
+check "kids: …google.ca too, and its IPv6"           "NoError 216.239.38.120|NoError 2001:4860:4802:32::78" "$(_ans 192.168.2.60 www.google.ca)|$(_ans 192.168.2.60 www.google.com AAAA)"
+check "kids: …Bing strict, DuckDuckGo safe, only the exact names" "NoError 150.171.27.16,150.171.28.16|NoError 52.149.247.1|NoError 198.51.100.7" "$(_ans 192.168.2.60 www.bing.com)|$(_ans 192.168.2.60 duckduckgo.com)|$(_ans 192.168.2.60 links.duckduckgo.com)"
+check "kids: …DuckDuckGo has no IPv6: no answer, not ::" "NoError " "$(_ans 192.168.2.60 duckduckgo.com AAAA)"
+check "kids: YouTube strict for the kid, the owner's as it is" "NoError 216.239.38.120|NoError 216.239.38.120|NoError 198.51.100.7" "$(_ans 192.168.2.60 www.youtube.com)|$(_ans 192.168.2.60 youtubei.googleapis.com)|$(_ans 192.168.2.99 www.youtube.com)"
+check "kids: games blocked always, video not before homework" "NxDomain |NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.60 roblox.com)|$(_ans 192.168.2.60 www.roblox.com)|$(_ans 192.168.2.60 netflix.com)"
+check "kids: …an extra blocked name"               "NxDomain " "$(_ans 192.168.2.60 coolmathgames.com)"
+check "kids: YouTube moderate"                     "NoError 216.239.38.119" "$(_kids "$(jq -c --arg id "$GK" '. + {id: $id, youtube: "moderate"}' <<< "$KIDS")" >/dev/null; _ans 192.168.2.60 m.youtube.com)"
+check "kids: SafeSearch off for the group: its Google as it is" "NoError 198.51.100.7 1" "$(_kids "$(jq -c --arg id "$GK" '. + {id: $id, safe_search: false}' <<< "$KIDS")" >/dev/null; _ans 192.168.2.60 www.google.com) $(_kg Kids | jq -r '.regexBlockListUrls | length')"
+_kids "$(jq -c --arg id "$GK" '. + {id: $id}' <<< "$KIDS")" >/dev/null
+# a window that blocks categories: homework, 16:00 to 18:00 on school days
+_n=$(_sets); _ttick $MON1700
+check "kids: 17:00 Monday: homework blocks video and social" "NxDomain |NxDomain |NxDomain |NoError 216.239.38.120" "$(_ans 192.168.2.60 netflix.com)|$(_ans 192.168.2.60 facebook.com)|$(_ans 192.168.2.60 static.fbcdn.net)|$(_ans 192.168.2.60 www.google.com)"
+check "kids: …written once, said in the audit log"  "$((_n + 1)) yes" "$(_sets) $(grep -q 'Kids: homework started (social, video blocked)' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+check "kids: …the group says which window, until when" "Homework 18:00 false true" "$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1700 | body_of | jq -r --arg id "$GK" '.groups[] | select(.id == $id) | "\(.active.names | join(",")) \(.active.ends.w2) \(.in_bedtime) \(.windows[1].active)"')"
+_n=$(_sets); _ttick $((MON1700 + 60))
+check "kids: …the next minute writes nothing"      "$_n" "$(_sets)"
+_tq=$(tt_req "$TA" POST "/dns/technitium/groups/$GK/pause" '{"minutes":30,"window":"w2"}' DCS_TECHNITIUM_NOW=$MON1700 | body_of)
+check "kids: pause the homework window 30 minutes" "w2 2026-10-12T17:30:00Z NoError 198.51.100.7" "$(jq -r '"\(.window) \(.paused_until)"' <<< "$_tq") $(_ans 192.168.2.60 netflix.com)"
+check "kids: …the window says until when"          "2026-10-12T17:30:00Z false" "$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1700 | body_of | jq -r --arg id "$GK" '.groups[] | select(.id == $id) | .windows[1] | "\(.paused_until) \(.active)"')"
+check "kids: a window that is not there"           404 "$(tt_req "$TA" POST "/dns/technitium/groups/$GK/pause" '{"window":"w9"}' | status_of)"
+_ttick $((MON1700 + 31 * 60))
+check "kids: …and it comes back at 17:31"          "NxDomain " "$(_ans 192.168.2.60 netflix.com)"
+_ttick $SAT1700
+check "kids: 17:00 Saturday is not a school day"   "NoError 198.51.100.7" "$(_ans 192.168.2.60 netflix.com)"
+_ttick $MON2100
+check "kids: 21:00 bedtime: everything, SafeSearch names too" "NxDomain |NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.60 www.google.com)|$(_ans 192.168.2.60 example.com)|$(_ans 192.168.2.99 example.com)"
+check "kids: …the group pause lifts every window"  "NoError 216.239.38.120" "$(tt_req "$TA" POST "/dns/technitium/groups/$GK/pause" '{"minutes":15}' DCS_TECHNITIUM_NOW=$MON2100 >/dev/null; _ans 192.168.2.60 www.google.com)"
+tt_req "$TA" POST "/dns/technitium/groups/$GK/pause" '{"minutes":0}' DCS_TECHNITIUM_NOW=$MON2100 >/dev/null
+check "kids: a window switched off is never in force" "NoError 198.51.100.7" "$(_kids "$(jq -c --arg id "$GK" '. + {id: $id} | .windows[1].enabled = false' <<< "$KIDS")" $MON1700 >/dev/null; _ans 192.168.2.60 netflix.com)"
+_kids "$(jq -c --arg id "$GK" '. + {id: $id}' <<< "$KIDS")" $MON1000 >/dev/null
+# exceptions: allowed wins over every block, but never over the group's SafeSearch or YouTube
+check "kids: an exception lets a blocked game through" "NoError 198.51.100.7|NxDomain " "$(_kids "$(jq -c --arg id "$GK" '. + {id: $id, allowed: ["roblox.com"]}' <<< "$KIDS")" >/dev/null; _ans 192.168.2.60 www.roblox.com)|$(_ans 192.168.2.60 fortnite.com)"
+check "kids: an exception that would undo YouTube is refused" "400 yes" "$(R=$(_kids "$(jq -c --arg id "$GK" '. + {id: $id, allowed: ["youtube.com"]}' <<< "$KIDS")"); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r .message | grep -q 'youtube.com in the exceptions would undo' && echo yes || echo no)")"
+check "kids: a window without its categories"      400 "$(_kids '{"name":"X","windows":[{"name":"H","from":"16:00","to":"18:00","scope":"categories","categories":[]}]}' | status_of)"
+check "kids: a scope that is not one"              400 "$(_kids '{"name":"X","windows":[{"name":"H","from":"16:00","to":"18:00","scope":"some"}]}' | status_of)"
+check "kids: a category that is not one, a mode, a site" "400 400 400" "$(_kids '{"name":"X","categories":["dating"]}' | status_of) $(_kids '{"name":"X","mode":"strictest"}' | status_of) $(_kids '{"name":"X","sites":["myspace"]}' | status_of)"
+check "kids: 13 windows"                           400 "$(_kids "$(jq -nc '{name: "X", windows: [range(13) | {name: "W", from: "16:00", to: "18:00"}]}')" | status_of)"
+# allow-list mode for the youngest: everything blocked but its sites, the essentials and its exceptions
+LITTLE='{"name":"Little","devices":[{"ip":"192.168.2.61","label":"Tablet 5"}],"mode":"allowlist","sites":["youtubekids","roblox"],"allowed":["example.org"],
+  "windows":[{"name":"Homework","enabled":true,"from":"16:00","to":"18:00","days":[1,2,3,4,5],"scope":"categories","categories":["games"]}]}'
+_tl=$(_kids "$LITTLE" | body_of); GL=$(jq -r '.group.id' <<< "$_tl")
+check "kids: allow-list: an unlisted name is NXDOMAIN, the sites resolve" "NxDomain |NoError 198.51.100.7|NoError 198.51.100.7|NoError 198.51.100.7" "$(_ans 192.168.2.61 example.com)|$(_ans 192.168.2.61 www.youtubekids.com)|$(_ans 192.168.2.61 r3---sn-abc.googlevideo.com)|$(_ans 192.168.2.61 www.roblox.com)"
+check "kids: …the tablet's essentials, exact names" "NoError 198.51.100.7|NoError 198.51.100.7|NxDomain " "$(_ans 192.168.2.61 connectivitycheck.gstatic.com)|$(_ans 192.168.2.61 play.googleapis.com)|$(_ans 192.168.2.61 x.connectivitycheck.gstatic.com)"
+check "kids: …its exception, and its YouTube API in restricted mode" "NoError 198.51.100.7|NoError 216.239.38.120|NxDomain " "$(_ans 192.168.2.61 www.example.org)|$(_ans 192.168.2.61 youtubei.googleapis.com)|$(_ans 192.168.2.61 www.youtube.com)"
+check "kids: …no search engine in allow-list mode"  "NxDomain " "$(_ans 192.168.2.61 www.google.com)"
+_ttick $MON1700
+check "kids: …a homework window blocks an allowed game" "NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.61 www.roblox.com)|$(_ans 192.168.2.61 www.youtubekids.com)"
+check "kids: …the presets are offered"             "Homework,No internet false Little ones 6" "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r '"\(.window_presets | map(.name) | join(",")) \(.window_presets[0].enabled) \(.allowlist_presets[0].name) \(.allowlist_presets[0].sites | length)"')"
+# the addresses are resolved again after a day
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode domain=forcesafesearch.google.com --data-urlencode addresses=216.239.38.121 "$M1/api/_mock/resolve" >/dev/null
+_tt_st=$(jq -c --argjson at "$MON1700" '.safe_addrs.at = $at' "$TW/.data/technitium/state.json"); printf '%s\n' "$_tt_st" > "$TW/.data/technitium/state.json"
+_ttick $((MON1700 + 3600))
+check "kids: an hour later the addresses are kept"  "NoError 216.239.38.120" "$(_ans 192.168.2.60 www.google.com)"
+_ttick $((MON1700 + 86400))
+check "kids: a day later they are resolved again"   "NoError 216.239.38.121" "$(_ans 192.168.2.60 www.google.com)"
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode domain=forcesafesearch.google.com --data-urlencode addresses=216.239.38.120,2001:4860:4802:32::78 "$M1/api/_mock/resolve" >/dev/null
+# the report: what the group's devices looked up, from the query log (DCS's copies of the social lists are fresh: nothing is fetched)
+mkdir -p "$TW/.data/technitium/lists"
+for _u in https://blocklistproject.github.io/Lists/facebook.txt https://blocklistproject.github.io/Lists/tiktok.txt https://blocklistproject.github.io/Lists/twitter.txt; do
+    printf 'facebook.com\nfbcdn.net\n' > "$TW/.data/technitium/lists/$(printf '%s' "$_u" | sha256sum | cut -c1-16).txt"
+done
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode "entries=$(jq -nc '[range(3) | {timestamp: "2026-10-12T09:0\(.):00Z", clientIpAddress: "192.168.2.60", responseType: "Blocked", rcode: "NxDomain", qname: "www.roblox.com", qtype: "A"}]
+    + [{timestamp: "2026-10-12T09:05:00Z", clientIpAddress: "192.168.2.60", responseType: "Blocked", rcode: "NxDomain", qname: "netflix.com", qtype: "A"},
+       {timestamp: "2026-10-12T09:06:00Z", clientIpAddress: "192.168.2.60", responseType: "Blocked", rcode: "NxDomain", qname: "facebook.com", qtype: "A"},
+       {timestamp: "2026-10-12T09:07:00Z", clientIpAddress: "192.168.2.60", responseType: "Recursive", rcode: "NoError", qname: "example.com", qtype: "A"},
+       {timestamp: "2026-10-12T09:08:00Z", clientIpAddress: "192.168.2.60", responseType: "Recursive", rcode: "NoError", qname: "example.com", qtype: "A"}]')" "$M1/api/_mock/logs" >/dev/null
+_tr=$(tt_req "$TA" GET "/dns/technitium/groups/$GK/report?range=lastDay" '' DCS_TECHNITIUM_NOW=$TUE1000 | body_of)
+check "kids: the report: lookups, blocked, the top"   "7 5 www.roblox.com 3 example.com 2" "$(jq -r '"\(.lookups) \(.blocked) \(.top_blocked[0].name) \(.top_blocked[0].count) \(.top[1].name) \(.top[1].count)"' <<< "$_tr")"
+check "kids: …blocked per category (built-in names, the lists)" "games:3 social:1 video:1" "$(jq -r '.by_category | sort_by(.category) | map("\(.category):\(.count)") | join(" ")' <<< "$_tr")"
+check "kids: …per device"                           "192.168.2.60 Tablet 7 7 www.roblox.com" "$(jq -r '.devices[0] | "\(.ip) \(.label) \(.lookups) \(.top_blocked[0].name)"' <<< "$_tr")"
+check "kids: …a viewer does not read it, a range that is not one" "403 400 404" "$(tt_req "$TU" GET "/dns/technitium/groups/$GK/report" | status_of) $(tt_req "$TA" GET "/dns/technitium/groups/$GK/report?range=forever" | status_of) $(tt_req "$TA" GET /dns/technitium/groups/gnope/report | status_of)"
+check "kids: the groups reached the secondary"     "$(_adv m1 | jq -S -c .)" "$(_adv m2 | jq -S -c .)"
+check "kids: delete both"                          "200 200 Boys" "$(tt_req "$TA" DELETE "/dns/technitium/groups/$GK" '' | status_of) $(tt_req "$TA" DELETE "/dns/technitium/groups/$GL" '' | status_of) $(_adv m1 | jq -r '[.groups[].name] | join(",")')"
+# the migration: a groups.json from before (no version) with the house's SafeSearch on, a console in a group
+command cp -f "$TW/.data/technitium/groups.json" "$TW/groups.keep"; [[ -e "$TW/.data/technitium/devices.json" ]] && command cp -f "$TW/.data/technitium/devices.json" "$TW/devices.keep"
+tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":true,"youtube":"moderate"}' >/dev/null
+jq '{devices: [{id: "aabbccddee70", ip: "192.168.2.70", mac: "aa:bb:cc:dd:ee:70", vendor: "Microsoft", icon: "console", icon_guessed: false, nickname: "Xbox"},
+               {id: "aabbccddee71", ip: "192.168.2.71", mac: "aa:bb:cc:dd:ee:71", vendor: "Nintendo", icon: "console", icon_guessed: true, hostname: "switch"},
+               {id: "aabbccddee72", ip: "192.168.2.72", mac: "aa:bb:cc:dd:ee:72", vendor: "Microsoft", icon: "laptop", icon_guessed: false, nickname: "Surface"}], forgotten: {}}' <<< '{}' > "$TW/.data/technitium/devices.json"
+jq '{house: {safe_search: true, youtube: "moderate"}, groups: (.groups + [{id: "gold00001", name: "Old", devices: [{ip: "192.168.2.70", label: "", id: "aabbccddee70"}, {ip: "192.168.2.71", label: ""}, {ip: "192.168.2.72", label: "Surface"}],
+     lists: ["adult", "social"], bedtime: {enabled: true, from: "20:00", to: "07:00", days: [1,2,3,4,5,6,7]}}])}' "$TW/groups.keep" > "$TW/.data/technitium/groups.json"
+_tm=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000 | body_of)
+check "kids: migration: the house's setting moved into every group, the switch off" "true moderate true moderate false off" "$(jq -r '"\(.groups[] | select(.name == "Old") | "\(.safe_search) \(.youtube)") \(.groups[] | select(.name == "Boys") | "\(.safe_search) \(.youtube)") \(.house.safe_search) \(.house.youtube)"' <<< "$_tm")"
+check "kids: …the consoles moved to a group of their own" "192.168.2.70,192.168.2.71 adult,gambling Bedtime 20:00 192.168.2.72" "$(jq -r '"\(.groups[] | select(.name == "Consoles") | "\(.devices | map(.ip) | join(",")) \(.categories | join(",")) \(.windows | map(.name) | join(",")) \(.windows[0].from)") \(.groups[] | select(.name == "Old") | .devices | map(.ip) | join(","))"' <<< "$_tm")"
+check "kids: …Old kept its lists as categories, its bedtime as a window" "adult,social Bedtime" "$(jq -r '.groups[] | select(.name == "Old") | "\(.categories | join(",")) \(.windows | map(.name) | join(","))"' <<< "$_tm")"
+check "kids: …said once (3 notes), version 2 on disk" "3 yes 2" "$(jq -r '.migration.notes | length' <<< "$_tm") $(jq -r '.migration.notes[1]' <<< "$_tm" | grep -q '^Xbox, switch moved from Old to Consoles' && echo yes || echo no) $(jq -r .version "$TW/.data/technitium/groups.json")"
+_ttick $MON1000
+check "kids: …the clock: the groups get it first, then the house's zones go" "moderate moderate null null" "$(_kg Old | jq -r '.regexBlockListUrls[] | select(.url | endswith("/youtube.txt")) | .blockingAddresses[0] | if . == "216.239.38.119" then "moderate" else . end') $(_adv m2 | jq -r '.groups[] | select(.name == "Consoles") | .regexBlockListUrls[] | select(.url | endswith("/youtube.txt")) | .blockingAddresses[0] | if . == "216.239.38.119" then "moderate" else . end') $(m1 '.zones["www.google.com"]') $(m2 '.zones["www.youtube.com"]')"
+check "kids: …a second look changes nothing"       "$(jq -c . "$TW/.data/technitium/groups.json")" "$(tt_req "$TU" GET /dns/technitium/groups >/dev/null; jq -c . "$TW/.data/technitium/groups.json")"
+_n="$(m1 .writes) $(m2 .writes)"; _ttick $((MON1000 + 60))
+check "kids: …and the next minute writes nothing"  "$_n" "$(m1 .writes) $(m2 .writes)"
+command cp -f "$TW/groups.keep" "$TW/.data/technitium/groups.json"; rm -f "$TW/groups.keep"
+if [[ -e "$TW/devices.keep" ]]; then command cp -f "$TW/devices.keep" "$TW/.data/technitium/devices.json"; rm -f "$TW/devices.keep"; else rm -f "$TW/.data/technitium/devices.json"; fi
+_ttick $MON1000
+check "kids: docs: the lists are public, the report and the pause the admin's" "public admin admin" \
+    "$(for r in 'GET /dns/technitium/kids-lists/{name}.txt' 'GET /dns/technitium/groups/{id}/report' 'POST /dns/technitium/groups/{id}/pause'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+# <<< the kids' controls
 
 # stats and activity
 _tst=$(tt_req "$TU" GET '/dns/technitium/stats?range=lastDay' | body_of)

@@ -16,7 +16,14 @@ Usage: mock-technitium.py PORTFILE STATEFILE TOKEN NAME
   or a failure for a URL in POST /api/_mock/listfail {url}; POST /api/_mock/clock {at: "[2026-10-12 09:00:00 UTC]"} dates those lines), settings/backup (a zip of the settings, the allowed and blocked names,
   the zones and the DHCP scopes, with what was asked) and settings/restore (multipart: puts back what the flags ask). A file
   STATEFILE.down makes it drop every connection (a server that does not answer); STATEFILE.readonly makes every change fail.
+  The kids' controls: dnsClient/resolve answers A/AAAA for the safe names (POST /api/_mock/resolve {domain, addresses: "a,b"} changes
+  them; "resolves" counts the calls); POST /api/_mock/lists {url, content} is what a list URL holds (Technitium downloaded it);
+  GET /api/_mock/answer?client=&name=&type=A answers as the Advanced Blocking app would for that client (its group, allowed, blocked,
+  the lists with their own addresses, the regexes, in the app's order): {group, rcode, answer, source}; POST /api/_mock/logs
+  {entries: JSON} adds query-log entries.
 """
+import ipaddress
+import re
 import io
 import zipfile
 from email import message_from_bytes
@@ -49,7 +56,7 @@ state = {
                  "concurrentForwarding": True, "dnssecValidation": True, "preferIPv6": False, "blockListUrls": None,
                  "blockListUpdateIntervalHours": 24, "blockListNextUpdatedOn": "2026-10-10T08:00:00.000Z", "cacheMaximumEntries": 10000,
                  "serveStale": True, "blockingType": "NxDomain"},
-    "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [], "writes": 0,
+    "apps": {}, "allowed": [], "blocked": [], "zones": {}, "calls": [], "writes": 0, "lists": {}, "resolves": 0, "logs": [],
     "update": None, "log": [], "listfail": [], "backups": [], "restores": [], "forced": 0,
     "dhcp": {"scopes": {"Default": {"enabled": False, "startingAddress": "192.168.1.1", "endingAddress": "192.168.1.254", "subnetMask": "255.255.255.0",
                                     "leaseTimeDays": 1, "leaseTimeHours": 0, "leaseTimeMinutes": 0, "domainName": "home", "routerAddress": "192.168.1.1",
@@ -62,6 +69,9 @@ TOP = {"dns1": [{"name": "192.168.2.50", "domain": "tablet-9.home", "hits": 120}
                 {"name": "127.0.0.1", "hits": 9}, {"name": "fd00::5", "hits": 3}],
        "dns2": [{"name": "192.168.2.50", "domain": "tablet-9.home", "hits": 30}]}
 PTR = {"70.2.168.192.in-addr.arpa": "pi-hole.home"}
+RESOLVE = {"forcesafesearch.google.com": ["216.239.38.120", "2001:4860:4802:32::78"], "restrict.youtube.com": ["216.239.38.120", "2001:4860:4802:32::78"],
+           "restrictmoderate.youtube.com": ["216.239.38.119", "2001:4860:4802:32::77"], "strict.bing.com": ["150.171.27.16", "150.171.28.16"],
+           "safe.duckduckgo.com": ["52.149.247.1"]}
 
 
 def ip2n(a):
@@ -198,6 +208,43 @@ class H(BaseHTTPRequestHandler):
             state["dhcp"]["scopes"] = body["scopes"]
         return {"response": state["settings"], "server": NAME, "status": "ok"}
 
+    def answer_as_app(self, client, name, qtype):
+        """the Advanced Blocking app's answer for one client (App.cs: allowed wins; then blocked, block lists, blockedRegex, regex block lists)"""
+        cfg = json.loads(state["apps"].get("Advanced Blocking") or "{}")
+        ip = ipaddress.ip_address(client)
+        best = None
+        for net, gname in (cfg.get("networkGroupMap") or {}).items():
+            n = ipaddress.ip_network(net, strict=False)
+            if ip in n and (best is None or n.prefixlen > best[0]):
+                best = (n.prefixlen, gname)
+        g = next((x for x in cfg.get("groups", []) if best and x["name"] == best[1]), None)
+        up = {"group": best[1] if best else None, "rcode": "NoError", "answer": ["198.51.100.7" if qtype == "A" else "2001:db8::7"], "source": "upstream"}
+        if not cfg.get("enableBlocking", True) or not g or not g.get("enableBlocking", True):
+            return up
+        zone = lambda names: any(name == d or name.endswith("." + d) for d in names)
+        lines = lambda url: [ln.strip() for ln in state["lists"].get(url, "").splitlines() if ln.strip() and not ln.startswith("#")]
+        doms = lambda url: [(ln.split()[1] if len(ln.split()) > 1 else ln.split()[0]).lower() for ln in lines(url)]
+
+        def blocked(entry, source):
+            nx = entry.get("blockAsNxDomain", g.get("blockAsNxDomain", False)) if isinstance(entry, dict) else g.get("blockAsNxDomain", False)
+            addrs = (entry.get("blockingAddresses") if isinstance(entry, dict) else None) or g.get("blockingAddresses") or []
+            if nx:
+                return {"group": g["name"], "rcode": "NxDomain", "answer": [], "source": source}
+            return {"group": g["name"], "rcode": "NoError", "answer": [a for a in addrs if (":" in a) == (qtype == "AAAA")], "source": source}
+        if zone(g.get("allowed", [])) or any(re.search(r, name) for r in g.get("allowedRegex", [])):
+            return dict(up, group=g["name"], source="allowed")
+        if zone(g.get("blocked", [])):
+            return blocked(None, "blocked")
+        for e in g.get("blockListUrls", []):
+            if zone(doms(e["url"] if isinstance(e, dict) else e)):
+                return blocked(e, "list " + (e["url"] if isinstance(e, dict) else e))
+        if any(re.search(r, name) for r in g.get("blockedRegex", [])):
+            return blocked(None, "blockedRegex")
+        for e in g.get("regexBlockListUrls", []):
+            if any(re.search(r, name) for r in lines(e["url"] if isinstance(e, dict) else e)):
+                return blocked(e, "regex list " + (e["url"] if isinstance(e, dict) else e))
+        return dict(up, group=g["name"])
+
     def route(self, p, q):
         s = state["settings"]
         ok = lambda resp=None: {"response": resp or {}, "server": NAME, "status": "ok"}
@@ -259,7 +306,21 @@ class H(BaseHTTPRequestHandler):
             return ok({"topClients": TOP.get(NAME, [])[: int(q.get("limit", 1000))]})
         if p == "/api/dnsClient/resolve":
             ans = [{"Name": q["domain"], "Type": "PTR", "RDATA": {"Domain": PTR[q["domain"]]}}] if q.get("type") == "PTR" and q.get("domain") in PTR else []
+            if q.get("type") in ("A", "AAAA") and q.get("domain") in RESOLVE:
+                state["resolves"] += 1
+                ans = [{"Name": q["domain"], "Type": q["type"], "RDATA": {"IPAddress": a}} for a in RESOLVE[q["domain"]] if (":" in a) == (q["type"] == "AAAA")]
             return ok({"result": {"Answer": ans}})
+        if p == "/api/_mock/resolve":
+            RESOLVE[q["domain"]] = [a for a in q.get("addresses", "").split(",") if a]
+            return ok()
+        if p == "/api/_mock/lists":
+            state["lists"][q["url"]] = q.get("content", "")
+            return ok()
+        if p == "/api/_mock/logs":
+            state["logs"] += json.loads(q["entries"])
+            return ok()
+        if p == "/api/_mock/answer":
+            return ok(self.answer_as_app(q["client"], q["name"].lower(), q.get("type", "A")))
         d = state["dhcp"]
         if p == "/api/dhcp/scopes/list":
             return ok({"scopes": [scope_view(n, sc, False) for n, sc in d["scopes"].items()]})
@@ -329,7 +390,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/logs/query":
             if q.get("name") not in state["apps"]:
                 raise ValueError("DNS application was not found: " + str(q.get("name")))
-            e = [x for x in LOGS if not q.get("clientIpAddress") or x["clientIpAddress"] == q["clientIpAddress"]]
+            e = [x for x in LOGS + state["logs"] if not q.get("clientIpAddress") or x["clientIpAddress"] == q["clientIpAddress"]]
             if q.get("responseType"):
                 e = [x for x in e if x["responseType"] == q["responseType"]]
             if q.get("qname"):

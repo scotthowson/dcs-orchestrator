@@ -8,8 +8,9 @@
 # owner never opens Technitium's own console: the numbers (queries, blocked,
 # top clients and domains), a device's recent queries, block and allow, pause
 # blocking, the blocklists, the kids' groups (the Advanced Blocking app: a
-# group per child or per set of devices, category lists, a bedtime that blocks
-# everything), SafeSearch and YouTube's restricted mode for the whole house,
+# group per child or per set of devices, categories, SafeSearch and YouTube's
+# restricted mode, time windows such as bedtime, an allow-list mode, exceptions,
+# a report), an optional SafeSearch switch for the whole house,
 # a baseline for a fresh instance, and the secondary kept equal to the primary.
 #
 # Settings: TECHNITIUM_URL and TECHNITIUM_SECONDARY_URL in .env (http://host:5380);
@@ -21,17 +22,19 @@
 # DCS's own model of the groups is .data/technitium/groups.json; it is rendered
 # into the Advanced Blocking app's config (DCS owns that config: what was set
 # in Technitium's console for the app is replaced). state.json keeps what the
-# minute clock needs (which groups are in bedtime, the pauses), the last sync
-# and whether each instance answered.
+# minute clock needs (the windows in force, the pauses, what it last wrote, the
+# safe names' addresses), the last sync and whether each instance answered.
 #
 # The device directory (devices.json: every device seen, its nickname, icon and notes) and Technitium's DHCP (the
 # scope, the leases, reservations, moving the house's DHCP here) are at the end of this file.
 #
-# SafeSearch is a house-wide switch, not a group's: Advanced Blocking answers a
-# blocked name with fixed addresses only (never a CNAME, and only for lists it
-# downloads), so a group cannot be sent to forcesafesearch.google.com. The
-# switch makes one Forwarder zone per forced name (its other names resolve as
-# usual, "this-server") whose apex is an ANAME to the search engine's safe name.
+# SafeSearch per group: Advanced Blocking answers a name of a block list with the
+# addresses given with that list (blockingAddresses of a blockListUrls or
+# regexBlockListUrls entry; a group's own "blocked" names only get the group's).
+# So a group with SafeSearch has one regex list per search engine (the exact
+# names, served by this API at /dns/technitium/kids-lists/{name}.txt) with the
+# safe name's addresses, resolved by the primary once a day. The house switch
+# makes one Forwarder zone per forced name whose apex is an ANAME to the safe name.
 #
 # Loaded on demand (_technitium_lib in api-server.sh).
 # =============================================================================
@@ -49,12 +52,11 @@ TT_QL_CLASS="QueryLogsSqlite.App"
 # the lists used to be in is gone (404): wildcard/*-onlydomains.txt is what Hagezi lists for Technitium.
 TT_HAGEZI="https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard"
 TT_BASE_LISTS="[\"$TT_HAGEZI/pro-onlydomains.txt\",\"$TT_HAGEZI/tif-onlydomains.txt\",\"$TT_HAGEZI/doh-onlydomains.txt\"]"
-# the categories a group can block (Hagezi has no dating list: none is offered rather than a list that does something else)
-TT_CATEGORIES="[{\"id\":\"adult\",\"name\":\"Adult content\",\"url\":\"$TT_HAGEZI/nsfw-onlydomains.txt\"},
-{\"id\":\"gambling\",\"name\":\"Gambling\",\"url\":\"$TT_HAGEZI/gambling-onlydomains.txt\"},
-{\"id\":\"social\",\"name\":\"Social networks\",\"url\":\"$TT_HAGEZI/social-onlydomains.txt\"},
-{\"id\":\"proxy-vpn\",\"name\":\"VPNs, proxies and other DNS\",\"url\":\"$TT_HAGEZI/doh-vpn-proxy-bypass-onlydomains.txt\"},
-{\"id\":\"nosafesearch\",\"name\":\"Search engines without SafeSearch\",\"url\":\"$TT_HAGEZI/nosafesearch-onlydomains.txt\"}]"
+# the kids' controls: the categories a group can block (each backed by lists and/or a built-in set of domains), the sites an
+# allow-list group can have, what an allow-list tablet needs, the SafeSearch names (.config/kids-categories.json, sources cited there)
+TT_KIDS_FILE="$BASE_DIR/.config/kids-categories.json"
+TT_KIDS=$(jq -c . "$TT_KIDS_FILE" 2>/dev/null) || TT_KIDS='{"categories":[],"allowlist_sites":[],"essentials":{"domains":[],"subdomains":[]},"safe_search":{}}'
+TT_CATEGORIES=$(jq -c '.categories' <<< "$TT_KIDS")
 # the names SafeSearch and YouTube's restricted mode force (Google's, Microsoft's and DuckDuckGo's documented ones)
 TT_SAFESEARCH='{"www.google.com":"forcesafesearch.google.com","www.bing.com":"strict.bing.com","duckduckgo.com":"safe.duckduckgo.com","www.duckduckgo.com":"safe.duckduckgo.com"}'
 TT_YOUTUBE_HOSTS='["www.youtube.com","m.youtube.com","youtubei.googleapis.com","youtube.googleapis.com","www.youtube-nocookie.com"]'
@@ -123,13 +125,56 @@ _tt_roles() { local r; for r in primary secondary; do _tt_configured "$r" && pri
 
 _tt_state() { _api_state_file "$TT_STATE" '{}' object >/dev/null 2>&1 || true; cat "$TT_STATE" 2>/dev/null || printf '{}'; }
 _tt_state_set() { mkdir -p "$TT_DIR" 2>/dev/null; chmod 700 "$TT_DIR" 2>/dev/null || true; _api_state_file "$TT_STATE" '{}' object >/dev/null 2>&1 || true; _api_jq_update_file "$TT_STATE" "$@" || true; }
+# a group as DCS keeps it (version 2): an older one (lists, bedtime) read as the new shape; the house's SafeSearch switch is optional
+# shellcheck disable=SC2016  # jq, not shell
+TT_GNORM_JQ='def gnorm: {id, name, devices: (.devices // []), mode: (.mode // "filter"), categories: (.categories // .lists // []),
+    safe_search: (.safe_search == true), youtube: (.youtube // "off"),
+    windows: (.windows // (if .bedtime then [{id: "bedtime", name: "Bedtime", enabled: (.bedtime.enabled == true), from: (.bedtime.from // "20:30"),
+                 to: (.bedtime.to // "07:00"), days: (.bedtime.days // [1,2,3,4,5,6,7]), scope: "all", categories: []}] else [] end)),
+    allowed: (.allowed // []), blocked: (.blocked // []), sites: (.sites // [])};'
+TT_MODEL_EMPTY='{"version":2,"house":{"safe_search":false,"youtube":"off"},"groups":[],"migration":null}'
 _tt_model() {
+    local m
     mkdir -p "$TT_DIR" 2>/dev/null || true
-    _api_state_file "$TT_GROUPS" '{"house":{"safe_search":false,"youtube":"off"},"groups":[]}' object >/dev/null 2>&1 || true
-    jq -c '{house: ({safe_search: false, youtube: "off"} + (.house // {})), groups: (.groups // [])}' "$TT_GROUPS" 2>/dev/null \
-        || printf '{"house":{"safe_search":false,"youtube":"off"},"groups":[]}'
+    _api_state_file "$TT_GROUPS" "$TT_MODEL_EMPTY" object >/dev/null 2>&1 || true
+    m=$(jq -c "$TT_GNORM_JQ"'{version: (.version // 1), house: ({safe_search: false, youtube: "off"} + (.house // {})),
+        groups: ((.groups // []) | map(gnorm)), migration: (.migration // null)}' "$TT_GROUPS" 2>/dev/null) || m="$TT_MODEL_EMPTY"
+    if [[ "$(jq -r '.version' <<< "$m")" != 2 ]]; then m=$(_tt_migrate "$m"); _tt_model_save "$m" 2>/dev/null || true; fi
+    printf '%s\n' "$m"
 }
 _tt_model_save() { (umask 077; mkdir -p "$TT_DIR"; printf '%s\n' "$1" | jq . > "$TT_GROUPS.tmp") && mv -f "$TT_GROUPS.tmp" "$TT_GROUPS"; }
+
+# version 1 → 2, once: the house's SafeSearch/YouTube switch (on) moves into every group and goes off (nothing loosens for a
+# child; the owner's own devices, in no group, are not filtered any more), and the consoles of a group (a device whose icon is
+# a console, or whose icon is still a guess and whose vendor is Nintendo, Sony or Microsoft) move into a group "Consoles" of
+# their own: its first group's bedtime, adult and gambling blocked, no games block (a console's own services must work).
+# The minute clock then writes both to Technitium. What it did is kept in .migration.notes (the Kids tab says it).
+_tt_migrate() {
+    local dir cid
+    dir=$(_tt_dir 2>/dev/null) || dir='{"devices":[]}'
+    cid="g$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    jq -c --argjson d "$dir" --arg cid "$cid" --argjson at "$(date +%s)" '
+        .house as $h | (($h.safe_search == true) or (($h.youtube // "off") != "off")) as $hon | (.groups | length) as $ng
+        | ($d.devices | map({key: .id, value: .}) | from_entries) as $byid
+        | ($d.devices | map(select(.ip != null) | {key: .ip, value: .}) | from_entries) as $byip
+        | def rec($x): ($byid[$x.id // ""] // $byip[$x.ip // ""]);
+          def console($x): rec($x) as $r | $r != null and ($r.icon == "console"
+              or (($r.icon_guessed != false or $r.icon == null) and ($r.vendor // "" | test("nintendo|sony|microsoft"; "i"))));
+          def dname($x): rec($x) as $r | [$r.nickname, $x.label, ($r.hostname // "" | sub("\\..*$"; "")), $x.ip] | map(select(. != null and . != "")) | first;
+        .groups |= map(if $hon then . + {safe_search: ($h.safe_search == true), youtube: ($h.youtube // "off")} else . end)
+        | [.groups[] | {name, windows, safe_search, youtube, consoles: [.devices[] | select(console(.))]} | select(.consoles | length > 0)] as $src
+        | (if ($src | length) == 0 then [] else
+             [{id: $cid, name: (if any(.groups[]; (.name | ascii_downcase) == "consoles") then "Consoles (moved)" else "Consoles" end),
+               devices: [$src[].consoles[]], mode: "filter", categories: ["adult", "gambling"], safe_search: $src[0].safe_search, youtube: $src[0].youtube,
+               windows: [$src[0].windows[] | select(.scope == "all")], allowed: [], blocked: [], sites: []}] end) as $cg
+        | .groups |= (map(.devices |= map(select(console(.) | not))) + $cg)
+        | .version = 2
+        | .migration = {at: $at, notes: ([
+            (if $hon and $ng > 0 then "SafeSearch \(if $h.safe_search == true then "on" else "off" end) and YouTube \($h.youtube // "off") were for the whole house: every group has them now, and the whole-house switch is off (devices in no group, yours, are not filtered any more)." else empty end),
+            ($src[] | "\(.consoles | map(dname(.)) | join(", ")) moved from \(.name) to \($cg[0].name): the same bedtime, adult content and gambling blocked, no games block (Xbox Live and PlayStation Network must work)."),
+            (if (.groups | length) > 0 then "Bedtime is now the first time window of each group: add more (homework, no internet) in the group." else empty end)])}
+        | .house = (if $ng == 0 then $h else {safe_search: false, youtube: "off"} end)' <<< "$1" 2>/dev/null || printf '%s' "$TT_MODEL_EMPTY"
+}
 
 # =============================================================================
 # Apps
@@ -175,47 +220,105 @@ _tt_app_config_put() {
 # The kids' groups → the Advanced Blocking app
 # =============================================================================
 
-# the ids of the groups in bedtime at NOW (epoch), as a sorted JSON array; a paused bedtime is not in it
-_tt_bedtime_now() {
+# the time windows in force at NOW (epoch): {group id: {ids, names, all (a window that blocks everything), categories (blocked by
+# the windows that block categories), ends: {window id: "HH:MM"}}}. A group paused (bedtime_paused) or a window paused
+# (window_paused["group/window"]) is not in force; a window off (enabled false) never is. A window from 20:30 to 07:00 runs
+# into the next day: it is in force at 06:00 when the day before is one of its days.
+_tt_windows_now() {
     local now="$1" dow ydow hm
     dow=$(date -d "@$now" +%u); ydow=$(date -d "@$((now - 86400))" +%u); hm=$(date -d "@$now" +%H:%M)
     jq -c --argjson dow "$dow" --argjson ydow "$ydow" --arg hm "$hm" --argjson now "$now" --argjson st "$(_tt_state)" '
         def mins: split(":") | (.[0] | tonumber) * 60 + (.[1] | tonumber);
         ($hm | mins) as $m
-        | [.groups[] | select(.bedtime.enabled == true)
-           | select((($st.bedtime_paused // {})[.id] // 0) <= $now)
-           | (.bedtime.from | mins) as $f | (.bedtime.to | mins) as $t | (.bedtime.days // [1,2,3,4,5,6,7]) as $d
-           | select(if $f == $t then false
-                    elif $f < $t then ($d | index($dow)) != null and $m >= $f and $m < $t
-                    else (($d | index($dow)) != null and $m >= $f) or (($d | index($ydow)) != null and $m < $t) end)
-           | .id] | sort' <<< "$(_tt_model)"
+        | [.groups[] | .id as $gid | select((($st.bedtime_paused // {})[$gid] // 0) <= $now)
+           | {key: $gid, value: [.windows[] | select(.enabled == true) | select((($st.window_paused // {})["\($gid)/\(.id)"] // 0) <= $now)
+                | (.from | mins) as $f | (.to | mins) as $t | (.days // [1,2,3,4,5,6,7]) as $d
+                | select(if $f == $t then false
+                         elif $f < $t then ($d | index($dow)) != null and $m >= $f and $m < $t
+                         else (($d | index($dow)) != null and $m >= $f) or (($d | index($ydow)) != null and $m < $t) end)]}
+           | select(.value | length > 0)
+           | .value |= {ids: map(.id), names: map(.name), all: any(.[]; .scope == "all"),
+                        categories: ([.[] | select(.scope == "categories") | .categories[]] | unique), ends: (map({key: .id, value: .to}) | from_entries)}]
+        | from_entries' <<< "$(_tt_model)"
 }
 
-# the app's config for the groups, with the groups of ACTIVE (a JSON array of ids) in bedtime: everything blocked but the house's own domains
-# a device blocked by hand (devices.json blocked_until) is in a group of DCS's own that blocks everything, whatever kids' group it is in
+# where Technitium downloads the SafeSearch lists from: this API, as the other machines of the house reach it (FLEET_SELF_URL)
+_tt_list_base() { local u; u=$(_fleet_self_url 2>/dev/null) || u=""; printf '%s' "${u:-http://127.0.0.1:${API_PORT:-9876}}"; }
+# the safe names' addresses, as the primary resolves them (state.json .safe_addrs, at most a day old); a name it could not
+# resolve keeps its last addresses, else the ones .config/kids-categories.json knows
+_tt_safe_addrs() { jq -c --argjson k "$TT_KIDS" '$k.safe_search.fallback + (.safe_addrs.map // {})' <<< "$(_tt_state)"; }
+_tt_safe_resolve() {
+    local now at t ips map='{}' ty
+    now=$(_tt_now); at=$(jq -r '.safe_addrs.at // 0' <<< "$(_tt_state)")
+    [[ "${1:-}" == force ]] || (( now - at >= 86400 || now < at )) || return 0
+    jq -e '.groups | any(.safe_search or .youtube != "off")' >/dev/null <<< "$(_tt_model)" || return 0
+    _tt_configured primary || return 0
+    for t in $(jq -r '.safe_search.fallback | keys[]' <<< "$TT_KIDS"); do
+        ips='[]'
+        for ty in A AAAA; do
+            _tt_api primary dnsClient/resolve server=this-server "domain=$t" "type=$ty" || continue
+            ips=$(jq -c --argjson i "$ips" '$i + [.response.result.Answer // [] | .[] | select(.Type == "A" or .Type == "AAAA") | .RDATA.IPAddress | select(. != null)]' <<< "$TT_BODY")
+        done
+        [[ "$ips" != '[]' ]] && map=$(jq -c --arg t "$t" --argjson i "$ips" '. + {($t): $i}' <<< "$map")
+    done
+    _tt_state_set --argjson at "$now" --argjson m "$map" '.safe_addrs = {at: $at, map: ((.safe_addrs.map // {}) + $m)}'
+}
+
+# the Advanced Blocking app's config at NOW (DCS owns it). Per group: its devices mapped to it; a window that blocks everything
+# (blockedRegex "."; this server's own domains still answer); else in filter mode its categories (and those of its windows in
+# force) as lists and built-in names, its exceptions (allowed wins over every block) and extras; in allow-list mode everything
+# blocked but its sites, the tablet's essentials and its exceptions. SafeSearch and YouTube: the search engines' names answer
+# their safe address (a regex list of the exact names, downloaded from this API, with the addresses: Advanced Blocking answers
+# a list's names with the addresses given with it, the group's other blocks stay NXDOMAIN). A device blocked by hand is in a
+# group of DCS's own that blocks everything, whatever kids' group it is in.
 _tt_adv_render() {
-    local active="$1" house blocked
+    local now="${1:-$(_tt_now)}" house blocked
     house=$(_domains_all 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0))') || house='[]'
-    blocked=$(_tt_blocked_ips "$(_tt_now)")
-    jq -c --argjson active "$active" --argjson cats "$TT_CATEGORIES" --argjson house "$house" --argjson blocked "$blocked" --arg bg "$TT_BLOCKED_GROUP" '
-        def grp($name; $bed; $lists): {name: $name, enableBlocking: true, allowTxtBlockingReport: true, blockAsNxDomain: true, blockingAddresses: ["0.0.0.0", "::"],
-            allowed: (if $bed then $house else [] end), blocked: [], allowListUrls: [], blockListUrls: $lists,
-            allowedRegex: [], blockedRegex: (if $bed then ["."] else [] end), regexAllowListUrls: [], regexBlockListUrls: [], adblockListUrls: []};
+    blocked=$(_tt_blocked_ips "$now")
+    jq -c --argjson wn "$(_tt_windows_now "$now")" --argjson k "$TT_KIDS" --argjson house "$house" --argjson blocked "$blocked" \
+        --arg bg "$TT_BLOCKED_GROUP" --arg base "$(_tt_list_base)" --argjson addrs "$(_tt_safe_addrs)" '
+        def esc: gsub("\\."; "\\.");
+        ($k.categories | map({key: .id, value: .}) | from_entries) as $cat
+        | ($k.allowlist_sites | map({key: .id, value: .}) | from_entries) as $site
+        | $k.safe_search as $ss
+        | def safe($g): [(if $g.safe_search then "google", "bing", "duckduckgo" else empty end), (if $g.youtube != "off" then "youtube" else empty end)]
+              | map(. as $n | ($ss[$n].target | if type == "object" then .[$g.youtube] else . end) as $t
+                    | {url: "\($base)/dns/technitium/kids-lists/\($n).txt", blockAsNxDomain: false, blockingAddresses: ($addrs[$t] // [])});
+          def grp($name; $o): {name: $name, enableBlocking: true, allowTxtBlockingReport: true, blockAsNxDomain: true, blockingAddresses: [],
+              allowed: [], blocked: [], allowListUrls: [], blockListUrls: [], allowedRegex: [], blockedRegex: [], regexAllowListUrls: [],
+              regexBlockListUrls: [], adblockListUrls: []} + $o;
+          def render($g):
+            ($wn[$g.id] // {all: false, categories: []}) as $w
+            | [($g.categories + $w.categories | unique)[] | $cat[.] // empty] as $cd
+            | ([$cd[].domains[]] | unique) as $cdom
+            | if $w.all then grp($g.name; {allowed: $house, blockedRegex: ["."]})
+              elif $g.mode == "allowlist" then
+                [$g.sites[] | $site[.] // empty] as $sd | any($sd[]; .youtube_api == true) as $yt
+                | grp($g.name; {
+                    allowed: ((([$sd[].domains[]] - $cdom) + $g.allowed + $k.essentials.subdomains + $house
+                               + (if $yt and $g.youtube == "off" then ["youtubei.googleapis.com", "youtube.googleapis.com"] else [] end)) | unique),
+                    allowedRegex: (($k.essentials.domains - $k.essentials.subdomains) | map("^" + esc + "$")),
+                    blockedRegex: [if $yt and $g.youtube != "off" then "^(?!(youtubei|youtube)\\.googleapis\\.com$)." else "." end],
+                    regexBlockListUrls: safe($g)})
+              else grp($g.name; {allowed: $g.allowed, blocked: (($g.blocked + $cdom) | unique), blockListUrls: (reduce $cd[].urls[] as $u ([]; if index($u) then . else . + [$u] end)),
+                                 regexBlockListUrls: safe($g)}) end;
         {enableBlocking: true, blockingAnswerTtl: 30, blockListUrlUpdateIntervalHours: 24, blockListUrlUpdateIntervalMinutes: 0,
          localEndPointGroupMap: {},
          networkGroupMap: ([.groups[] as $g | $g.devices[]? | {key: .ip, value: $g.name}] + ($blocked | map({key: ., value: $bg})) | from_entries),
-         groups: ([.groups[] | (.id as $id | ($active | index($id)) != null) as $bed
-                   | grp(.name; $bed; [(.lists // [])[] as $l | $cats[] | select(.id == $l) | .url])]
-                  + (if ($blocked | length) > 0 then [grp($bg; true; [])] else [] end))}' <<< "$(_tt_model)"
+         groups: ([.groups[] | render(.)] + (if ($blocked | length) > 0 then [grp($bg; {allowed: $house, blockedRegex: ["."]})] else [] end))}' <<< "$(_tt_model)"
 }
 
 # _tt_groups_apply WHO: renders the groups as they are now and puts the config on every connected instance (the app installed when
-# missing). Keeps which groups are in bedtime; writes an audit line for each group that went into or out of it. 0 when the primary took it.
+# missing). Keeps which windows are in force (an audit line for each that starts or ends) and what it wrote (adv_hash: the minute
+# clock writes again only when that changes). 0 when the primary took it.
 TT_APPLY_MSG=""
 _tt_groups_apply() {
-    local who="${1:-dcs}" now active was cfg role ok=1 msgs=() g name
-    now=$(_tt_now); active=$(_tt_bedtime_now "$now") || active='[]'
-    cfg=$(_tt_adv_render "$active") || { TT_APPLY_MSG="Could not render the groups"; return 1; }
+    local who="${1:-dcs}" now wn active cfg role ok=1 msgs=() g name
+    now=$(_tt_now)
+    [[ "$(jq -r '.safe_addrs.at // 0' <<< "$(_tt_state)")" == 0 ]] && _tt_safe_resolve
+    wn=$(_tt_windows_now "$now") || wn='{}'
+    active=$(jq -c '[to_entries[] | select(.value.all) | .key] | sort' <<< "$wn")
+    cfg=$(_tt_adv_render "$now") || { TT_APPLY_MSG="Could not render the groups"; return 1; }
     for role in $(_tt_roles); do
         if _tt_app_ensure "$role" "$TT_ADV_APP" && _tt_app_config_put "$role" "$TT_ADV_APP" "$cfg"; then :; else
             msgs+=("$TT_ERR"); [[ "$role" == primary ]] && ok=0
@@ -223,6 +326,7 @@ _tt_groups_apply() {
     done
     TT_APPLY_MSG="${msgs[*]:-}"
     (( ok == 1 )) || return 1
+    _tt_state_set --arg h "$(jq -S -c . <<< "$cfg" | sha256sum | cut -c1-16)" '.adv_hash = $h'
     # the devices blocked by hand: one audit line when a block starts or ends
     local bnow bwas
     bnow=$(_tt_blocked_now "$now"); bwas=$(jq -c '.blocked_active // []' <<< "$(_tt_state)" 2>/dev/null) || bwas='[]'
@@ -233,33 +337,48 @@ _tt_groups_apply() {
         done < <(jq -r --argjson a "$bnow" --argjson w "$bwas" '(($a - $w) + ($w - $a))[] as $id | .devices[] | select(.id == $id) | [.id, (.nickname // .hostname // .ip)] | @tsv' "$TT_DEVICES" 2>/dev/null)
         _tt_state_set --argjson b "$bnow" '.blocked_active = $b'
     fi
-    was=$(jq -c '.bedtime_active // []' <<< "$(_tt_state)" 2>/dev/null) || was='[]'
-    if [[ "$active" != "$was" ]]; then
-        while IFS=$'\t' read -r g name; do
+    # the windows: one audit line per window that starts or ends (a bedtime one as TECHNITIUM_BEDTIME, as before)
+    local wnow wwas
+    wnow=$(jq -c '[to_entries[] | .key as $g | .value.ids[] | "\($g)/\(.)"] | sort' <<< "$wn")
+    wwas=$(jq -c '.windows_active // ((.bedtime_active // []) | map(. + "/bedtime"))' <<< "$(_tt_state)" 2>/dev/null) || wwas='[]'
+    if [[ "$wnow" != "$wwas" ]]; then
+        local wname desc ev what
+        while IFS=$'\t' read -r g name wname desc; do
             [[ -n "$g" ]] || continue
-            if jq -e --arg g "$g" 'index($g) != null' >/dev/null <<< "$active"; then
-                _api_audit_log "${CLIENT_IP:-local}" "TECHNITIUM_BEDTIME" "$who" "$name: bedtime started (every name blocked)"
-            else
-                _api_audit_log "${CLIENT_IP:-local}" "TECHNITIUM_BEDTIME" "$who" "$name: bedtime ended"
-            fi
-        done < <(jq -r --argjson a "$active" --argjson w "$was" '(($a - $w) + ($w - $a))[] as $id | .groups[] | select(.id == $id) | [.id, .name] | @tsv' <<< "$(_tt_model)")
-        _tt_state_set --argjson a "$active" '.bedtime_active = $a'
+            ev=TECHNITIUM_WINDOW; [[ "${wname,,}" == bedtime ]] && ev=TECHNITIUM_BEDTIME
+            what="ended"; jq -e --arg g "$g" 'index($g) != null' >/dev/null <<< "$wnow" && what="started ($desc)"
+            _api_audit_log "${CLIENT_IP:-local}" "$ev" "$who" "$name: ${wname,,} $what"
+        done < <(jq -r --argjson a "$wnow" --argjson w "$wwas" '(($a - $w) + ($w - $a))[] as $k | ($k | split("/")) as [$gid, $wid]
+                    | .groups[] | select(.id == $gid) | .name as $n | ([.windows[] | select(.id == $wid)][0] // {name: $wid, scope: "all"})
+                    | [$k, $n, .name, (if .scope == "all" then "every name blocked" else (.categories | join(", ")) + " blocked" end)] | @tsv' <<< "$(_tt_model)")
+        _tt_state_set --argjson a "$wnow" '.windows_active = $a'
     fi
+    _tt_state_set --argjson a "$active" '.bedtime_active = $a'
     return 0
 }
 
-# the minute clock (_dcs_automation_loop): re-renders only when the groups in bedtime, or the devices blocked by hand, changed since the last render
+# the minute clock (_dcs_automation_loop): the safe addresses once a day, then a write only when the config DCS would write differs
+# from the last one written (a window starting or ending, a pause running out, a device's block ending, a group changed, the
+# migration); the house's forced SafeSearch names likewise (after the groups: a migrated house switch goes off only once every
+# group has it)
 _tt_tick() {
     [[ -s "$TT_GROUPS" || -s "$TT_DEVICES" ]] || return 0
     _tt_configured primary || return 0
-    local now active was bnow bwas
-    now=$(_tt_now); active=$(_tt_bedtime_now "$now") || return 0
-    bnow=$(_tt_blocked_now "$now")
-    was=$(jq -c '.bedtime_active // []' <<< "$(_tt_state)" 2>/dev/null) || was='[]'
-    bwas=$(jq -c '.blocked_active // []' <<< "$(_tt_state)" 2>/dev/null) || bwas='[]'
-    [[ "$active" == "$was" && "$bnow" == "$bwas" ]] && return 0
-    if _tt_groups_apply scheduler; then _api_cache_clear 2>/dev/null || true
-    else printf '%s technitium: bedtime not applied: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TT_APPLY_MSG" >&2; fi
+    local now cfg h fh role
+    now=$(_tt_now)
+    _tt_safe_resolve
+    cfg=$(_tt_adv_render "$now") || return 0
+    h=$(jq -S -c . <<< "$cfg" | sha256sum | cut -c1-16)
+    if [[ "$h" != "$(jq -r '.adv_hash // ""' <<< "$(_tt_state)")" ]]; then
+        if _tt_groups_apply scheduler; then _api_cache_clear 2>/dev/null || true
+        else printf '%s technitium: the groups not applied: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$TT_APPLY_MSG" >&2; return 0; fi
+    fi
+    fh=$(_tt_forced_want | sha256sum | cut -c1-16)
+    if [[ "$fh" != "$(jq -r '.forced_hash // ""' <<< "$(_tt_state)")" ]]; then
+        for role in $(_tt_roles); do _tt_forced_apply "$role" || return 0; done
+        _tt_state_set --arg h "$fh" '.forced_hash = $h'
+        _api_cache_clear 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -388,7 +507,7 @@ _tt_sync() {
     if jq -e '.groups | length > 0' >/dev/null <<< "$(_tt_model)" || jq -e --arg n "$TT_ADV_APP" '.response.apps // [] | any(.name == $n)' >/dev/null <<< "$TT_BODY"; then
         local ac
         ac=""; _tt_app_config primary "$TT_ADV_APP" && ac="$TT_CFG"
-        [[ -n "$ac" ]] || ac=$(_tt_adv_render "$(jq -c '.bedtime_active // []' <<< "$(_tt_state)")")
+        [[ -n "$ac" ]] || ac=$(_tt_adv_render)
         _tt_app_ensure secondary "$TT_ADV_APP" && _tt_app_config_put secondary "$TT_ADV_APP" "$ac" || { _tt_sync_fail "$TT_ERR"; return 1; }
     fi
     _tt_forced_apply primary || { _tt_sync_fail "$TT_ERR"; return 1; }
@@ -595,42 +714,81 @@ handle_technitium_resume() {
     _api_success "$(jq -nc --arg e "${errs[*]:-}" '{success: true, blocking: true, warning: (if $e == "" then null else $e end)}')"
 }
 
-# GET /dns/technitium/groups — The kids' groups (devices, category lists, bedtime), which are in bedtime now and until when a bedtime is paused, the categories, the house's SafeSearch and YouTube setting
+# GET /dns/technitium/groups — The kids' groups (devices, mode, categories, SafeSearch and YouTube, time windows, allow-list sites, exceptions) with what is in force now (active: the windows and what they block; in_bedtime: a window that blocks everything) and the pauses; the categories, the allow-list sites and essentials, the window and allow-list presets, the house's optional SafeSearch switch, the address Technitium downloads the SafeSearch lists from, what the last migration did
 handle_technitium_groups() {
-    local now active
-    now=$(_tt_now); active=$(_tt_bedtime_now "$now") || active='[]'
-    _api_success "$(jq -c --argjson a "$active" --argjson st "$(_tt_state)" --argjson c "$TT_CATEGORIES" --argjson now "$now" \
-        --argjson ss "$TT_SAFESEARCH" --argjson yt "$TT_YOUTUBE_HOSTS" '
-        {house: .house, groups: [.groups[] | .id as $id | . + {in_bedtime: ($a | index($id) != null),
-            bedtime_paused_until: ((($st.bedtime_paused // {})[$id] // 0) as $p | if $p > $now then ($p | todate) else null end)}],
-         categories: ($c | map({id, name})), forced_names: {safe_search: ($ss | keys), youtube: $yt},
-         safe_search_scope: "house", now: ($now | todate)}' <<< "$(_tt_model)")"
+    local now wn
+    now=$(_tt_now); wn=$(_tt_windows_now "$now") || wn='{}'
+    _api_success "$(jq -c --argjson wn "$wn" --argjson st "$(_tt_state)" --argjson k "$TT_KIDS" --argjson now "$now" \
+        --argjson ss "$TT_SAFESEARCH" --argjson yt "$TT_YOUTUBE_HOSTS" --arg base "$(_tt_list_base)" '
+        def until($p): if ($p // 0) > $now then ($p | todate) else null end;
+        {house: .house, migration: .migration,
+         groups: [.groups[] | .id as $id | ($wn[$id] // null) as $a | . + {
+            active: $a, in_bedtime: ($a.all // false),
+            paused_until: until(($st.bedtime_paused // {})[$id]), bedtime_paused_until: until(($st.bedtime_paused // {})[$id]),
+            windows: [.windows[] | .id as $wid | . + {active: (($a.ids // []) | index($wid) != null), paused_until: until(($st.window_paused // {})["\($id)/\(.id)"])}]}],
+         categories: ($k.categories | map({id, name, description, sources, lists: (.urls | length), names: (.domains | length)})),
+         allowlist_sites: ($k.allowlist_sites | map({id, name, description, domains})), essentials: $k.essentials,
+         window_presets: $k.window_presets, allowlist_presets: $k.allowlist_presets,
+         forced_names: {safe_search: ($ss | keys), youtube: $yt}, safe_search_scope: "group", list_url: "\($base)/dns/technitium/kids-lists/",
+         now: ($now | todate)}' <<< "$(_tt_model)")"
 }
 
-# the group in BODY checked and tidied (JSON on stdout), or the reason it is refused (status 1, the sentence on stdout)
+# the group in BODY checked and tidied (JSON on stdout), or the reason it is refused (status 1, the sentence on stdout). An older
+# dashboard's {lists, bedtime} is read as {categories, windows: [Bedtime]}.
 _tt_group_clean() {
-    jq -c --argjson cats "$TT_CATEGORIES" '
+    jq -c --argjson k "$TT_KIDS" "$TT_GNORM_JQ"'
         def hm: test("^([01][0-9]|2[0-3]):[0-5][0-9]$");
         def ipok: test("^([0-9]{1,3}\\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$") or test("^[0-9A-Fa-f:]{2,39}(/[0-9]{1,3})?$");
-        (.name // "" | tostring | gsub("^\\s+|\\s+$"; "")) as $name
+        def dom: ascii_downcase | gsub("^\\s+|\\s+$|\\.$"; "");
+        def domok: length <= 253 and test("^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$");
+        def tidy: gsub("^\\s+|\\s+$"; "");
+        ($k.categories | map(.id)) as $cats | ($k.allowlist_sites | map(.id)) as $sites
+        | (.youtube // "strict") as $yt0
+        | (.name // "" | tostring | tidy) as $name
         | if ($name | length) < 1 or ($name | length) > 40 or ($name | test("^[A-Za-z0-9 ._()-]+$") | not) then "A group needs a name: letters, digits, spaces, . _ ( ) and - (40 at most)"
           elif (.devices // [] | type) != "array" or (.devices // [] | length) > 64 then "devices is a list of at most 64 {ip, label}"
           elif (.devices // [] | map(select((.ip // "" | tostring | ipok) | not)) | length) > 0 then "A device needs its address (192.168.2.50, or a network like 192.168.2.0/28)"
           elif (.devices // [] | map(.ip) | length) != (.devices // [] | map(.ip) | unique | length) then "An address is in the group twice"
           elif (.devices // [] | map(select((.label // "" | tostring | length) > 40 or ((.mac // "" | tostring) | (. == "" or test("^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")) | not))) | length) > 0 then "A device label is 40 characters at most, and a MAC address looks like aa:bb:cc:dd:ee:ff"
-          elif (.lists // [] | type) != "array" or (.lists // [] | map(select(. as $l | $cats | map(.id) | index($l) | not)) | length) > 0 then "lists are among: \($cats | map(.id) | join(", "))"
+          elif ((.categories // .lists // []) | type) != "array" or ((.categories // .lists // []) | map(select(. as $l | $cats | index($l) | not)) | length) > 0 then "categories are among: \($cats | join(", "))"
+          elif (.mode // "filter" | IN("filter", "allowlist") | not) then "mode is filter or allowlist"
+          elif (.safe_search // false | type) != "boolean" then "safe_search is true or false"
+          elif ($yt0 | IN("off", "moderate", "strict") | not) then "youtube is off, moderate or strict"
           elif .bedtime != null and ((.bedtime | type) != "object" or (.bedtime.from // "20:30" | hm | not) or (.bedtime.to // "07:00" | hm | not)
                 or (.bedtime.days // [1,2,3,4,5,6,7] | type) != "array" or (.bedtime.days // [] | map(select(type != "number" or . < 1 or . > 7)) | length) > 0)
             then "bedtime is {enabled, from: \"20:30\", to: \"07:00\", days: [1..7, Monday is 1]}"
-          else {id: (.id // null), name: $name,
-                devices: (.devices // [] | map({ip: (.ip | tostring), label: (.label // "" | tostring | gsub("^\\s+|\\s+$"; "")), mac: (if (.mac // "") == "" then null else (.mac | ascii_downcase) end)}
+          elif (.windows // [] | type) != "array" or (.windows // [] | length) > 12 then "windows is a list of at most 12 time windows"
+          elif (.windows // [] | map(select((type != "object") or ((.name // "" | tostring | tidy | length) | . < 1 or . > 40)
+                  or (.from // "" | tostring | hm | not) or (.to // "" | tostring | hm | not)
+                  or ((.days // [1,2,3,4,5,6,7]) | type != "array" or length == 0 or any(.[]; type != "number" or . < 1 or . > 7))
+                  or (.scope // "all" | IN("all", "categories") | not)
+                  or ((.scope // "all") == "categories" and ((.categories // []) | type != "array" or length == 0 or any(.[]; . as $c | $cats | index($c) | not)))
+                  or ((.id // "w") | tostring | test("^[a-z0-9-]{1,24}$") | not))) | length) > 0
+            then "A window is {name, enabled, from: \"16:00\", to: \"18:00\", days: [1..7], scope: all | categories, categories: [...] (one at least when the scope is categories)}"
+          elif ((.allowed // []) + (.blocked // []) | type) != "array" or (.allowed // [] | length) > 100 or (.blocked // [] | length) > 100
+                or ((.allowed // []) + (.blocked // []) | any(.[]; type != "string" or (dom | domok | not))) then "allowed and blocked are lists of at most 100 names (example.com)"
+          elif (.sites // [] | type) != "array" or (.sites // [] | any(.[]; . as $s | $sites | index($s) | not)) then "sites are among: \($sites | join(", "))"
+          else
+            (. + {youtube: $yt0} | gnorm) as $g
+            | {id: (.id // null), name: $name,
+               devices: ($g.devices | map({ip: (.ip | tostring), label: (.label // "" | tostring | tidy), mac: (if (.mac // "") == "" then null else (.mac | ascii_downcase) end)}
                     + (if (.id // "" | tostring | test("^([0-9a-f]{12}|ip-[0-9]{1,3}(\\.[0-9]{1,3}){3})$")) then {id} else {} end))),
-                lists: (.lists // [] | unique),
-                bedtime: {enabled: (.bedtime.enabled == true), from: (.bedtime.from // "20:30"), to: (.bedtime.to // "07:00"), days: (.bedtime.days // [1,2,3,4,5,6,7] | unique)}}
-          end' <<< "$1" 2>/dev/null || printf '"Send a group: {name, devices: [{ip, label}], lists: [], bedtime: {enabled, from, to, days}}"'
+               mode: $g.mode, categories: ($g.categories | unique), safe_search: $g.safe_search, youtube: $g.youtube,
+               windows: (reduce ($g.windows[] | {id: (.id // null), name: (.name | tostring | tidy), enabled: (.enabled == true), from, to,
+                                                days: (.days // [1,2,3,4,5,6,7] | unique), scope: (.scope // "all"),
+                                                categories: (if (.scope // "all") == "categories" then (.categories | unique) else [] end)}) as $w ([];
+                          . as $acc | ($acc | map(.id)) as $used
+                          | . + [$w + {id: (if $w.id != null and ($used | index($w.id) | not) then $w.id
+                                            else first(range(1; 100) | "w\(.)" | select(. as $i | $used | index($i) | not)) end)}])),
+               allowed: ($g.allowed | map(dom) | unique), blocked: ($g.blocked | map(dom) | unique), sites: ($g.sites | unique)}
+            | ((if .youtube != "off" then $k.safe_search.youtube.hosts else [] end) + (if .safe_search then [$k.safe_search | .google, .bing, .duckduckgo | .hosts[]] else [] end)) as $forced
+            | ([.allowed[] as $a | $forced[] | select(. == $a or endswith("." + $a)) | $a] | unique) as $undo
+            | if ($undo | length) > 0 then "\($undo | join(", ")) in the exceptions would undo the group'"'"'s SafeSearch or YouTube setting: turn that setting off instead"
+              else . end
+          end' <<< "$1" 2>/dev/null || printf '"Send a group: {name, devices: [{ip, label}], mode, categories: [], safe_search, youtube, windows: [], allowed: [], blocked: [], sites: []}"'
 }
 
-# POST /dns/technitium/groups — Add a group, or change one ({id} of an existing one): {name, devices: [{ip, label, mac?, id? (the device directory's)}], lists: [adult, gambling, social, proxy-vpn, nosafesearch], bedtime: {enabled, from, to, days}}; Technitium's Advanced Blocking app gets it (installed when missing) and the secondary follows
+# POST /dns/technitium/groups — Add a group, or change one ({id} of an existing one): {name, devices: [{ip, label, mac?, id? (the device directory's)}], mode: filter|allowlist, categories: [adult, gambling, social, video, games, chat, shopping, nosafesearch, proxy-vpn, piracy], safe_search: true|false, youtube: off|moderate|strict (strict when left out), windows: [{id?, name, enabled, from, to, days: [1..7], scope: all|categories, categories}], allowed: [names, the exceptions], blocked: [names, the extras], sites: [the allow-list mode's sites]}; an older {lists, bedtime} is still read. Technitium's Advanced Blocking app gets it (installed when missing) and the secondary follows
 handle_technitium_group_save() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _tt_need_primary || return
@@ -651,11 +809,14 @@ handle_technitium_group_save() {
     [[ -z "$clash" ]] || { _api_error 409 "A device is in one group at a time: $clash"; return; }
     model=$(jq -c --argjson g "$g" 'if any(.groups[]; .id == $g.id) then .groups |= map(if .id == $g.id then $g else . end) else .groups += [$g] end' <<< "$model")
     _tt_model_save "$model" || { _api_error 500 "Could not write $TT_GROUPS"; return; }
+    # a window that is gone loses its pause
+    _tt_state_set --arg id "$id" --argjson w "$(jq -c '[.windows[].id]' <<< "$g")" \
+        '.window_paused = ((.window_paused // {}) | with_entries(select((.key | startswith($id + "/") | not) or ((.key | ltrimstr($id + "/")) as $k | $w | index($k)))))'
     if ! _tt_groups_apply "${AUTH_USERNAME:-}"; then
         _api_response 502 "$(jq -nc --arg m "$TT_APPLY_MSG" --argjson g "$g" '{error: true, code: 502, message: ("The group is saved in DCS, but Technitium did not take it: " + $m + " (it is tried again on every change and by the minute clock)"), group: $g}')"
         return
     fi
-    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_GROUP" "${AUTH_USERNAME:-}" "saved $(jq -r '"\(.name): \(.devices | length) devices"' <<< "$g")"
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_GROUP" "${AUTH_USERNAME:-}" "saved $(jq -r '"\(.name): \(.devices | length) devices, \(.mode), \(.categories | length) categories, \(.windows | length) windows, SafeSearch \(if .safe_search then "on" else "off" end), YouTube \(.youtube)"' <<< "$g")"
     sync=$(_tt_after_write)
     _api_success "$(jq -nc --argjson g "$g" --argjson sync "$sync" --arg w "$TT_APPLY_MSG" '{success: true, group: $g, sync: $sync, warning: (if $w == "" then null else $w end)}')"
 }
@@ -669,34 +830,101 @@ handle_technitium_group_delete() {
     name=$(jq -r --arg id "$id" '.groups[] | select(.id == $id) | .name' <<< "$model")
     [[ -n "$name" ]] || { _api_error 404 "No group $id"; return; }
     _tt_model_save "$(jq -c --arg id "$id" '.groups |= map(select(.id != $id))' <<< "$model")" || { _api_error 500 "Could not write $TT_GROUPS"; return; }
-    _tt_state_set --arg id "$id" 'del(.bedtime_paused[$id]) | .bedtime_active = ((.bedtime_active // []) - [$id])'
+    _tt_state_set --arg id "$id" 'del(.bedtime_paused[$id]) | .bedtime_active = ((.bedtime_active // []) - [$id])
+        | .windows_active = ((.windows_active // []) | map(select(startswith($id + "/") | not)))
+        | .window_paused = ((.window_paused // {}) | with_entries(select(.key | startswith($id + "/") | not)))'
     _tt_groups_apply "${AUTH_USERNAME:-}" || { _api_error 502 "The group is gone from DCS, but Technitium did not take it: $TT_APPLY_MSG"; return; }
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_GROUP" "${AUTH_USERNAME:-}" "deleted $name"
     sync=$(_tt_after_write)
     _api_success "$(jq -nc --arg id "$id" --argjson sync "$sync" '{success: true, deleted: $id, sync: $sync}')"
 }
 
-# POST /dns/technitium/groups/{id}/pause-bedtime — Pause a group's bedtime: {minutes: 30 (1 to 240), or 0 to end the pause}
+# POST /dns/technitium/groups/{id}/pause — Pause a group's time windows (all of them, or {window: its id} alone): {minutes: 30 (1 to 240), or 0 to end the pause, window?}; the same as /pause-bedtime
 handle_technitium_group_pause() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _tt_need_primary || return
-    local id="$1" body m now until name sync
+    local id="$1" body m now until name wid wname sync key
     _tt_body "${2:-}" || return; body="$TT_REQ"
     name=$(jq -r --arg id "$id" '.groups[] | select(.id == $id) | .name' <<< "$(_tt_model)")
     [[ -n "$name" ]] || { _api_error 404 "No group $id"; return; }
-    m=$(jq -r '.minutes // 30 | tostring' <<< "$body")
+    m=$(jq -r '.minutes // 30 | tostring' <<< "$body"); wid=$(jq -r '.window // "" | tostring' <<< "$body")
     [[ "$m" =~ ^[0-9]{1,3}$ ]] && (( 10#$m <= 240 )) || { _api_error 400 "minutes is 0 to 240"; return; }
+    if [[ -n "$wid" ]]; then
+        wname=$(jq -r --arg id "$id" --arg w "$wid" '.groups[] | select(.id == $id) | .windows[] | select(.id == $w) | .name' <<< "$(_tt_model)")
+        [[ -n "$wname" ]] || { _api_error 404 "No window $wid in $name"; return; }
+    fi
     now=$(_tt_now); until=$(( now + 10#$m * 60 ))
-    if (( 10#$m == 0 )); then _tt_state_set --arg id "$id" 'del(.bedtime_paused[$id])'
-    else _tt_state_set --arg id "$id" --argjson u "$until" '.bedtime_paused = ((.bedtime_paused // {}) + {($id): $u})'; fi
+    if [[ -n "$wid" ]]; then key="window_paused"; set -- "$id/$wid"; else key="bedtime_paused"; set -- "$id"; fi
+    if (( 10#$m == 0 )); then _tt_state_set --arg k "$1" "del(.$key[\$k])"
+    else _tt_state_set --arg k "$1" --argjson u "$until" ".$key = ((.$key // {}) + {(\$k): \$u})"; fi
     _tt_groups_apply "${AUTH_USERNAME:-}" || { _api_error 502 "$TT_APPLY_MSG"; return; }
-    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_BEDTIME" "${AUTH_USERNAME:-}" "$name: bedtime $([[ "$m" == 0 ]] && printf 'pause ended' || printf 'paused for %s minutes' "$m")"
+    _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_BEDTIME" "${AUTH_USERNAME:-}" "$name: ${wname:-its windows} $([[ "$m" == 0 ]] && printf 'pause ended' || printf 'paused for %s minutes' "$((10#$m))")"
     sync=$(_tt_after_write)
-    _api_success "$(jq -nc --arg id "$id" --argjson u "$until" --argjson m "$((10#$m))" --argjson sync "$sync" \
-        '{success: true, id: $id, paused_until: (if $m == 0 then null else ($u | todate) end), sync: $sync}')"
+    _api_success "$(jq -nc --arg id "$id" --arg w "$wid" --argjson u "$until" --argjson m "$((10#$m))" --argjson sync "$sync" \
+        '{success: true, id: $id, window: (if $w == "" then null else $w end), paused_until: (if $m == 0 then null else ($u | todate) end), sync: $sync}')"
 }
 
-# POST /dns/technitium/safesearch — SafeSearch and YouTube's restricted mode for the whole house: {safe_search: true|false, youtube: off|moderate|strict}. Google, Bing and DuckDuckGo answer their safe names; Technitium cannot do it per group
+# GET /dns/technitium/groups/{id}/report?range=lastDay|lastWeek — What a group's devices looked up (the Query Logs (Sqlite) app of both instances; the newest 5000 lookups of a device per instance): the lookups and the blocked, per device its top names and top blocked, the top names and blocked of the group, the blocked counted per category (its built-in names, and the lists DCS keeps a copy of: .data/technitium/lists, a day old at most; the rest is "other")
+handle_technitium_group_report() {
+    _tt_need_primary || return
+    local id="$1" range="${QUERY_PARAMS[range]:-lastDay}" secs g role ip all='[]' start cats
+    case "$range" in lastDay) secs=86400 ;; lastWeek) secs=604800 ;; *) _api_error 400 "range is lastDay or lastWeek"; return ;; esac
+    g=$(jq -c --arg id "$id" '.groups[] | select(.id == $id)' <<< "$(_tt_model)")
+    [[ -n "$g" ]] || { _api_error 404 "No group $id"; return; }
+    start=$(date -u -d "@$(( $(_tt_now) - secs ))" +%Y-%m-%dT%H:%M:%SZ)
+    for role in $(_tt_roles); do
+        for ip in $(jq -r '.devices[].ip | select(test("/") | not)' <<< "$g"); do
+            _tt_api "$role" logs/query "name=$TT_QL_APP" "classPath=$TT_QL_CLASS" pageNumber=1 entriesPerPage=5000 descendingOrder=true "start=$start" "clientIpAddress=$ip" || continue
+            all=$(jq -c --argjson e "$(jq -c '[.response.entries // [] | .[] | {c: .clientIpAddress, q: (.qname | ascii_downcase), b: ((.responseType // "") | test("Blocked"))}]' <<< "$TT_BODY")" '. + $e' <<< "$all")
+        done
+    done
+    cats=$(_tt_report_categories "$g" "$(jq -c '[.[] | select(.b) | .q] | unique' <<< "$all")")
+    _api_success "$(jq -c --argjson g "$g" --arg range "$range" --argjson cats "$cats" '
+        def top($l): group_by(.) | map({name: .[0], count: length}) | sort_by(-.count) | .[:$l];
+        {id: $g.id, name: $g.name, range: $range, lookups: length, blocked: (map(select(.b)) | length),
+         top: (map(.q) | top(10)), top_blocked: (map(select(.b) | .q) | top(10)),
+         by_category: ([.[] | select(.b) | $cats[.q] // "other"] | top(20) | map({category: .name, count})),
+         devices: [$g.devices[] as $d | [.[] | select(.c == $d.ip)] as $e
+                   | {ip: $d.ip, label: $d.label, id: ($d.id // null), lookups: ($e | length), blocked: ($e | map(select(.b)) | length),
+                      top: ($e | map(.q) | top(5)), top_blocked: ($e | map(select(.b) | .q) | top(5))}]}' <<< "$all")"
+}
+
+# {blocked name: category id} for the names of a report: a category's built-in names (with their subdomains) and its lists, of
+# which DCS keeps a copy (.data/technitium/lists/<hash>.txt, fetched again when a day old; a list that cannot be fetched is skipped)
+_tt_report_categories() {
+    local g="$1" names="$2" dir="$TT_DIR/lists" c u f out='{}' now
+    [[ "$names" != '[]' ]] || { printf '{}'; return 0; }
+    mkdir -p "$dir" 2>/dev/null; now=$(date +%s)
+    # the built-in names first
+    out=$(jq -c --argjson k "$TT_KIDS" --argjson n "$names" '[$n[] as $q | $k.categories[] | . as $c | .domains[] | . as $d | select($q == $d or ($q | endswith("." + $d))) | {key: $q, value: $c.id}] | reverse | from_entries' <<< '{}')
+    while IFS=$'\t' read -r c u; do
+        [[ -n "$u" ]] || continue
+        f="$dir/$(printf '%s' "$u" | sha256sum | cut -c1-16).txt"
+        if [[ ! -s "$f" ]] || (( now - $(stat -c %Y "$f" 2>/dev/null || echo 0) > 86400 )); then
+            curl -fsSL --connect-timeout 5 --max-time 30 "$u" 2>/dev/null | tr -d '\r' | awk '!/^[[:space:]]*(#|!|$)/ { d = (NF >= 2 ? $2 : $1); sub(/^\*?\./, "", d); print tolower(d) }' > "$f.tmp" \
+                && [[ -s "$f.tmp" ]] && mv -f "$f.tmp" "$f"
+            rm -f "$f.tmp"
+        fi
+        [[ -s "$f" ]] || continue
+        out=$(jq -r '.[]' <<< "$names" | awk -v c="$c" 'NR == FNR { l[$1] = 1; next } { q = $0; while (q != "") { if (q in l) { print $0 "\t" c; next } i = index(q, "."); if (!i) break; q = substr(q, i + 1) } }' "$f" - \
+              | jq -R -s -c --argjson o "$out" '$o + ([split("\n")[] | select(length > 0) | split("\t") | {key: .[0], value: .[1]}] | from_entries | with_entries(select(.key as $q | $o | has($q) | not)))')
+    done < <(jq -r --argjson k "$TT_KIDS" '[.categories[], (.windows[] | .categories[])] | unique[] as $c | $k.categories[] | select(.id == $c) | .urls[] as $u | [$c, $u] | @tsv' <<< "$g")
+    printf '%s' "$out"
+}
+
+# GET /dns/technitium/kids-lists/{name}.txt — The exact names a kids' group's SafeSearch (google, bing, duckduckgo) or YouTube setting (youtube) answers with the safe address, one regex a line: Technitium's Advanced Blocking app downloads it from here (public: nothing secret in it, and Technitium has no token for it; 404 while Technitium is off)
+handle_technitium_kids_list() {
+    local body
+    body=$(jq -r --arg n "$1" '.safe_search[$n].hosts // empty | .[] | "^" + gsub("\\."; "\\.") + "$"' <<< "$TT_KIDS")
+    [[ -n "$body" ]] || { _api_error 404 "Not found"; return; }
+    body="# DCS: the names a kids' group answers with the safe address ($1)"$'\n'"$body"$'\n'
+    {
+        printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nCache-Control: no-store\r\n' "$(printf '%s' "$body" | wc -c)"
+        printf 'X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n%s' "$body"
+    } 2>/dev/null
+}
+
+# POST /dns/technitium/safesearch — SafeSearch and YouTube's restricted mode for the whole house, every device (yours too): {safe_search: true|false, youtube: off|moderate|strict}. Google, Bing and DuckDuckGo answer their safe names. Optional and off by default: a kids' group has its own (POST /dns/technitium/groups)
 handle_technitium_safesearch() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _tt_need_primary || return
@@ -707,6 +935,7 @@ handle_technitium_safesearch() {
     model=$(jq -c --argjson b "$body" '.house += ($b | with_entries(select(.key == "safe_search" or .key == "youtube")))' <<< "$(_tt_model)")
     _tt_model_save "$model" || { _api_error 500 "Could not write $TT_GROUPS"; return; }
     _tt_forced_apply primary || { _api_error 502 "$TT_ERR"; return; }
+    _tt_state_set --arg h "$(_tt_forced_want | sha256sum | cut -c1-16)" '.forced_hash = $h'
     _api_audit_log "${CLIENT_IP:-unknown}" "TECHNITIUM_SAFESEARCH" "${AUTH_USERNAME:-}" "$(jq -r '"SafeSearch \(if .house.safe_search then "on" else "off" end), YouTube \(.house.youtube)"' <<< "$model")"
     sync=$(_tt_after_write)
     _api_success "$(jq -nc --argjson h "$(jq -c .house <<< "$model")" --argjson w "$(_tt_forced_want)" --argjson sync "$sync" '{success: true, house: $h, forced: $w, sync: $sync}')"
@@ -788,7 +1017,7 @@ handle_technitium_bootstrap() {
         (( TT_DID == 1 )) && changed=$(jq -c '. + ["query log: 30 days"]' <<< "$changed")
         _tt_app_ensure "$role" "$TT_ADV_APP" || { errs+=("$TT_ERR"); continue; }
         (( TT_INSTALLED == 1 )) && new_apps+=("$TT_ADV_APP")
-        _tt_app_config_put "$role" "$TT_ADV_APP" "$(_tt_adv_render "$(_tt_bedtime_now "$(_tt_now)")")" || { errs+=("$TT_ERR"); continue; }
+        _tt_app_config_put "$role" "$TT_ADV_APP" "$(_tt_adv_render)" || { errs+=("$TT_ERR"); continue; }
         (( TT_DID == 1 )) && changed=$(jq -c '. + ["advanced blocking: the groups"]' <<< "$changed")
         out=$(jq -c --arg r "$role" --argjson ch "$changed" --argjson in "$(printf '%s\n' "${new_apps[@]}" | jq -R -s -c 'split("\n") | map(select(length > 0))')" \
             '. + {($r): {changed: $ch, installed: $in}}' <<< "$out")

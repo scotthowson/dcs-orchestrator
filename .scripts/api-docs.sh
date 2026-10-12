@@ -132,6 +132,9 @@ doc_path() {
         "/chat/messages/*")             p="/chat/messages/{id}" ;;
         "/users/*/"*)                   p="${p/\*/\{name\}}" ;;
         "/dns/technitium/groups/*/pause-bedtime") p="/dns/technitium/groups/{id}/pause-bedtime" ;;
+        "/dns/technitium/groups/*/pause") p="/dns/technitium/groups/{id}/pause" ;;
+        "/dns/technitium/groups/*/report") p="/dns/technitium/groups/{id}/report" ;;
+        "/dns/technitium/kids-lists/*.txt") p="/dns/technitium/kids-lists/{name}.txt" ;;
         "/dns/technitium/groups/*")     p="/dns/technitium/groups/{id}" ;;
         "/dns/technitium/devices/*")    p="/dns/technitium/devices/{id}" ;;
         "/dns/technitium/dhcp/leases/*") p="/dns/technitium/dhcp/leases/{mac}" ;;

@@ -44,9 +44,9 @@ leaves Technitium as it is: a bedtime or a device block in force stays until the
 - **Overview**: both servers (reachable, version, blocking, in sync), queries and blocked over the last hour, day
   or week, the top clients, domains and blocked names (**Allow** on a blocked one), **Pause blocking** for 5, 15
   or 60 minutes on both (it comes back by itself; **Resume** ends it early), **Sync now**.
-- **Kids**: one card per group (a child, or all the boys) with its devices, its category lists, its bedtime and
-  **Pause bedtime 30 min**. Categories: adult content, gambling, social networks, VPNs/proxies/other DNS,
-  and search engines without SafeSearch (Hagezi's lists; Hagezi has no dating list, so none is offered).
+- **Kids**: one card per group (a child, or all the boys) with what is in force at a glance (*Bedtime*, *Games blocked
+  until 18:00*, *Allow-list*, *SafeSearch*), today's lookups, blocked and top name, and **Pause 30 min**. Its editor has
+  the devices, SafeSearch and YouTube, the categories, the time windows, the allow-list mode and the exceptions (below).
 - **Activity**: one device's recent queries from both servers, the blocked ones marked, with Allow / Block.
 - **Devices**: the device directory (below): a name and an icon for each, its group, its address pinned, a block
   until a time, its latest queries.
@@ -114,24 +114,97 @@ same addresses). If the primary is down for long, turn the router's DHCP back on
 DCS keeps the groups in `.data/technitium/groups.json` and writes them into the Advanced Blocking app's config on
 both servers (DCS owns that config: what was set for the app in Technitium's console is replaced). A device is an
 address (or a small network such as `192.168.2.48/29`); a device is in one group at a time; a device in no group
-gets the house's blocking alone.
+(yours) gets the house's blocking alone: no SafeSearch, no YouTube restriction, no window.
 
-**Bedtime** blocks every name for the group's devices (`blockedRegex: ["."]`), except this server's own domains,
-from *from* to *to* on the chosen days (a night that starts on Sunday ends on Monday morning). The API's minute
-clock (the automation loop: `AUTOMATIONS_ENABLED` must stay `true`) works out which groups are in bedtime and
-writes the config only when that changes, with a line in the audit log each time. Its state is
-`.data/technitium/state.json`, so a restart of the API changes nothing. **Pause bedtime** lifts it for 30 minutes.
+A group has:
 
-## SafeSearch and YouTube: the whole house
+| Part | Does |
+|---|---|
+| **SafeSearch** (`safe_search`, on or off) | Google (`www.google.com`, `www.google.ca`), Bing (`www.bing.com`) and DuckDuckGo (`duckduckgo.com`, `www.duckduckgo.com`, `start.duckduckgo.com`) answer the address of their safe name (`forcesafesearch.google.com`, `strict.bing.com`, `safe.duckduckgo.com`) for the group's devices only. Exact names: `mail.google.com` or `links.duckduckgo.com` resolve as usual. |
+| **YouTube** (`youtube`: off, moderate, strict; strict for a new group) | `www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com` and `www.youtube-nocookie.com` answer `restrict.youtube.com` (strict) or `restrictmoderate.youtube.com` (moderate). |
+| **Categories** (`categories`, always on) | Blocked all day. Each is maintained lists and/or a short built-in set of names (`.config/kids-categories.json`, its sources cited there): see the table below. |
+| **Time windows** (`windows`) | From a time to a time on chosen days (a window from 20:30 to 07:00 runs into the next morning), each with a switch: *every name* (`scope: all`, bedtime's rule: everything blocked but this server's own domains) or *some categories* (`scope: categories`, e.g. games and video 16:00–18:00 on school days). Bedtime is the first window, named *Bedtime*. Two presets are a click away, both off until switched on: *Homework: games and video blocked 16:00–18:00 Mon–Fri* and *No internet 16:00–18:00 Mon–Fri*. |
+| **Allow-list mode** (`mode: allowlist`) | For the youngest: every name is blocked but the group's sites (`sites`, a switch each), the tablet's essentials and its exceptions. The preset *Little ones* offers YouTube Kids, PBS Kids, Khan Academy Kids, Netflix, Disney+ and Roblox. |
+| **Exceptions** (`allowed`) and **extras** (`blocked`) | Up to 100 names each, with their subdomains. An exception wins over every block of the group (a category, a window that blocks categories), but not over a window that blocks everything; one that would undo the group's SafeSearch or YouTube (`youtube.com` with YouTube on) is refused. |
 
-Technitium cannot do SafeSearch per group: the Advanced Blocking app answers a blocked name only with fixed
-addresses from a downloaded list, never with another name. So it is a switch for the house: each forced name
-(`www.google.com`, `www.bing.com`, `duckduckgo.com`, `www.duckduckgo.com`; for YouTube `www.youtube.com`,
-`m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com`, `www.youtube-nocookie.com`) gets a
-*Forwarder* zone of its own whose apex is an ANAME to the safe name (`forcesafesearch.google.com`,
-`strict.bing.com`, `safe.duckduckgo.com`, `restrict.youtube.com` or `restrictmoderate.youtube.com`); every
-other name under it resolves as usual. Turning it off removes those zones (a zone of the same name you made
-yourself, of another type, is left alone). For the kids, add *Search engines without SafeSearch* to their group.
+**How SafeSearch works per group.** Advanced Blocking answers a blocked name either NXDOMAIN or with addresses, and a
+block list can carry addresses of its own (`blockListUrls`/`regexBlockListUrls` entries `{url, blockAsNxDomain: false,
+blockingAddresses}`; a group's own `blocked` names only get the group's). So a group with SafeSearch gets one regex list
+per search engine (the exact names, `^www\.google\.com$`) with its safe name's addresses, and the group's other blocks
+stay NXDOMAIN. Technitium downloads those lists from this API (`GET /dns/technitium/kids-lists/{google,bing,duckduckgo,youtube}.txt`,
+public: nothing secret in them) at the address other machines reach it by: `FLEET_SELF_URL`, else
+`http://<this server's LAN address>:<API_PORT>`. Technitium must be able to reach it (an `API_IP_WHITELIST` must let the
+two Technitiums in); it keeps its downloaded copy if it cannot. The addresses are resolved by the primary when a group
+first needs them and again once a day (kept in `state.json`; a name that does not resolve keeps its last addresses, else
+the ones in `.config/kids-categories.json`). A window that blocks everything comes first: at bedtime the search engines
+are blocked too. Proven on `technitium/dns-server` 15.6.1 with Advanced Blocking 11.2.1: two clients asking the same
+server, the kid's `www.google.com` answered `216.239.38.120`, the owner's Google's own addresses.
+
+| Category | Blocks | Source |
+|---|---|---|
+| Adult content | pornography and other adult sites | Hagezi NSFW |
+| Gambling | betting, casinos, lotteries | Hagezi Gambling |
+| Social media | Facebook, Instagram, TikTok, X, Snapchat, Reddit, Discord, Threads (Facebook's list also holds WhatsApp) | The Block List Project (Facebook, TikTok, Twitter) + built-in names |
+| Video and streaming | Netflix, Twitch, TikTok, Disney+, Crave, Prime Video (YouTube has its own setting) | built-in names |
+| Games | Roblox, Fortnite/Epic, Minecraft, Steam, EA | built-in names |
+| Chat | WhatsApp, Discord, Messenger, Telegram | The Block List Project (WhatsApp) + built-in names |
+| Shopping | Amazon (.com, .ca), eBay, Temu, AliExpress, Shein | built-in names |
+| Search engines without SafeSearch | the ones that cannot be made safe | Hagezi No SafeSearch |
+| VPNs, proxies and other DNS | the ways around the filter | Hagezi DoH/VPN/TOR/Proxy bypass |
+| Piracy | torrent sites, pirate streaming, warez | Hagezi Anti Piracy |
+
+**Consoles stay out of a kids' group with games blocked.** The games category leaves `xboxlive.com` and `playstation.com`
+alone, but an Xbox or a PlayStation also needs Microsoft's and Sony's other services: put the consoles in a group of their
+own (bedtime, adult and gambling) rather than blocking games for them. A Fire tablet needs Amazon: shopping is not for it.
+
+**Allow-list mode: what the tablet still reaches.** With everything else blocked an Android tablet needs: the
+connectivity check (`connectivitycheck.gstatic.com`, `connectivitycheck.android.com`, `clients1/3/4.google.com`,
+`www.gstatic.com`; without it Android says there is no internet), the clock (`time.android.com`, `android.pool.ntp.org`),
+Google sign-in (`accounts.google.com`, `www.googleapis.com`, `android.googleapis.com`), Google Play and its downloads
+(`play.google.com`, `play.googleapis.com`, `play-fe.googleapis.com`, `play-lh.googleusercontent.com`,
+`android.clients.google.com`, `gvt1.com`, `gvt2.com`, `gvt3.com`) and push messages (`mtalk.google.com`,
+`fcm.googleapis.com`, `firebaseinstallations.googleapis.com`). Exact names (the `gvt` and `ntp` ones with their
+subdomains), nothing broader: `googleapis.com` as a whole would let YouTube's API through. YouTube Kids is
+`youtubekids.com`, `googlevideo.com` (the videos), `ytimg.com` and `ggpht.com` (pictures); its API
+(`youtubei.googleapis.com`, shared with the full YouTube app) answers in restricted mode when the group's YouTube setting
+is on, so the full YouTube app may half work in restricted mode on that tablet: remove it there. These names come from
+the services' documentation and common lists, not from watching each app: if one misbehaves, its blocked names are in the
+device's activity, and an exception lets one through.
+
+**The clock.** The API's minute clock (the automation loop: `AUTOMATIONS_ENABLED` must stay `true`) renders the config
+every minute and writes it only when it differs from the last one written (a window starting or ending, a pause running
+out, a device's block ending): a minute with no change writes nothing. Each window that starts or ends is a line in the
+audit log (`TECHNITIUM_BEDTIME` for bedtime, `TECHNITIUM_WINDOW` for the others). Its state is
+`.data/technitium/state.json`, so a restart of the API changes nothing. **Pause 30 min** lifts a group's windows (all of
+them, or one) for 30 minutes. Technitium answers a blocked name with a TTL of 30 seconds, so a change is in force within
+half a minute.
+
+**The report** (`GET /dns/technitium/groups/{id}/report?range=lastDay|lastWeek`, the admin's): the group's devices'
+lookups from the query log of both servers (the newest 5000 per device and server), the blocked, the top names and the
+top blocked (per device too), and the blocked per category: a category's built-in names, and its lists, of which DCS keeps a
+copy (`.data/technitium/lists`, fetched again when a day old); the rest is *other*.
+
+### Moving to these controls (version 2 of groups.json)
+
+The first time this version reads `groups.json`:
+
+- If the house's SafeSearch or YouTube switch was on, every group gets that setting and the house switch goes off: no child
+  loosens, and your own devices (in no group) are not filtered any more. The minute clock writes the groups first, then
+  removes the house's forced zones. With no group yet, the house switch stays as it was.
+- The consoles of a group (a device whose icon is *console*, or whose icon is still a guess and whose vendor is Nintendo,
+  Sony or Microsoft) move to a new group *Consoles*: the first group's bedtime, adult content and gambling blocked, no
+  games block, no other window.
+- A group's lists become its categories and its bedtime its first window.
+
+What it did is in `groups.json` (`migration.notes`) and on the Kids tab.
+
+## SafeSearch and YouTube for the whole house (optional)
+
+Off by default: a group's own setting is the way. The switch forces every device of the house, yours too: each forced
+name (`www.google.com`, `www.bing.com`, `duckduckgo.com`, `www.duckduckgo.com`; for YouTube `www.youtube.com`,
+`m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com`, `www.youtube-nocookie.com`) gets a *Forwarder* zone
+of its own whose apex is an ANAME to the safe name; every other name under it resolves as usual. Turning it off removes
+those zones (a zone of the same name you made yourself, of another type, is left alone).
 
 ## Local names: your routes inside the house, devices by name
 

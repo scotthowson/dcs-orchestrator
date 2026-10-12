@@ -3,6 +3,41 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Technitium: real kids' controls, per group.** A group now has, each in its own section of the editor:
+  - **SafeSearch and YouTube's restricted mode for its devices only** (`safe_search`, `youtube`: off, moderate or strict;
+    strict for a new group). Advanced Blocking answers a block list's names with that list's own addresses, so a group
+    gets one list per search engine (the exact names, served by DCS at `GET /dns/technitium/kids-lists/{name}.txt`) with
+    the safe name's addresses, resolved by the primary once a day. Proven on Technitium 15.6.1: the kid's `www.google.com`
+    is `216.239.38.120`, yours is Google's own.
+  - **Time windows** beyond bedtime: from, to, days, a switch each, and what they block: every name, or some categories
+    (*Homework: games and video blocked 16:00–18:00 Mon–Fri* and *No internet 16:00–18:00 Mon–Fri* are presets, off until
+    switched on). The minute clock writes the union of the windows in force, only when it changes. **Pause 30 min** per
+    group or per window (`POST /dns/technitium/groups/{id}/pause {minutes, window?}`).
+  - **Ten categories as switches**: adult, gambling, social media, video and streaming, games, chat, shopping, search
+    engines without SafeSearch, VPNs/proxies/other DNS, piracy (`.config/kids-categories.json`: Hagezi and The Block List
+    Project lists, and built-in names where no good list exists; consoles stay out of a games block).
+  - **Allow-list mode** for the youngest: everything blocked but the group's sites (the *Little ones* preset: YouTube
+    Kids, PBS Kids, Khan Academy Kids, Netflix, Disney+, Roblox, a switch each), what an Android tablet needs, and its
+    exceptions.
+  - **Exceptions and extras** (`allowed`, `blocked`): an exception that would undo the group's SafeSearch is refused.
+  - **A report**: `GET /dns/technitium/groups/{id}/report?range=lastDay|lastWeek` (lookups, blocked, top names, per
+    device, blocked per category), on the group's card: *Today: 1,240 lookups, 86 blocked, top: roblox.com*.
+
+### Changed
+
+- **Technitium: the whole-house SafeSearch switch is optional and off.** It hit every device, the owner's too. On the
+  first start, if it was on, its setting moves into every existing kids' group and the switch goes off, so nothing loosens
+  for a child (the groups are written before the house's forced zones go). The consoles of a kids' group (icon *console*,
+  or a guessed icon and a Nintendo, Sony or Microsoft vendor) move to a new group *Consoles* with the same bedtime, adult
+  content and gambling blocked, no games block and no other window. A group's bedtime becomes its first time window. The
+  Kids tab says what moved.
+- The *Social media* category now uses The Block List Project's Facebook, TikTok and Twitter lists with a built-in set
+  (Instagram, Snapchat, Reddit, Discord, Threads) instead of Hagezi's list.
+
 ## [4.0.52] - 2026-10-11
 
 ### Fixed
