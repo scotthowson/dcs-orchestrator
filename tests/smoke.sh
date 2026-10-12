@@ -10714,7 +10714,7 @@ check "technitium: …on both"                       "ads.example.net ads.exampl
 check "technitium: allow a name, on both"          "example.com example.com" "$(tt_req "$TA" POST /dns/technitium/allow '{"domain":"example.com"}' >/dev/null; m1 '.allowed | join(",")') $(m2 '.allowed | join(",")')"
 check "technitium: not a name"                     400 "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"no spaces.com"}' | status_of)"
 check "technitium: a viewer cannot block"          403 "$(tt_req "$TU" POST /dns/technitium/block '{"domain":"x.example"}' | status_of)"
-check "technitium: lists"                          "3 example.com ads.example.net 10" "$(tt_req "$TU" GET /dns/technitium/lists | body_of | jq -r '"\(.blocklists | length) \(.allowed | join(",")) \(.blocked | join(",")) \(.categories | length)"')"
+check "technitium: lists"                          "3 example.com ads.example.net 11" "$(tt_req "$TU" GET /dns/technitium/lists | body_of | jq -r '"\(.blocklists | length) \(.allowed | join(",")) \(.blocked | join(",")) \(.categories | length)"')"
 check "technitium: unblock, on both"               "0 0" "$(tt_req "$TA" POST /dns/technitium/block '{"domain":"ads.example.net","remove":true}' >/dev/null; m1 '.blocked | length') $(m2 '.blocked | length')"
 
 # pause / resume
@@ -10741,7 +10741,7 @@ check "technitium: a bedtime of 25:00"             400 "$(tt_req "$TA" POST /dns
 check "technitium: a name taken"                   409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"boys"}' | status_of)"
 check "technitium: a device in two groups"         409 "$(tt_req "$TA" POST /dns/technitium/groups '{"name":"Girls","devices":[{"ip":"192.168.2.50"}]}' | status_of)"
 check "technitium: a viewer cannot add a group"    403 "$(tt_req "$TU" POST /dns/technitium/groups '{"name":"Mine"}' | status_of)"
-check "technitium: a viewer reads the groups"      "200 Boys false 10" "$(R=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '"\(.groups[0].name) \(.groups[0].in_bedtime) \(.categories | length)"')")"
+check "technitium: a viewer reads the groups"      "200 Boys false 11" "$(R=$(tt_req "$TU" GET /dns/technitium/groups '' DCS_TECHNITIUM_NOW=$MON1000); printf '%s %s' "$(status_of <<< "$R")" "$(body_of <<< "$R" | jq -r '"\(.groups[0].name) \(.groups[0].in_bedtime) \(.categories | length)"')")"
 check "technitium: SafeSearch is a group's"        "group strict false" "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r '"\(.safe_search_scope) \(.groups[0].youtube) \(.groups[0].safe_search)"')"
 
 # bedtime by the minute clock (a fake clock: DCS_TECHNITIUM_NOW, UTC)
@@ -10777,16 +10777,22 @@ check "technitium: …and bedtime comes back at 21:31" '["."]' "$(_adv m1 | jq -
 check "technitium: a pause of 300 minutes"         400 "$(tt_req "$TA" POST "/dns/technitium/groups/$GB/pause-bedtime" '{"minutes":300}' | status_of)"
 check "technitium: a group that is not there"      404 "$(tt_req "$TA" POST /dns/technitium/groups/gnope/pause-bedtime '{}' | status_of)"
 
-# SafeSearch and YouTube for the house
+# SafeSearch and YouTube for the house: the house's rules (Advanced Blocking's group for every address), no forced zones any more
 _tss=$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":true,"youtube":"moderate"}' | body_of)
 check "technitium: SafeSearch on, YouTube moderate" "true moderate true" "$(jq -r '"\(.house.safe_search) \(.house.youtube) \(.sync.ok)"' <<< "$_tss")"
-check "technitium: www.google.com is a Forwarder zone, its apex an ANAME" "Forwarder ANAME forcesafesearch.google.com" "$(m1 '.zones["www.google.com"] | "\(.type) \(.records[0].type) \(.records[0].rData.aname)"')"
-check "technitium: …YouTube restricted (moderate), on both" "restrictmoderate.youtube.com restrictmoderate.youtube.com" "$(m1 '.zones["www.youtube.com"].records[0].rData.aname') $(m2 '.zones["m.youtube.com"].records[0].rData.aname')"
-check "technitium: …9 forced names"                9 "$(m2 '.zones | length')"
-check "technitium: YouTube strict replaces the zone" "restrict.youtube.com 1" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"strict"}' >/dev/null; m1 '.zones["www.youtube.com"].records[0].rData.aname') $(m1 '.zones["www.youtube.com"].records | length')"
-check "technitium: SafeSearch off removes its zones, YouTube stays" "5 5 null" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":false}' >/dev/null; m1 '.zones | length') $(m2 '.zones | length') $(m1 '.zones["www.google.com"]')"
+check "technitium: …the house is the app's group for every address, IPv6 too" "DCS: house DCS: house Boys" "$(_adv m1 | jq -r '.networkGroupMap | "\(.["0.0.0.0/0"]) \(.["::/0"]) \(.["192.168.2.50"])"')"
+check "technitium: …its four safe lists, YouTube moderate, on both; no zone made" "4 216.239.38.119 4 0 0" "$(_adv m1 | jq -r '.groups[] | select(.name == "DCS: house") | "\(.regexBlockListUrls | length) \(.regexBlockListUrls[3].blockingAddresses[0])"') $(_adv m2 | jq -r '.groups[] | select(.name == "DCS: house") | .regexBlockListUrls | length') $(m1 '.zones | length') $(m2 '.zones | length')"
+check "technitium: YouTube strict"                 "216.239.38.120" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"strict"}' >/dev/null; _adv m1 | jq -r '.groups[] | select(.name == "DCS: house") | .regexBlockListUrls[] | select(.url | endswith("/youtube.txt")) | .blockingAddresses[0]')"
+check "technitium: SafeSearch off: YouTube's list alone" "youtube.txt" "$(tt_req "$TA" POST /dns/technitium/safesearch '{"safe_search":false}' >/dev/null; _adv m1 | jq -r '.groups[] | select(.name == "DCS: house") | .regexBlockListUrls | map(.url | split("/") | last) | join(",")')"
 check "technitium: a mode that is not one"         400 "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"loud"}' | status_of)"
-tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"off"}' >/dev/null
+check "technitium: YouTube off: nothing for the house, the app as before" '{"192.168.2.50":"Boys","192.168.2.51":"Boys"} 1' "$(tt_req "$TA" POST /dns/technitium/safesearch '{"youtube":"off"}' >/dev/null; _adv m1 | jq -c .networkGroupMap) $(_adv m1 | jq '.groups | length')"
+# the Forwarder zones an older DCS made for the house's SafeSearch go, once
+curl -s -H "Authorization: Bearer $TT1" --data-urlencode zone=www.google.com --data-urlencode type=Forwarder --data-urlencode forwarder=this-server "$M1/api/zones/create" >/dev/null
+_tt_st=$(jq -c '.forced_hash = "older"' "$TW/.data/technitium/state.json"); printf '%s\n' "$_tt_st" > "$TW/.data/technitium/state.json"
+_ttick $MON1000
+check "technitium: an older DCS's forced zone is removed by the clock" "null" "$(m1 '.zones["www.google.com"]')"
+_n="$(m1 .writes)"; _ttick $MON1001
+check "technitium: …once"                          "$_n" "$(m1 .writes)"
 
 # >>> the kids' controls: SafeSearch and YouTube per group (Advanced Blocking answers the safe names with their addresses), time
 # windows (bedtime, a categories window, pauses), categories, allow-list mode, exceptions, the report, the migration. The stand-in
@@ -10909,6 +10915,143 @@ _ttick $MON1000
 check "kids: docs: the lists are public, the report and the pause the admin's" "public admin admin" \
     "$(for r in 'GET /dns/technitium/kids-lists/{name}.txt' 'GET /dns/technitium/groups/{id}/report' 'POST /dns/technitium/groups/{id}/pause'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 # <<< the kids' controls
+
+# >>> the house: rules for every device (Advanced Blocking's group for 0.0.0.0/0 and ::/0), a group gets them with its own, a device
+# that does not follow the house, a device's own rules (its exceptions win), the quick actions and their end, YouTube's settings and a
+# window's YouTube, the week grid, clone, colour and icon. A kid (.60, in Kids), the owner's PC (.98), a TV in no group (.97), an
+# address the directory does not know (.96).
+command cp -f "$TW/.data/technitium/groups.json" "$TW/groups.keep"; [[ -e "$TW/.data/technitium/devices.json" ]] && command cp -f "$TW/.data/technitium/devices.json" "$TW/devices.keep"
+jq -n '{devices: [{id: "aabbccdd0060", ip: "192.168.2.60", mac: "aa:bb:cc:dd:00:60", nickname: "Tablet 7"}, {id: "aabbccdd0098", ip: "192.168.2.98", mac: "aa:bb:cc:dd:00:98", nickname: "Scott PC"},
+               {id: "aabbccdd0097", ip: "192.168.2.97", mac: "aa:bb:cc:dd:00:97", nickname: "Living room TV"}], forgotten: {}}' > "$TW/.data/technitium/devices.json"
+_hs() { tt_req "$TA" POST /dns/technitium/house "$1" "DCS_TECHNITIUM_NOW=${2:-$MON1000}"; }
+_dv() { tt_req "$TA" PUT "/dns/technitium/devices/$1" "$2" "DCS_TECHNITIUM_NOW=${3:-$MON1000}"; }
+_qa() { tt_req "$TA" POST "/dns/technitium/house/$1" "$2" "DCS_TECHNITIUM_NOW=${3:-$MON1000}"; }
+_hg() { tt_req "$TU" GET /dns/technitium/groups '' "DCS_TECHNITIUM_NOW=${1:-$MON1000}" | body_of; }
+_map() { _adv m1 | jq -r --arg i "$1" '.networkGroupMap[$i] // "none"'; }
+KIDS2='{"name":"Kids","devices":[{"ip":"192.168.2.60","label":"Tablet 7","id":"aabbccdd0060"}],"categories":["games"],"youtube":"moderate","allowed":["netflix.com"],
+  "color":"teal","icon":"child","windows":[{"name":"Bedtime","enabled":true,"from":"20:30","to":"07:00","scope":"all"}]}'
+GK2=$(_kids "$KIDS2" | body_of | jq -r '.group.id')
+check "house: empty by default: the app as before, nothing for the TV" "false none NoError 198.51.100.7" "$(_hg | jq -r .house.on) $(_map 0.0.0.0/0) $(_ans 192.168.2.97 netflix.com)"
+check "house: a viewer cannot set the house's rules" 403 "$(tt_req "$TU" POST /dns/technitium/house '{"categories":["video"]}' | status_of)"
+check "house: a category that is not one, a YouTube that is not one" "400 400" "$(_hs '{"categories":["dating"]}' | status_of) $(_hs '{"youtube":"loud"}' | status_of)"
+_th=$(_hs '{"categories":["video"],"blocked":["TikTok.com"],"allowed":["roblox.com"]}' | body_of)
+check "house: the rules saved (names tidied), on both" "true tiktok.com DCS: house DCS: house" "$(jq -r '"\(.success) \(.house.blocked | join(","))"' <<< "$_th") $(_map 0.0.0.0/0) $(_adv m2 | jq -r '.networkGroupMap["::/0"]')"
+check "house: said in the audit log"               yes "$(grep -q 'house rules saved: 1 categories, 0 windows, SafeSearch off, YouTube off, 1 exceptions, 1 blocked names' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+check "house: a device in no group: video and the extra name blocked" "NxDomain |NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.97 netflix.com)|$(_ans 192.168.2.97 www.tiktok.com)|$(_ans 192.168.2.97 example.com)"
+check "house: …an address DCS does not know too" "NxDomain " "$(_ans 192.168.2.96 netflix.com)"
+check "house: a kid gets the house and the group: games and video" "NxDomain |NxDomain " "$(_ans 192.168.2.60 roblox.com)|$(_ans 192.168.2.60 netflix.com)"
+check "house: …the group's exception does not undo the house, the house's does not undo the group" "null null true" "$(_kg Kids | jq -r '"\(.allowed | index("netflix.com")) \(.allowed | index("roblox.com")) \(.blocked | index("roblox.com") != null)"')"
+check "house: …and the group's own YouTube"        "NoError 216.239.38.119" "$(_ans 192.168.2.60 www.youtube.com)"
+check "house: the groups page says the house is on" "true video" "$(_hg | jq -r '"\(.house.on) \(.house.categories | join(","))"')"
+# a device that does not follow the house
+check "house: a viewer cannot exempt a device"     403 "$(tt_req "$TU" PUT /dns/technitium/devices/aabbccdd0098 '{"house_exempt":true}' | status_of)"
+check "house: house_exempt is true or false"       400 "$(_dv aabbccdd0098 '{"house_exempt":"yes"}' | status_of)"
+_td=$(_dv aabbccdd0098 '{"house_exempt":true}' | body_of)
+check "house: the owner's PC does not follow the house" "true DCS: house exempt NoError 198.51.100.7 false" "$(jq -r .device.house_exempt <<< "$_td") $(_map 192.168.2.98) $(_ans 192.168.2.98 netflix.com) $(_adv m1 | jq -r '.groups[] | select(.name == "DCS: house exempt") | .enableBlocking')"
+check "house: …said in the audit log, listed"      "yes aabbccdd0098" "$(grep -q 'Scott PC (aabbccdd0098): does not follow the house' "$TW/.api-auth/auth-audit.log" && echo yes || echo no) $(_hg | jq -r '.house.exempt | map(.id) | join(",")')"
+# a device's own rules: its exceptions win over the house and its group, its own blocked names
+check "house: a device's own rules that are not ones" "400 400 400" "$(_dv aabbccdd0097 '{"allowed":["not a name"]}' | status_of) $(_dv aabbccdd0097 '{"override":{"youtube":"loud"}}' | status_of) $(_dv aabbccdd0097 '{"override":{"categories":["dating"]}}' | status_of)"
+_td=$(_dv aabbccdd0097 '{"allowed":["netflix.com"],"blocked_names":["example.com"]}' | body_of)
+check "house: the TV's own exception wins over the house, its own block" "DCS: device aabbccdd0097 NoError 198.51.100.7|NxDomain |NxDomain " "$(_map 192.168.2.97) $(_ans 192.168.2.97 netflix.com)|$(_ans 192.168.2.97 example.com)|$(_ans 192.168.2.97 tiktok.com)"
+check "house: …the directory says so"             "true netflix.com example.com" "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '.devices[] | select(.id == "aabbccdd0097") | "\(.own_rules) \(.allowed | join(",")) \(.blocked_names | join(","))"')"
+_dv aabbccdd0060 '{"allowed":["fortnite.com"]}' >/dev/null
+check "house: a kid's own exception wins over its group, the rest stays" "DCS: device aabbccdd0060 NoError 198.51.100.7|NxDomain |NxDomain " "$(_map 192.168.2.60) $(_ans 192.168.2.60 fortnite.com)|$(_ans 192.168.2.60 roblox.com)|$(_ans 192.168.2.60 netflix.com)"
+_dv aabbccdd0098 "{\"group_id\":\"$GK2\"}" >/dev/null
+check "house: the owner's PC put in Kids: Kids alone, not the house" "DCS: device aabbccdd0098 NxDomain |NoError 198.51.100.7" "$(_map 192.168.2.98) $(_ans 192.168.2.98 roblox.com)|$(_ans 192.168.2.98 netflix.com)"
+_dv aabbccdd0098 '{"group_id":null}' >/dev/null
+_dv aabbccdd0097 '{"override":{"categories":["social"],"youtube":"blocked"}}' >/dev/null
+check "house: the TV's own categories and YouTube blocked (its exception stays)" "NxDomain |NxDomain |NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.97 facebook.com)|$(_ans 192.168.2.97 youtubei.googleapis.com)|$(_ans 192.168.2.97 www.youtubekids.com)|$(_ans 192.168.2.97 netflix.com)"
+_dv aabbccdd0097 '{"override":{"window":{"name":"Homework","from":"16:00","to":"18:00","days":[1,2,3,4,5],"scope":"all"}}}' >/dev/null
+_ttick $MON1700
+check "house: the TV's own window at 17:00: everything (its exception still wins)" "NxDomain |NoError 198.51.100.7" "$(_ans 192.168.2.97 www.google.com)|$(_ans 192.168.2.97 netflix.com)"
+check "house: …said in the audit log as the TV's"  yes "$(grep -q 'Living room TV: homework started (every name blocked)' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+_ttick $MON1000
+check "house: …and 10:00 is not homework"          "NoError 198.51.100.7" "$(_ans 192.168.2.97 www.google.com)"
+_dv aabbccdd0097 '{"allowed":[],"blocked_names":[],"override":null}' >/dev/null; _dv aabbccdd0060 '{"allowed":[]}' >/dev/null
+check "house: the device's own rules gone: back to the house" "none Kids NxDomain " "$(_map 192.168.2.97) $(_map 192.168.2.60) $(_ans 192.168.2.97 netflix.com)"
+# YouTube: kids_only, blocked, a window's YouTube
+_kids "$(jq -c --arg id "$GK2" '. + {id: $id, youtube: "kids_only"}' <<< "$KIDS2")" >/dev/null
+check "youtube: kids_only: YouTube blocked, YouTube Kids works" "NxDomain |NxDomain |NxDomain |NoError 198.51.100.7|NoError 198.51.100.7|NoError 198.51.100.7" \
+    "$(_ans 192.168.2.60 www.youtube.com)|$(_ans 192.168.2.60 m.youtube.com)|$(_ans 192.168.2.60 youtu.be)|$(_ans 192.168.2.60 www.youtubekids.com)|$(_ans 192.168.2.60 youtubei.googleapis.com)|$(_ans 192.168.2.60 i.ytimg.com)"
+check "youtube: kids_only: an exception youtube.com would undo it" 400 "$(_kids "$(jq -c --arg id "$GK2" '. + {id: $id, youtube: "kids_only", allowed: ["youtube.com"]}' <<< "$KIDS2")" | status_of)"
+_kids "$(jq -c --arg id "$GK2" '. + {id: $id, youtube: "blocked"}' <<< "$KIDS2")" >/dev/null
+check "youtube: blocked: every YouTube name, YouTube Kids too" "NxDomain |NxDomain |NxDomain |NxDomain " "$(_ans 192.168.2.60 www.youtube.com)|$(_ans 192.168.2.60 youtubei.googleapis.com)|$(_ans 192.168.2.60 www.youtubekids.com)|$(_ans 192.168.2.60 r1---sn-x.googlevideo.com)"
+check "youtube: the youtube category on its own"   "yes" "$(tt_req "$TU" GET /dns/technitium/groups | body_of | jq -r 'if any(.categories[]; .id == "youtube") and (.youtube_modes | join(",")) == "off,moderate,strict,kids_only,blocked" then "yes" else "no" end')"
+_kids "$(jq -c --arg id "$GK2" '. + {id: $id, windows: (.windows + [{name: "Homework", enabled: true, from: "16:00", to: "18:00", days: [1,2,3,4,5], scope: "categories", categories: [], youtube: "blocked"}])}' <<< "$KIDS2")" >/dev/null
+check "youtube: moderate by day"                   "NoError 216.239.38.119" "$(_ans 192.168.2.60 youtubei.googleapis.com)"
+_ttick $MON1700
+check "youtube: blocked in the homework window"    "NxDomain " "$(_ans 192.168.2.60 youtubei.googleapis.com)"
+check "youtube: …said in the audit log"            yes "$(grep -q 'Kids: homework started (YouTube blocked)' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+_ttick $MON1000
+check "youtube: a window's YouTube that is not one" 400 "$(_kids '{"name":"X","windows":[{"name":"H","from":"16:00","to":"18:00","scope":"categories","categories":[],"youtube":"loud"}]}' | status_of)"
+check "youtube: the house's kids_only for every device" "NxDomain |NoError 198.51.100.7" "$(_hs '{"youtube":"kids_only"}' >/dev/null; _ans 192.168.2.97 www.youtube.com)|$(_ans 192.168.2.97 www.youtubekids.com)"
+_hs '{"youtube":"off"}' >/dev/null
+# the week grid: Monday 17:00 to 19:00 and Tuesday 06:00 in force
+GRID=$(jq -nc '[range(7) as $d | [range(24) as $h | (($d == 0 and ($h == 17 or $h == 18)) or ($d == 1 and $h == 6))]]')
+_kids "$(jq -c --arg id "$GK2" --argjson g "$GRID" '. + {id: $id, windows: [{name: "Screen-free", enabled: true, scope: "all", grid: $g}]}' <<< "$KIDS2")" >/dev/null
+check "grid: 10:00 Monday is not on the grid"      "NoError 198.51.100.7" "$(_ans 192.168.2.60 example.com)"
+_ttick $MON1700
+check "grid: 17:00 Monday is: everything, until 19:00" "NxDomain  19:00 true" "$(_ans 192.168.2.60 example.com) $(_hg $MON1700 | jq -r --arg id "$GK2" '.groups[] | select(.id == $id) | "\(.active.ends | to_entries[0].value) \(.in_bedtime)"')"
+_ttick $((MON1700 + 2 * 3600))
+check "grid: 19:00 is not"                         "NoError 198.51.100.7" "$(_ans 192.168.2.60 example.com)"
+_ttick $((MON1000 + 20 * 3600))
+check "grid: 06:00 Tuesday is"                     "NxDomain " "$(_ans 192.168.2.60 example.com)"
+_n=$(_sets); _ttick $((MON1000 + 20 * 3600 + 60))
+check "grid: …the next minute writes nothing"      "$_n" "$(_sets)"
+check "grid: a grid that is not 7 days of 24 hours" "400 400" "$(_kids '{"name":"X","windows":[{"name":"G","scope":"all","grid":[[true]]}]}' | status_of) $(_kids "$(jq -nc --argjson g "$GRID" '{name: "X", windows: [{name: "G", scope: "all", grid: ($g | .[0][0] = "yes")}]}')" | status_of)"
+_kids "$(jq -c --arg id "$GK2" '. + {id: $id}' <<< "$KIDS2")" >/dev/null; _ttick $MON1000
+# clone, colour and icon
+_tc=$(tt_req "$TA" POST "/dns/technitium/groups/$GK2/clone" '{}' | body_of)
+check "clone: a copy of the rules, no devices"     "Kids copy 0 games teal child Bedtime" "$(jq -r '.group | "\(.name) \(.devices | length) \(.categories | join(",")) \(.color) \(.icon) \(.windows | map(.name) | join(","))"' <<< "$_tc")"
+check "clone: again, another name; a name given"   "Kids copy 2 Teens" "$(tt_req "$TA" POST "/dns/technitium/groups/$GK2/clone" '{}' | body_of | jq -r .group.name) $(tt_req "$TA" POST "/dns/technitium/groups/$GK2/clone" '{"name":"Teens"}' | body_of | jq -r .group.name)"
+check "clone: a viewer cannot, a group that is not there" "403 404" "$(tt_req "$TU" POST "/dns/technitium/groups/$GK2/clone" '{}' | status_of) $(tt_req "$TA" POST /dns/technitium/groups/gnope/clone '{}' | status_of)"
+for _g in $(_hg | jq -r '.groups[] | select(.name | test("copy|Teens")) | .id'); do tt_req "$TA" DELETE "/dns/technitium/groups/$_g" '' >/dev/null; done
+check "colour: one that is not one, an icon that is not one" "400 400" "$(_kids '{"name":"X","color":"chartreuse"}' | status_of) $(_kids '{"name":"X","icon":"skull"}' | status_of)"
+check "colour: the device row carries its group's" "Kids teal child" "$(tt_req "$TU" GET /dns/technitium/devices | body_of | jq -r '.devices[] | select(.id == "aabbccdd0060") | "\(.group_name) \(.group_color) \(.group_icon)"')"
+# the quick actions: pause the house, Bedtime now, an exception for an hour; each undone, each ended by the clock
+check "quick: a viewer cannot"                     "403 403 403" "$(for a in pause bedtime allow; do tt_req "$TU" POST "/dns/technitium/house/$a" '{"name":"x.example"}' | status_of; done | tr '\n' ' ' | sed 's/ $//')"
+check "quick: a pause of 300 minutes"              400 "$(_qa pause '{"minutes":300}' | status_of)"
+_tq=$(_qa pause '{"minutes":30}' | body_of)
+check "quick: the house paused 30 minutes: no rule for anyone" "2026-10-12T10:30:00Z NoError 198.51.100.7|NoError 198.51.100.7|none none" "$(jq -r .paused_until <<< "$_tq") $(_ans 192.168.2.97 netflix.com)|$(_ans 192.168.2.60 roblox.com)|$(_map 0.0.0.0/0) $(_map 192.168.2.60)"
+check "quick: …the page says until when"          "2026-10-12T10:30:00Z" "$(_hg | jq -r .house_paused_until)"
+_ttick $((MON1000 + 31 * 60))
+check "quick: …the clock ends it at 10:31, said once" "NxDomain |NxDomain |null 1" "$(_ans 192.168.2.97 netflix.com)|$(_ans 192.168.2.60 roblox.com)|$(jq -r '.house_paused' "$TW/.data/technitium/state.json") $(grep -c 'the house pause ended: the rules are back' "$TW/.api-auth/auth-audit.log")"
+check "quick: …ended by hand too"                  "NoError 198.51.100.7 NxDomain " "$(_qa pause '{"minutes":30}' >/dev/null; _ans 192.168.2.97 netflix.com) $(_qa pause '{"minutes":0}' >/dev/null; _ans 192.168.2.97 netflix.com)"
+_tq=$(_qa bedtime '{}' | body_of)
+check "quick: Bedtime now: every group's bedtime until its end" "Boys:2026-10-13T07:00:00Z,Kids:2026-10-13T07:00:00Z NxDomain |NxDomain |NxDomain " \
+    "$(jq -r '.forced | sort_by(.owner) | map("\(.owner):\(.until)") | join(",")' <<< "$_tq") $(_ans 192.168.2.60 example.com)|$(_ans 192.168.2.50 example.com)|$(_ans 192.168.2.97 netflix.com)"
+check "quick: …the TV (no bedtime) browses, the page lists it" "NoError 198.51.100.7 2" "$(_ans 192.168.2.97 example.com) $(_hg | jq -r '.bedtime_now | length')"
+check "quick: …undone"                             "NoError 198.51.100.7 0" "$(_qa bedtime '{"cancel":true}' >/dev/null; _ans 192.168.2.60 example.com) $(jq -r '.window_forced // {} | length' "$TW/.data/technitium/state.json")"
+_qa bedtime '{}' >/dev/null
+_ttick $((MON1000 + 21 * 3600 + 60))
+check "quick: …ended by the clock at 07:01 Tuesday, said" "NoError 198.51.100.7 0 yes" "$(_ans 192.168.2.60 example.com) $(jq -r '.window_forced // {} | length' "$TW/.data/technitium/state.json") $(grep -q 'Kids: bedtime now ended, back to its schedule' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+_ttick $MON1000
+check "quick: an exception that is not one: a name, the minutes, a device" "400 400 404" "$(_qa allow '{"name":"no name"}' | status_of) $(_qa allow '{"name":"roblox.com","minutes":2}' | status_of) $(_qa allow '{"name":"roblox.com","device_id":"nope"}' | status_of)"
+_tq=$(_qa allow '{"name":"roblox.com"}' | body_of)
+check "quick: roblox.com for an hour, the whole house" "2026-10-12T11:00:00Z NoError 198.51.100.7" "$(jq -r .until <<< "$_tq") $(_ans 192.168.2.60 www.roblox.com)"
+_tq=$(_qa allow '{"name":"netflix.com","device_id":"aabbccdd0097","minutes":30}' | body_of)
+check "quick: netflix.com for the TV, 30 minutes: the TV alone" "Living room TV NoError 198.51.100.7|NxDomain " "$(jq -r .device <<< "$_tq") $(_ans 192.168.2.97 netflix.com)|$(_ans 192.168.2.96 netflix.com)"
+check "quick: …the page lists both"               "netflix.com,roblox.com" "$(_hg | jq -r '.temp_allows | map(.name) | sort | join(",")')"
+check "quick: …the TV's ended by hand"             "NxDomain " "$(_qa allow '{"name":"netflix.com","device_id":"aabbccdd0097","remove":true}' >/dev/null; _ans 192.168.2.97 netflix.com)"
+_ttick $((MON1000 + 3600 + 60))
+check "quick: …the hour ran out: the clock ends it, said" "NxDomain  0 yes" "$(_ans 192.168.2.60 www.roblox.com) $(jq -r '.temp_allow | length' "$TW/.data/technitium/state.json") $(grep -q 'roblox.com for the house: the hour ran out' "$TW/.api-auth/auth-audit.log" && echo yes || echo no)"
+_n="$(m1 .writes) $(m2 .writes) $(jq -c . "$TW/.data/technitium/state.json" | sha256sum)"; _ttick $((MON1000 + 3600 + 120))
+check "quick: …the next minute writes nothing, here or in Technitium" "$_n" "$(m1 .writes) $(m2 .writes) $(jq -c . "$TW/.data/technitium/state.json" | sha256sum)"
+check "house: the house, the devices and the groups reached the secondary" "$(_adv m1 | jq -S -c .)" "$(_adv m2 | jq -S -c .)"
+check "house: docs: viewers read, admins act" "admin admin admin admin admin" \
+    "$(for r in 'POST /dns/technitium/house' 'POST /dns/technitium/house/pause' 'POST /dns/technitium/house/bedtime' 'POST /dns/technitium/house/allow' 'POST /dns/technitium/groups/{id}/clone'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
+# the update: a groups.json and devices.json as 4.0.54 left them (no house rules, nobody exempt): the config is the same, nothing written
+_hs '{"categories":[],"blocked":[],"allowed":[]}' >/dev/null
+tt_req "$TA" DELETE "/dns/technitium/groups/$GK2" '' >/dev/null
+jq '{version, house: {safe_search: false, youtube: "off"}, groups: [.groups[] | del(.color, .icon) | .windows |= map(del(.youtube, .grid))], migration}' "$TW/.data/technitium/groups.json" > "$TW/g.old" && command mv -f "$TW/g.old" "$TW/.data/technitium/groups.json"
+jq '.devices |= map(del(.house_exempt, .allowed, .blocked_names, .override))' "$TW/.data/technitium/devices.json" > "$TW/d.old" && command mv -f "$TW/d.old" "$TW/.data/technitium/devices.json"
+_n=$(_sets); _ttick $((MON1000 + 3600 + 180))
+check "house: from 4.0.54's files: no house group, nothing written" "$_n none" "$(_sets) $(_map 0.0.0.0/0)"
+command cp -f "$TW/groups.keep" "$TW/.data/technitium/groups.json"; rm -f "$TW/groups.keep"
+if [[ -e "$TW/devices.keep" ]]; then command cp -f "$TW/devices.keep" "$TW/.data/technitium/devices.json"; rm -f "$TW/devices.keep"; else rm -f "$TW/.data/technitium/devices.json"; fi
+_tt_st=$(jq -c 'del(.temp_allow, .window_forced, .house_paused)' "$TW/.data/technitium/state.json"); printf '%s\n' "$_tt_st" > "$TW/.data/technitium/state.json"
+_ttick $MON1000
+# <<< the house
 
 # stats and activity
 _tst=$(tt_req "$TU" GET '/dns/technitium/stats?range=lastDay' | body_of)
@@ -11203,11 +11346,11 @@ check "safety: no word in the log: the total, and it says so" "null 3000 yes" "$
 
 # the first look: the events' rules, and the directory, the bedtime and the blocks as they are (nothing said)
 _tta $((SN + 60)) _tta_tick
-check "safety: the events' rules are made once: 7, five on, bedtime and a block running out off" "7 5 false false" \
-    "$(jq -r '[.rules[] | select(.trigger | startswith("technitium_"))] | "\(length) \(map(select(.enabled)) | length) \(map(select(.trigger == "technitium_bedtime"))[0].enabled) \(map(select(.trigger == "technitium_device_blocked_expired"))[0].enabled)"' "$TW/.api-auth/notifications.json")"
+check "safety: the events' rules are made once: 8, five on, bedtime, a block running out and the weekly digest off" "8 5 false false false" \
+    "$(jq -r '[.rules[] | select(.trigger | startswith("technitium_"))] | "\(length) \(map(select(.enabled)) | length) \(map(select(.trigger == "technitium_bedtime"))[0].enabled) \(map(select(.trigger == "technitium_device_blocked_expired"))[0].enabled) \(map(select(.trigger == "technitium_weekly_digest"))[0].enabled)"' "$TW/.api-auth/notifications.json")"
 tt_req "$TA" DELETE /notifications/rules/rule_technitium_dhcp_pool '' >/dev/null
 _tta $((SN + 90)) _tta_tick
-check "safety: …a rule deleted stays deleted"       "6 0" "$(jq '[.rules[] | select(.trigger | startswith("technitium_"))] | length' "$TW/.api-auth/notifications.json") $(wc -l < "$TW/fired")"
+check "safety: …a rule deleted stays deleted"       "7 0" "$(jq '[.rules[] | select(.trigger | startswith("technitium_"))] | length' "$TW/.api-auth/notifications.json") $(wc -l < "$TW/fired")"
 check "safety: the directory is learnt without a word" "$(jq '.devices | length' "$TW/.data/technitium/devices.json")" "$(jq '.known_devices | length' "$TW/.data/technitium/alerts.json")"
 
 # blocklists: one fails to download, then all is well, then nothing for three days
@@ -11357,6 +11500,28 @@ printf 'TECHNITIUM_BACKUP_HOUR=off\n' >> "$TW/.env"
 _tta $((NB + 86400)) _tta_backup_nightly
 check "safety: …off: none"                           0 "$(_tbn '*2026-10-14*')"
 sed -i '/^TECHNITIUM_BACKUP_HOUR=/d' "$TW/.env"
+# the weekly digest (off by default: nothing said, nothing asked of Technitium): Monday from 08:00, once, a message per kids' group
+# (its devices' query log) and one for the house (Technitium's own week); the names first seen this week (the first digest learns them)
+command cp -f "$TW/.data/technitium/groups.json" "$TW/groups.keep"; : > "$TW/fired"
+jq '.groups = [{id: "gdig0001", name: "Kids", devices: [{ip: "192.168.2.60", label: "Tablet 7"}]}]' "$TW/groups.keep" > "$TW/.data/technitium/groups.json"
+DG=$(date -u -d '2026-10-19 08:05' +%s)
+_tta "$DG" _tta_check_digest
+check "digest: off by default: nothing said"        0 "$(_fired technitium_weekly_digest)"
+_tdn=$(jq -c '.rules |= map(if .trigger == "technitium_weekly_digest" then .enabled = true else . end)' "$TW/.api-auth/notifications.json"); printf '%s\n' "$_tdn" > "$TW/.api-auth/notifications.json"
+_tta $((DG - 600)) _tta_check_digest
+check "digest: on: nothing before Monday 08:00"     0 "$(_fired technitium_weekly_digest)"
+_tta "$DG" _tta_check_digest
+check "digest: Monday 08:05: one for the group, one for the house" "2 yes yes" "$(_fired technitium_weekly_digest) $(grep -q 'group=Kids headline=Kids: the week message=7 lookups, 5 blocked. Top: www.roblox.com (3), example.com (2), ' "$TW/fired" && echo yes || echo no) $(grep -q 'group=House headline=House: the week message=300 lookups, 30 blocked. Top: example.com (150), youtube.com (40). Top blocked: ads.example.net (21). status=digest' "$TW/fired" && echo yes || echo no)"
+check "digest: …the group's top blocked, no new names the first time" "yes no" "$(grep -q 'Top blocked: www.roblox.com (3), ' "$TW/fired" && echo yes || echo no) $(grep -q 'New this week' "$TW/fired" && echo yes || echo no)"
+_tta $((DG + 60)) _tta_check_digest; _tta $((DG + 86400)) _tta_check_digest
+check "digest: …once a week (not again Monday, nor Tuesday)" 2 "$(_fired technitium_weekly_digest)"
+mreq "$M1" _mock/logs "entries=[{\"timestamp\":\"2026-10-25T09:00:00Z\",\"clientIpAddress\":\"192.168.2.60\",\"responseType\":\"Recursive\",\"rcode\":\"NoError\",\"qname\":\"minecraft.net\",\"qtype\":\"A\"}]"
+_tta $((DG + 7 * 86400)) _tta_check_digest
+check "digest: the next Monday, with the names new this week" "4 yes" "$(_fired technitium_weekly_digest) $(grep -q 'group=Kids .*New this week: minecraft.net. status=digest' "$TW/fired" && echo yes || echo no)"
+check "digest: an older install gets the rule, off, once" "1 false 0" "$(_tdn=$(jq -c '.rules |= map(select(.trigger != "technitium_weekly_digest"))' "$TW/.api-auth/notifications.json"); printf '%s\n' "$_tdn" > "$TW/.api-auth/notifications.json"
+    _tta_st=$(jq -c '.rules_seeded = true' "$TW/.data/technitium/alerts.json"); printf '%s\n' "$_tta_st" > "$TW/.data/technitium/alerts.json"; _tta "$DG" _tta_seed_rules
+    jq -r '[.rules[] | select(.trigger == "technitium_weekly_digest")] | "\(length) \(.[0].enabled)"' "$TW/.api-auth/notifications.json") $(tt_req "$TA" DELETE /notifications/rules/rule_technitium_weekly_digest '' >/dev/null; _tta "$DG" _tta_seed_rules; jq '[.rules[] | select(.trigger == "technitium_weekly_digest")] | length' "$TW/.api-auth/notifications.json")"
+command cp -f "$TW/groups.keep" "$TW/.data/technitium/groups.json"; rm -f "$TW/groups.keep"
 check "technitium: docs: the safety net is the admin's" "admin admin admin admin" \
     "$(for r in 'GET /dns/technitium/backups' 'POST /dns/technitium/backup' 'POST /dns/technitium/restore' 'POST /dns/technitium/lists/update'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 

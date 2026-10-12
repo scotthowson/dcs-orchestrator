@@ -113,19 +113,23 @@ same addresses). If the primary is down for long, turn the router's DHCP back on
 
 DCS keeps the groups in `.data/technitium/groups.json` and writes them into the Advanced Blocking app's config on
 both servers (DCS owns that config: what was set for the app in Technitium's console is replaced). A device is an
-address (or a small network such as `192.168.2.48/29`); a device is in one group at a time; a device in no group
-(yours) gets the house's blocking alone: no SafeSearch, no YouTube restriction, no window.
+address (or a small network such as `192.168.2.48/29`); a device is in one group at a time; a device in no group gets
+the house's rules (below), which are empty until you set them: then it gets Technitium's own blocking alone.
 
 A group has:
 
 | Part | Does |
 |---|---|
 | **SafeSearch** (`safe_search`, on or off) | Google (`www.google.com`, `www.google.ca`), Bing (`www.bing.com`) and DuckDuckGo (`duckduckgo.com`, `www.duckduckgo.com`, `start.duckduckgo.com`) answer the address of their safe name (`forcesafesearch.google.com`, `strict.bing.com`, `safe.duckduckgo.com`) for the group's devices only. Exact names: `mail.google.com` or `links.duckduckgo.com` resolve as usual. |
-| **YouTube** (`youtube`: off, moderate, strict; strict for a new group) | `www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com` and `www.youtube-nocookie.com` answer `restrict.youtube.com` (strict) or `restrictmoderate.youtube.com` (moderate). |
+| **YouTube** (`youtube`: off, moderate, strict, kids_only, blocked; strict for a new group) | *moderate* and *strict*: `www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com` and `www.youtube-nocookie.com` answer `restrict.youtube.com` (strict) or `restrictmoderate.youtube.com` (moderate). *kids_only*: YouTube itself is blocked (`youtube.com` and its subdomains, `youtube-nocookie.com`, `youtu.be`, `yt.be`) and YouTube Kids keeps working (`youtubekids.com`, its API `youtubei.googleapis.com`, `googlevideo.com`, `ytimg.com`, `ggpht.com` are left alone). *blocked*: the `youtube` category, every YouTube name, YouTube Kids too. From the least to the most strict in that order. **What DNS cannot do:** no control of Shorts, of channels, of comments or of ads, and no per-video choice; restricted mode is YouTube's own filter (a signed-in account's own setting can be stricter, never looser on these names). |
 | **Categories** (`categories`, always on) | Blocked all day. Each is maintained lists and/or a short built-in set of names (`.config/kids-categories.json`, its sources cited there): see the table below. |
-| **Time windows** (`windows`) | From a time to a time on chosen days (a window from 20:30 to 07:00 runs into the next morning), each with a switch: *every name* (`scope: all`, bedtime's rule: everything blocked but this server's own domains) or *some categories* (`scope: categories`, e.g. games and video 16:00–18:00 on school days). Bedtime is the first window, named *Bedtime*. Two presets are a click away, both off until switched on: *Homework: games and video blocked 16:00–18:00 Mon–Fri* and *No internet 16:00–18:00 Mon–Fri*. |
+| **Time windows** (`windows`) | From a time to a time on chosen days (a window from 20:30 to 07:00 runs into the next morning), or a **week grid** (`grid`: 7 days from Monday × 24 hours, in force in the hours that are on; the editor paints it with the mouse or a finger), each with a switch: *every name* (`scope: all`, bedtime's rule: everything blocked but this server's own domains) or *some categories* (`scope: categories`, e.g. games and video 16:00–18:00 on school days), and optionally **a YouTube of its own** (`youtube`: moderate, strict, kids_only or blocked while it is in force, e.g. strict at night, blocked during homework; a window can only make YouTube stricter, so leave the group's own setting at the gentlest one you want). The `youtube` category blocks YouTube alone, apart from video and streaming. Bedtime is the first window, named *Bedtime*. Two presets are a click away, both off until switched on: *Homework: games and video blocked 16:00–18:00 Mon–Fri* and *No internet 16:00–18:00 Mon–Fri*. |
 | **Allow-list mode** (`mode: allowlist`) | For the youngest: every name is blocked but the group's sites (`sites`, a switch each), the tablet's essentials and its exceptions. The preset *Little ones* offers YouTube Kids, PBS Kids, Khan Academy Kids, Netflix, Disney+ and Roblox. |
-| **Exceptions** (`allowed`) and **extras** (`blocked`) | Up to 100 names each, with their subdomains. An exception wins over every block of the group (a category, a window that blocks categories), but not over a window that blocks everything; one that would undo the group's SafeSearch or YouTube (`youtube.com` with YouTube on) is refused. |
+| **Exceptions** (`allowed`) and **extras** (`blocked`) | Up to 100 names each, with their subdomains. An exception wins over every block of the group (a category, a window that blocks categories), but not over a window that blocks everything, nor over the house's blocks; one that would undo the group's SafeSearch or YouTube (`youtube.com` with YouTube on) is refused. |
+| **Colour and icon** (`color`, `icon`) | Shown on the group's card, on its devices' rows and on the Dashboard tile: blue, green, orange, purple, pink, teal, red, yellow, gray; users, baby, child, teen, gamepad, tv, school, moon, star, heart, rocket, house. |
+
+**Clone** (`POST /dns/technitium/groups/{id}/clone {name?}`) copies a group's rules, windows, colour and icon, without its
+devices (a device is in one group at a time), as *<name> copy* unless named.
 
 **How SafeSearch works per group.** Advanced Blocking answers a blocked name either NXDOMAIN or with addresses, and a
 block list can carry addresses of its own (`blockListUrls`/`regexBlockListUrls` entries `{url, blockAsNxDomain: false,
@@ -146,6 +150,7 @@ server, the kid's `www.google.com` answered `216.239.38.120`, the owner's Google
 | Gambling | betting, casinos, lotteries | Hagezi Gambling |
 | Social media | Facebook, Instagram, TikTok, X, Snapchat, Reddit, Discord, Threads (Facebook's list also holds WhatsApp) | The Block List Project (Facebook, TikTok, Twitter) + built-in names |
 | Video and streaming | Netflix, Twitch, TikTok, Disney+, Crave, Prime Video (YouTube has its own setting) | built-in names |
+| YouTube | all of YouTube: the site and apps, YouTube Kids, the videos and pictures (what the YouTube setting *blocked* uses; a window can block it alone) | built-in names |
 | Games | Roblox, Fortnite/Epic, Minecraft, Steam, EA | built-in names |
 | Chat | WhatsApp, Discord, Messenger, Telegram | The Block List Project (WhatsApp) + built-in names |
 | Shopping | Amazon (.com, .ca), eBay, Temu, AliExpress, Shein | built-in names |
@@ -190,7 +195,7 @@ The first time this version reads `groups.json`:
 
 - If the house's SafeSearch or YouTube switch was on, every group gets that setting and the house switch goes off: no child
   loosens, and your own devices (in no group) are not filtered any more. The minute clock writes the groups first, then
-  removes the house's forced zones. With no group yet, the house switch stays as it was.
+  removes the house's forced zones. With no group yet, the house switch stays as it was (now the house's own rules).
 - The consoles of a group (a device whose icon is *console*, or whose icon is still a guess and whose vendor is Nintendo,
   Sony or Microsoft) move to a new group *Consoles*: the first group's bedtime, adult content and gambling blocked, no
   games block, no other window.
@@ -198,13 +203,51 @@ The first time this version reads `groups.json`:
 
 What it did is in `groups.json` (`migration.notes`) and on the Kids tab.
 
-## SafeSearch and YouTube for the whole house (optional)
+## The house: rules for every device, and the devices that do not follow them
 
-Off by default: a group's own setting is the way. The switch forces every device of the house, yours too: each forced
-name (`www.google.com`, `www.bing.com`, `duckduckgo.com`, `www.duckduckgo.com`; for YouTube `www.youtube.com`,
-`m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com`, `www.youtube-nocookie.com`) gets a *Forwarder* zone
-of its own whose apex is an ANAME to the safe name; every other name under it resolves as usual. Turning it off removes
-those zones (a zone of the same name you made yourself, of another type, is left alone).
+The **House** card on the Kids tab is a group for every device of the house: the same parts as a group (categories,
+time windows with their grid and YouTube, SafeSearch, YouTube, exceptions, extras, pause), in filter mode
+(`POST /dns/technitium/house`, kept in `groups.json` as `house`). Empty by default, and while it is empty nothing changes for
+anyone: the app's config is exactly what it was.
+
+**Who gets what (the precedence).**
+
+- **The house** is Advanced Blocking's group for every address (`0.0.0.0/0` and `::/0` → *DCS: house*): every device that
+  is in no kids' group gets it, an address DCS has never seen too.
+- **A kids' group** gets the house's rules and its own together, the stricter of each: a window that blocks everything in
+  either, the categories and extras of both, SafeSearch when either has it, the stricter YouTube. A group can only add:
+  its exception never undoes a house block (nor a house exception a group block).
+- **A device that does not follow the house** (`house_exempt`: the *Follows the house rules* switch off, for your PC and
+  phone and other adults' devices) is in *DCS: house exempt*, which blocks nothing; in a kids' group it gets its group's
+  rules alone. Technitium's own blocklists (ads, threats) are global and stay for every device.
+- **A device's own rules** (the device drawer: its own exceptions `allowed`, its own blocked names `blocked_names`, and an
+  `override` of extra categories, a YouTube setting and one window of its own) make it a group of its own
+  (*DCS: device <id>*): the house's, its group's and its own rules together, and **its own exceptions win over all of
+  them** (a window that blocks everything too). *Block this device until…* still wins over everything.
+- The more specific address wins in Advanced Blocking (a device's address over its group's network over `0.0.0.0/0`):
+  proven on Technitium 15.6.1, a kid in a group got the group's games block and the house's video block, a TV in no group
+  the house's, the owner's exempt PC nothing.
+
+**Quick actions** (the Kids tab's header; each undoable, in the audit log as `TECHNITIUM_HOUSE`, ended by the minute clock):
+
+| Action | API | Does |
+|---|---|---|
+| **Pause the house 30 min** | `POST /dns/technitium/house/pause {minutes}` (0 ends it) | Every kids' rule off for everyone (the house's, the groups', the devices' own); a device blocked by hand stays blocked. |
+| **Bedtime now** | `POST /dns/technitium/house/bedtime {}` (`{cancel: true}` undoes) | The bedtime window (a window named *Bedtime* that blocks everything) of every group and of the house in force now, until its usual end (07:00 tomorrow for a 20:30–07:00 bedtime; for a grid, the end of its next run), its pause lifted. |
+| **Allow <site> for an hour** | `POST /dns/technitium/house/allow {name, device_id?, minutes?}` (`remove: true` ends it) | A timed exception, from a device's activity: for that device, or for the whole house (every device, every group); it wins over every block but *Block until*. 5 minutes to a day. |
+
+**The weekly digest** (`technitium_weekly_digest`, off by default; switch its rule on in Notifications for Discord or
+ntfy): Monday from 08:00 (local time), once, one message per kids' group and one for the house: the lookups and the
+blocked of the week, the top 5 names, the top 5 blocked and the names first seen this week. A group's numbers come from its
+devices' query log (the newest 5000 lookups per device and server, as the report); the house's from Technitium's own week
+(every device, the exempt ones too). DCS remembers the last 2000 names seen per group (`state.json`); the first digest of a
+group only learns them. While the rule is off nothing is asked of Technitium.
+
+**From 4.0.54.** Nothing changes at the update: the house starts empty, no device is exempt, no device has rules of its
+own, and the minute clock writes nothing (the config it renders is the same). The whole-house SafeSearch/YouTube switch
+(`POST /dns/technitium/safesearch`) is now the house's SafeSearch and YouTube: the Forwarder zones an older DCS made for it
+are removed once by the minute clock, and the house group answers the safe names instead, for every device that follows
+the house.
 
 ## Local names: your routes inside the house, devices by name
 
@@ -262,6 +305,7 @@ event: switch one off, change its priority or its cooldown there (a rule you del
 | `technitium_new_device` | a device with a MAC address is seen for the first time: *New device on the network: Samsung (a4:c3:f0:12:34:56), 192.168.2.142, named galaxy-s24 by DHCP*, with a link to the Devices tab (`DASHBOARD_PUBLIC_URL`). More than 5 at once are one message. The first look learns what is already there and says nothing | on | — |
 | `technitium_bedtime` | a kids' group went into or out of bedtime | off | — |
 | `technitium_device_blocked_expired` | a device's *Block until* ran out (a block lifted by hand is not) | off | — |
+| `technitium_weekly_digest` | Monday 08:00: each kids' group's week and the house's (lookups, blocked, top 5, top blocked, new names) | off | — |
 
 `GET /dns/technitium/status` carries the alerts in force (`alerts`: event, server, headline, message, the fix as
 `action`, since when): the dashboard's **Needs your attention** lists them. Its state is `.data/technitium/alerts.json`.

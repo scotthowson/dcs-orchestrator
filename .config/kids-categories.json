@@ -1,5 +1,5 @@
 {
-  "_about": "The kids' controls of the Technitium page (.lib/technitium.sh, docs/TECHNITIUM.md). categories: what a group can block, each backed by maintained lists (urls, downloaded by Technitium's Advanced Blocking app; one domain a line or a hosts file, a domain blocks its subdomains) and/or a short built-in set (domains, with their subdomains) where no good list exists. allowlist_sites: the sites an allow-list group can be given, one switch each. essentials: what an allow-list tablet needs to work at all. safe_search: the names forced to a search engine's safe answer (exact names only).",
+  "_about": "The kids' controls of the Technitium page (.lib/technitium.sh, docs/TECHNITIUM.md). categories: what a group can block, each backed by maintained lists (urls, downloaded by Technitium's Advanced Blocking app; one domain a line or a hosts file, a domain blocks its subdomains) and/or a short built-in set (domains, with their subdomains) where no good list exists. allowlist_sites: the sites an allow-list group can be given, one switch each. essentials: what an allow-list tablet needs to work at all. safe_search: the names forced to a search engine's safe answer (exact names only). youtube_kids_only: the names the YouTube setting kids_only blocks.",
   "categories": [
     {
       "id": "adult",
@@ -78,6 +78,26 @@
       ],
       "sources": [
         "built in: the services' own domains"
+      ]
+    },
+    {
+      "id": "youtube",
+      "name": "YouTube",
+      "description": "All of YouTube: the site, the apps, YouTube Kids and the videos (a group's YouTube setting can also restrict it or keep YouTube Kids alone)",
+      "urls": [],
+      "domains": [
+        "youtube.com",
+        "youtu.be",
+        "yt.be",
+        "youtube-nocookie.com",
+        "youtubei.googleapis.com",
+        "youtube.googleapis.com",
+        "youtubekids.com",
+        "ytimg.com",
+        "googlevideo.com"
+      ],
+      "sources": [
+        "built in: YouTube's own domains (the same hosts the YouTube Kids site switch allows)"
       ]
     },
     {
@@ -400,5 +420,14 @@
         "roblox"
       ]
     }
-  ]
+  ],
+  "youtube_kids_only": {
+    "description": "YouTube setting kids_only: YouTube itself blocked (the site, the app's web names, embeds and short links); YouTube Kids keeps working: youtubekids.com, its API (youtubei.googleapis.com), the videos and thumbnails (googlevideo.com, ytimg.com, ggpht.com) are not blocked",
+    "blocked": [
+      "youtube.com",
+      "youtube-nocookie.com",
+      "youtu.be",
+      "yt.be"
+    ]
+  }
 }

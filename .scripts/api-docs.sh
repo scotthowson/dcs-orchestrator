@@ -134,6 +134,7 @@ doc_path() {
         "/dns/technitium/groups/*/pause-bedtime") p="/dns/technitium/groups/{id}/pause-bedtime" ;;
         "/dns/technitium/groups/*/pause") p="/dns/technitium/groups/{id}/pause" ;;
         "/dns/technitium/groups/*/report") p="/dns/technitium/groups/{id}/report" ;;
+        "/dns/technitium/groups/*/clone") p="/dns/technitium/groups/{id}/clone" ;;
         "/dns/technitium/kids-lists/*.txt") p="/dns/technitium/kids-lists/{name}.txt" ;;
         "/dns/technitium/groups/*")     p="/dns/technitium/groups/{id}" ;;
         "/dns/technitium/devices/*")    p="/dns/technitium/devices/{id}" ;;
