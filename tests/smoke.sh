@@ -1748,13 +1748,17 @@ check "create user: duplicate refused"  409 "$(auth_request POST /auth/users '{"
 check "create user: bad name refused"   400 "$(auth_request POST /auth/users '{"username":"x!","password":"Botpass-1234"}' | status_of)"
 check "create user: viewer denied"      403 "$(viewer_request POST /auth/users '{"username":"nope-zz","password":"Botpass-1234"}' | status_of)"
 check "create user: can sign in"        200 "$(request POST /auth/login '{"username":"bot-smoke","password":"Botpass-1234"}' "${AUTH[@]}" | status_of)"
-# sign-ins that overlap (each one also removes the expired sessions): no session is lost or doubled, and the file stays valid JSON
+# sign-ins that overlap (each one also removes the expired sessions): no session is lost or doubled, and the file stays valid JSON.
+# Each pair comes from an address of its own: twelve from one address trip the lockout (an attempt counts before its password is
+# looked at), only the first five got in, and when those five were all race-a's, race-b had no session ("1 0" on a busy runner)
 auth_request POST /auth/users '{"username":"race-a","password":"Racepass-1234","role":"user"}' >/dev/null
 auth_request POST /auth/users '{"username":"race-b","password":"Racepass-1234","role":"user"}' >/dev/null
+: > "$WORK/race.codes"
 for _i in 1 2 3 4 5 6; do
-    request POST /auth/login '{"username":"race-a","password":"Racepass-1234"}' "${AUTH[@]}" >/dev/null &
-    request POST /auth/login '{"username":"race-b","password":"Racepass-1234"}' "${AUTH[@]}" >/dev/null &
+    request POST /auth/login '{"username":"race-a","password":"Racepass-1234"}' "${AUTH[@]}" SOCAT_PEERADDR="192.0.2.$((60 + _i))" | status_of >> "$WORK/race.codes" &
+    request POST /auth/login '{"username":"race-b","password":"Racepass-1234"}' "${AUTH[@]}" SOCAT_PEERADDR="192.0.2.$((60 + _i))" | status_of >> "$WORK/race.codes" &
 done; wait
+check "sign-ins that overlap: all twelve get in"         "12 200" "$(sort "$WORK/race.codes" | uniq -c | awk '{print $1, $2}' | paste -sd' ')"
 check "sign-ins that overlap: the token file is valid"   yes "$(jq -e . "$WORK/.api-auth/tokens.json" >/dev/null 2>&1 && echo yes || echo no)"
 check "…each of the two users keeps exactly one session" "1 1" "$(jq -r '[([.[] | select(.username == "race-a")] | length), ([.[] | select(.username == "race-b")] | length)] | join(" ")' "$WORK/.api-auth/tokens.json" 2>/dev/null)"
 check "homarr register: validation"     400 "$(auth_request POST /homarr/register '{"name":"","url":"nope"}' | status_of)"
