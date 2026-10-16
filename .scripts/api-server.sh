@@ -19978,9 +19978,9 @@ AUTH_ROUTE_EOF
                         # Determine the route target: host IP or container name
                         local _ro_target=""
                         if [[ "$_ro_host_ip" == "true" ]]; then
-                            # Detect the host's LAN IP for the route target
-                            _ro_target=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
-                            [[ -z "$_ro_target" ]] && _ro_target=$(_primary_ip)
+                            # the host's LAN address, the one the feed gives a hub for this machine (TRAEFIK_FEED_TARGET_HOST when
+                            # set): a VM's route is only taken by the hub when it points at the address the hub knows the VM by
+                            _ro_target=$(_feed_target_host)
                         fi
                         if [[ -z "$_ro_target" ]]; then
                             # Fallback to container name from route_override
@@ -26627,6 +26627,8 @@ _fleet_deploy_for_member() {
     fi
     svcs=$(awk '/^services:/{found=1; next} found && /^[a-zA-Z]/{exit} found && /^  [a-zA-Z]/{gsub(/^ +/, ""); gsub(/:.*/, ""); print}' "$TEMPLATES_DIR/$tpl/docker-compose.yml" 2>/dev/null)
     [[ -n "$svcs" ]] || svcs="$tpl"
+    # a template that routes itself (route_override) has its route under the template's name, not a service's
+    jq -e '.route_override' "$TEMPLATES_DIR/$tpl/template.json" >/dev/null 2>&1 && svcs+=$'\n'"$tpl"
     if [[ "$explicit" == true ]]; then
         for svc in $svcs; do
             if grep -qxF -- "$svc" <<< "$list"; then _fleet_auth_set "$member" "$svc" true; else _fleet_auth_set "$member" "$svc" false; fi

@@ -3,6 +3,23 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.57] - 2026-10-16
+
+### Added
+
+- **Netboot templates: `netbootxyz` and `pxe-proxy`.** netboot.xyz serves an iPXE menu of OS installers, live systems and
+  tools over the network (TFTP boot files, assets mirrored locally, a hosted menu for Wi-Fi netboot); `pxe-proxy` is its
+  proxyDHCP partner for a router that cannot set DHCP options 66/67: it only tells PXE clients what to boot and hands out
+  no addresses.
+
+### Fixed
+
+- **A template deployed into a VM gets that VM's graphics card and its own route.** The deploy sheet's card picker now
+  lists the VM's cards (from the VM's `/status`, through the hub); the VM applies the card from its own list. A template's
+  own route (`route_override` with `use_host_ip`) in a VM now points at the address the hub knows the VM by
+  (`TRAEFIK_FEED_TARGET_HOST` when set, as the VM's other routes do), so the hub's Traefik takes it, and the deploy
+  sheet's Authelia choice for that route is kept on the hub (before, it always went behind Authelia).
+
 ## [4.0.56] - 2026-10-16
 
 ### Added

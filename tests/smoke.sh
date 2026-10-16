@@ -3457,6 +3457,28 @@ check "hub: compose of the VM stack"    200 "$(auth_request GET /stacks/smoke-ph
 check "hub: unknown stack still 404"    404 "$(auth_request GET /stacks/nope-none | status_of)"
 _TPL=$(ls "$ROOT/.templates" | head -1)
 check "hub: dry run lands on the VM"    200 "$(auth_request POST "/templates/$_TPL/dry-run" '{"target_stack":"smoke-photos"}' | status_of)"
+# a template deployed into the VM's stack through the hub: the VM's own graphics card (its /status, read through the hub)
+# goes into the service, and its route_override route is the VM's, at the address the hub knows it by, with the deploy's
+# subdomain and port; the hub's Traefik feed takes it from there
+_vmenv() { sed -i "/^${1}=/d" "$VMWORK/.env"; printf '%s=%s\n' "$1" "$2" >> "$VMWORK/.env"; }
+_vmenv DCS_SYSFS_DRM "$_G/drm"; _vmenv DCS_AMDGPU_IDS "$_G/amdgpu.ids"; _vmenv TRAEFIK_FEED_TARGET_HOST 127.0.0.1; _vmenv PROXY_DOMAIN vm.smoke.test
+check "vm gpu: the VM's card, read through the hub" "AMD Radeon RX 6800 XT renderD129" "$(auth_request GET /fleet/members/smoke-photos/api/status | body_of | jq -r '.system.gpus[]? | select(.slot == "0000:03:00.0") | "\(.name) \(.render)"' 2>/dev/null)"
+_VG=$(auth_request POST /templates/romm-streaming/deploy '{"target_stack":"smoke-photos","auto_start":false,"gpu":"0000:03:00.0","variables":{"STREAM_SUBDOMAIN":"games","PORT_ROMM_STREAM":"3020"}}')
+check "vm gpu: the deploy lands on the VM"      200 "$(status_of <<< "$_VG")"
+check "vm gpu: the VM's card in the webstation" 1 "$(awk '/^  romm-webstation:/{f=1; next} f && /^  [A-Za-z]/{f=0} f' "$VMWORK/Stacks/smoke-photos/docker-compose.yml" 2>/dev/null | grep -c -- '- /dev/dri/renderD129:/dev/dri/renderD129')"
+check "vm gpu: a card the VM does not have is refused by the VM" 400 "$(auth_request POST /templates/romm-streaming/deploy '{"target_stack":"smoke-photos","auto_start":false,"replace_services":true,"gpu":"0000:99:00.0"}' | status_of)"
+check "vm route: the VM's route file, the deploy's subdomain and port at the VM's address" "1 1" "$(grep -c 'Host(`games.vm.smoke.test`)' "$VMWORK/.data/routes/smoke-photos/romm-streaming.yml" 2>/dev/null) $(grep -c 'url: "http://127.0.0.1:3020"' "$VMWORK/.data/routes/smoke-photos/romm-streaming.yml" 2>/dev/null)"
+# the hub writes it into its own Traefik's fleet-members.yml: the VM's address and port, behind the hub's Authelia when the
+# sheet's switch is on, open when it is off
+_vmr() { PATH="$WORK/fakebin:$PATH" _lib _fleet_routes_write_local; jq -r '.http as $h | $h.routers | to_entries[] | select(.key | endswith("romm-streaming-dcs")) | "\(.value.rule) \($h.services[.value.service].loadBalancer.servers[0].url) \(.value.middlewares | index("authelia-forwardauth") != null)"' "$_HROUTES/fleet-members.yml" 2>/dev/null; }
+_AU_MADE=no; [[ -f "$WORK/fakebin/.authelia" ]] || { touch "$WORK/fakebin/.authelia"; _AU_MADE=yes; }
+printf 'http:\n  middlewares:\n    authelia-forwardauth:\n      forwardAuth:\n        address: "http://Authelia:9091/api/verify"\n' > "$_HROUTES/zz-vmroute-mw.yml"
+check "vm route: in the hub's fleet-members.yml, behind Authelia" "Host(\`games.vm.smoke.test\`) http://127.0.0.1:3020 true" "$(_vmr)"
+auth_request POST /templates/romm-streaming/deploy '{"target_stack":"smoke-photos","auto_start":false,"replace_services":true,"authelia_services":[],"variables":{"STREAM_SUBDOMAIN":"games","PORT_ROMM_STREAM":"3020"}}' PATH="$WORK/fakebin:$PATH" >/dev/null
+check "vm route: the sheet's switch off, the route is open" "Host(\`games.vm.smoke.test\`) http://127.0.0.1:3020 false" "$(_vmr)"
+[[ "$_AU_MADE" == yes ]] && rm -f "$WORK/fakebin/.authelia"
+rm -f "$_HROUTES/zz-vmroute-mw.yml"
+for _k in DCS_SYSFS_DRM DCS_AMDGPU_IDS TRAEFIK_FEED_TARGET_HOST PROXY_DOMAIN; do sed -i "/^${_k}=/d" "$VMWORK/.env"; done
 check "hub: forwarded post audited"     yes "$(grep -q '"action":"fleet_proxy"' "$WORK/.data/audit.jsonl" 2>/dev/null && echo yes || echo no)"
 check "hub: /containers has member field" yes "$(auth_request GET /containers | body_of | jq -e 'has("containers")' >/dev/null 2>&1 && echo yes || echo no)"
 check "hub: viewer reads the VM stack"  200 "$(viewer_request GET /stacks/smoke-photos | status_of)"
@@ -3921,6 +3943,7 @@ check "vm deploy: protection kept on the hub"     true "$(_fa zz-vm-routed-tpl-d
 check "vm deploy: the route is behind Authelia"   'traefik-chain compress-gzip authelia-forwardauth' "$(_fchain zz-vm-routed-tpl-dcs)"
 fake_request POST "$_MP" '{"target_stack":"zz-vm","authelia_services":[]}' >/dev/null
 check "vm deploy: an explicit none is kept"       false "$(_fa zz-vm-routed-tpl-dcs)"
+check "vm deploy: a template's own route (route_override) keeps the choice" "false true" "$(fake_request POST /fleet/members/zz-vm/api/templates/romm-streaming/deploy '{"target_stack":"zz-vm","authelia_services":["romm-webstation"]}' >/dev/null; _fa zz-vm-romm-streaming-dcs) $(fake_request POST /fleet/members/zz-vm/api/templates/romm-streaming/deploy '{"target_stack":"zz-vm","authelia_services":["romm-streaming"]}' >/dev/null; _fa zz-vm-romm-streaming-dcs)"
 check "vm deploy: that route stays open"          'traefik-chain compress-gzip' "$(_fchain zz-vm-routed-tpl-dcs)"
 fake_request POST "$_MP" '{"target_stack":"zz-vm"}' >/dev/null
 check "vm deploy: no choice, back to the default" null "$(_fa zz-vm-routed-tpl-dcs)"
