@@ -3,6 +3,30 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **RomM emulator streaming as a template (`romm-streaming`).** RomM 5.4 can launch PS2, GameCube/Wii, PS1, PSP,
+  Dreamcast, PS3 and Xbox games into a desktop that runs the real emulators (PCSX2, Dolphin, DuckStation, PPSSPP, Flycast,
+  RPCS3, xemu, RetroArch) and streams it to the browser. The template deploys that desktop (LinuxServer's webstation with
+  RomM's broker) into the stack that holds RomM and **makes its HTTPS route by itself**: `stream.<your domain>` to this
+  server's port 3010, so it also works when the stack runs in a fleet VM (the subdomain and port are deploy variables).
+  WebRTC needs HTTPS, which that route gives. The graphics card is picked on the deploy sheet: an AMD or Intel card's render
+  node, or an NVIDIA card with the graphics capability the emulators need. RomM itself is wired by hand, in two steps
+  DCS writes out for you: `App-Data/RomM-Streaming/wiring/romm-wiring.yml` holds the line for RomM's service (the broker
+  secret, generated on deploy) and RomM's `config.yml` block with this deploy's address already filled in.
+- **Templates: `gpu` takes `"use": "graphics"`** (a streamed desktop that renders and encodes; NVIDIA gets the `graphics`
+  capability as well as `video`), and **`route_override` takes `subdomain_var` and `port_var`**, deploy variables that
+  override its fixed subdomain and port. A `fill: "public_url"` variable without a service gets the override's address.
+
+### Fixed
+
+- **CI: the house check "from 4.0.54's files" failed when the suite ran in the evening.** The test deleted a group on the
+  real clock, so the groups were rendered at the runner's own hour; at 20:51 on a Monday (CI's run) that put a group in its
+  20:30 bedtime, and the next minute tick on the test's clock (11:03) rightly ended it with one more write to Technitium.
+  DCS was right (an unchanged install writes nothing); the test now deletes on its fake clock like every other step.
+
 ## [4.0.55] - 2026-10-12
 
 ### Added

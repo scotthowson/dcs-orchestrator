@@ -1,0 +1,28 @@
+services:
+  romm-webstation:
+    container_name: RomM-Webstation
+    # a Selkies WebRTC desktop with PCSX2, Dolphin, DuckStation, RPCS3, PPSSPP, Flycast, xemu and RetroArch, and the
+    # romm-broker RomM launches games through; amd64 only. The graphics card comes from the deploy sheet (template.json gpu)
+    image: lscr.io/linuxserver/webstation:romm
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+      - SUBFOLDER=/streaming/
+      - BROKER_SECRET=${ROMM_STREAMING_SECRET}
+    volumes:
+      # emulator settings, BIOS files, saves and the broker's exports
+      - ${APP_DATA_DIR:-./App-Data}/RomM-Streaming:/config
+      # the same library RomM reads, at the path RomM gives the broker (it refuses a ROM outside /romm)
+      - ${ROMM_LIBRARY_PATH:-/srv/media/roms}:/romm/library:ro
+    ports:
+      # plain HTTP: WebRTC needs HTTPS, which the route (stream.<domain>) gives
+      - "${PORT_ROMM_STREAM:-3010}:3000"
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "curl", "-fso", "/dev/null", "http://127.0.0.1:3000/streaming/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s

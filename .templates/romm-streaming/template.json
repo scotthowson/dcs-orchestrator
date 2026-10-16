@@ -1,0 +1,66 @@
+{
+  "name": "romm-streaming",
+  "title": "RomM Emulator Streaming",
+  "description": "RomM 5.4's emulator streaming: a desktop with PCSX2, Dolphin, DuckStation, RPCS3, PPSSPP, Flycast, xemu and RetroArch that RomM launches games into, streamed to the browser over WebRTC. Deploy it into the stack that holds RomM and pick the graphics card on the deploy sheet. DCS makes the HTTPS route (stream.<domain>) itself. Then wire RomM: App-Data/RomM-Streaming/wiring/romm-wiring.yml in that stack holds the line for RomM's service and the config.yml block with this deploy's address filled in; restart RomM. The image is amd64 only and several GB.",
+  "category": "gaming",
+  "target_stack": "entertainment-personal",
+  "icon": "🎮",
+  "tags": ["romm", "streaming", "emulation", "retro", "webrtc", "selkies", "pcsx2", "dolphin", "gaming"],
+  "config_path": "RomM-Streaming/wiring",
+  "auth_note": "The stream is a desktop with no sign-in of its own: keep it behind Authelia. RomM's server talks to the broker directly, not through the route, so that does not get in its way.",
+  "route_skip": ["romm-webstation"],
+  "route_override": {
+    "subdomain": "stream",
+    "subdomain_var": "STREAM_SUBDOMAIN",
+    "port": 3010,
+    "port_var": "PORT_ROMM_STREAM",
+    "protocol": "http",
+    "use_host_ip": true
+  },
+  "gpu": [
+    {
+      "service": "romm-webstation",
+      "use": "graphics"
+    }
+  ],
+  "variables": [
+    {
+      "name": "ROMM_STREAMING_SECRET",
+      "label": "Broker secret",
+      "description": "Shared by RomM (STREAMING_BROKER_SECRET) and the broker (BROKER_SECRET). Leave empty and DCS generates one on deploy",
+      "default": "",
+      "required": false,
+      "type": "password",
+      "generate": "hex64"
+    },
+    {
+      "name": "ROMM_LIBRARY_PATH",
+      "label": "Library folder",
+      "description": "The same folder the RomM template uses (roms/<platform>/ inside), mounted read-only",
+      "default": "/srv/media/roms",
+      "required": true
+    },
+    {
+      "name": "PORT_ROMM_STREAM",
+      "label": "Stream port",
+      "description": "Host port of the stream (plain HTTP; the route in front of it gives HTTPS)",
+      "default": "3010",
+      "required": false
+    },
+    {
+      "name": "STREAM_SUBDOMAIN",
+      "label": "Subdomain",
+      "description": "The stream's address is https://<this>.<your domain>",
+      "default": "stream",
+      "required": false
+    },
+    {
+      "name": "ROMM_STREAM_URL",
+      "label": "Stream address",
+      "description": "Leave empty: DCS fills it with the route's address (https://stream.<domain>) for RomM's config.yml",
+      "default": "",
+      "required": false,
+      "fill": "public_url"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+# RomM emulator streaming: what RomM needs to use this webstation. DCS wrote this file when it deployed
+# romm-streaming; nothing reads it, copy from it. (Its own folder: a redeploy fills placeholders here only, never in
+# the emulators' settings next to it.)
+#
+# 1. RomM's service (docker-compose.yml of the stack that holds RomM), under environment:
+#
+#      - STREAMING_BROKER_SECRET=$ROMM_STREAMING_SECRET
+#
+#    That works when RomM is in the same stack as this webstation (the stack's .env holds the secret). In another
+#    stack or on another machine, put the secret itself:
+#
+#      - STREAMING_BROKER_SECRET=${ROMM_STREAMING_SECRET}
+#
+# 2. RomM's config/config.yml (App-Data/RomM/config/config.yml), the block below. broker_host is how RomM's server
+#    reaches the broker: the service name works when RomM is in this stack; otherwise use http://<this server's
+#    address>:${PORT_ROMM_STREAM}. host is the address the browser opens (it must be HTTPS for WebRTC).
+#
+# Then restart RomM (Stacks → its stack → Restart).
+
+streaming:
+    enabled: true
+    containers:
+        - protocol: webstation
+          host: ${ROMM_STREAM_URL}
+          broker_host: http://romm-webstation:3000
+          subfolder: /streaming
+          label: Emulation station
+          platforms:
+              ps2: pcsx2
+              ngc: dolphin
+              wii: dolphin
+              psx: duckstation
+              psp: ppsspp
+              dc: flycast
+              ps3: rpcs3
+              xbox: xemu

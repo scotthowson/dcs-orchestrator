@@ -2404,7 +2404,8 @@ _gpu_list() {
 
 # A graphics card for a template's services. The template says which services can use one and how, in template.json:
 #   "gpu": [{"service": "ollama", "use": "compute", "images": {"amd": "ollama/ollama:rocm"}}]
-# "use" is compute (AI: AMD needs /dev/kfd as well) or video (transcoding); "images" swaps the image for that vendor. The
+# "use" is compute (AI: AMD needs /dev/kfd as well), video (transcoding) or graphics (a streamed desktop that renders
+# and encodes: NVIDIA needs the graphics capability for OpenGL/Vulkan); "images" swaps the image for that vendor. The
 # card is the one at PCI slot $3 (_gpu_list). Into each service of the compose ($1) go: AMD and Intel → the card's render
 # node (the same path inside, so an app setting such as /dev/dri/renderD129 holds) and the host's video and render groups;
 # NVIDIA → a device reservation for the NVIDIA Container Toolkit. Entries a service already has are not repeated. Prints
@@ -2425,7 +2426,7 @@ _template_gpu_apply() {
         case "$vendor" in
             amd)    devs="/dev/dri/$render:/dev/dri/$render"; [[ "$use" == compute ]] && devs+=",/dev/kfd:/dev/kfd" ;;
             intel)  devs="/dev/dri/$render:/dev/dri/$render" ;;
-            nvidia) grps=""; nv="gpu, compute, utility"; [[ "$use" == video ]] && nv+=", video" ;;
+            nvidia) grps=""; nv="gpu, compute, utility"; [[ "$use" == video || "$use" == graphics ]] && nv+=", video"; [[ "$use" == graphics ]] && nv+=", graphics" ;;
         esac
         out=$(printf '%s\n' "$out" | awk -v svc="$svc" -v img="$img" -v devs="$devs" -v grps="$grps" -v nv="$nv" '
             function items(list, quote, blk,   k, a, j, v) {
@@ -18610,6 +18611,18 @@ _get_template_icon() {
     esac
 }
 
+# A template's route_override read with this deploy's variables: prints "<subdomain> <port>". subdomain_var and port_var
+# name deploy variables that override the fixed subdomain and port (romm-streaming: STREAM_SUBDOMAIN, PORT_ROMM_STREAM).
+_template_ro_sub_port() {
+    local ro="$1" vs="$2" name="$3" sub port v
+    sub=$(jq -r '.subdomain // empty' <<< "$ro" 2>/dev/null); port=$(jq -r '.port // empty' <<< "$ro" 2>/dev/null)
+    v=$(jq -r '.subdomain_var // empty' <<< "$ro" 2>/dev/null)
+    [[ -n "$v" ]] && v=$(printf '%s\n' "$vs" | sed -n "s/^${v}=//p" | head -n 1) && [[ "$v" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] && sub="$v"
+    v=$(jq -r '.port_var // empty' <<< "$ro" 2>/dev/null)
+    [[ -n "$v" ]] && v=$(printf '%s\n' "$vs" | sed -n "s/^${v}=//p" | head -n 1) && [[ "$v" =~ ^[0-9]{1,5}$ ]] && port="$v"
+    printf '%s %s\n' "${sub:-$name}" "$port"
+}
+
 # _compose_backup DIR TIMESTAMP — before a template deploy or removal changes DIR/docker-compose.yml: a copy as
 # docker-compose.yml.bak.TIMESTAMP (the restore path on failure, and what the deploy history names), keeping the newest 5
 _compose_backup() {
@@ -18838,7 +18851,11 @@ handle_template_deploy() {
             [[ -z "$_pu_val" ]] || continue
             [[ -n "$_pu_dom" ]] || _pu_dom=$(_find_traefik_domain 2>/dev/null)
             _pu_url=""
-            if [[ -n "$_pu_dom" && "$_pu_dom" != "example.com" && "$_pu_dom" =~ ^[A-Za-z0-9.-]+$ && -n "$_pu_svc" ]] \
+            if [[ -z "$_pu_svc" && -n "$_pu_dom" && "$_pu_dom" != "example.com" && "$_pu_dom" =~ ^[A-Za-z0-9.-]+$ ]] \
+               && jq -e '.route_override' "$tdir/template.json" >/dev/null 2>&1 && jq -e '.routes != false' <<< "$body" >/dev/null 2>&1; then
+                # no service: the template's route_override is the address (romm-streaming)
+                _pu_url="https://$(_template_ro_sub_port "$(jq -c .route_override "$tdir/template.json")" "$vars" "$name" | cut -d' ' -f1).${_pu_dom}"
+            elif [[ -n "$_pu_dom" && "$_pu_dom" != "example.com" && "$_pu_dom" =~ ^[A-Za-z0-9.-]+$ && -n "$_pu_svc" ]] \
                && jq -e --arg s "$_pu_svc" '(.routes != false) and ((has("route_services") | not) or ((.route_services // []) | index($s) != null))' <<< "$body" >/dev/null 2>&1; then
                 _pu_sub=$(jq -r --arg s "$_pu_svc" '(.routes // {}) | if type == "object" then (.[$s] // "") else "" end' <<< "$body" 2>/dev/null | grep -m1 -oE 'Host\(`[^`]+`\)' | sed -E 's/Host\(`//; s/`\)//')
                 if [[ "$_pu_sub" =~ ^[A-Za-z0-9.-]+$ ]]; then _pu_url="https://$_pu_sub"; else _pu_url="https://${_pu_svc}.${_pu_dom}"; fi
@@ -19948,12 +19965,10 @@ AUTH_ROUTE_EOF
                 _route_override=$(jq -c '.route_override // empty' "$tdir/template.json" 2>/dev/null)
                 if [[ -n "$_route_override" ]]; then
                     local _ro_sub _ro_port _ro_proto _ro_host_ip
-                    _ro_sub=$(printf '%s' "$_route_override" | jq -r '.subdomain // empty')
-                    _ro_port=$(printf '%s' "$_route_override" | jq -r '.port // empty')
+                    read -r _ro_sub _ro_port < <(_template_ro_sub_port "$_route_override" "$vars" "$name")
                     _ro_proto=$(printf '%s' "$_route_override" | jq -r '.protocol // "http"')
                     _ro_host_ip=$(printf '%s' "$_route_override" | jq -r '.use_host_ip // false')
                     if [[ -n "$_ro_port" ]]; then
-                        [[ -z "$_ro_sub" ]] && _ro_sub="$name"
                         # Allow subdomain override from deploy variables (e.g. NEXTCLOUD_DOMAIN)
                         local _ro_domain_var
                         _ro_domain_var=$(printf '%s' "$body" | jq -r '.variables.NEXTCLOUD_DOMAIN // empty' 2>/dev/null)

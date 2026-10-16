@@ -2884,6 +2884,8 @@ mkdir -p "$_G/devices/0000:01:00.0/drm/renderD130" && echo 0x10de > "$_G/devices
 _GPATH="$_G/nv:"
 _GN_OUT=$(_gpa "$_TC" '[{"service":"ollama","use":"video"}]' 0000:01:00.0)
 check "gpu deploy: NVIDIA gets a reservation with video, no devices or groups" "driver: nvidia|capabilities: [gpu, compute, utility, video]|0" "$(printf '%s\n' "$_GN_OUT" | grep -oE 'driver: nvidia|capabilities: \[[^]]*\]' | paste -sd'|')|$(printf '%s\n' "$_GN_OUT" | grep -cE '^    (devices|group_add):')"
+check "gpu deploy: NVIDIA graphics (a streamed desktop) gets the graphics capability too" "capabilities: [gpu, compute, utility, video, graphics]" "$(_gpa "$_TC" '[{"service":"ollama","use":"graphics"}]' 0000:01:00.0 | grep -oE 'capabilities: \[[^]]*\]')"
+check "gpu deploy: AMD graphics gets the render node, no /dev/kfd" "- /dev/dri/renderD129:/dev/dri/renderD129" "$(_gpa "$_TC" '[{"service":"ollama","use":"graphics"}]' 0000:03:00.0 | grep -E '^      - /dev/' | sed 's/^ *//' | paste -sd'|')"
 check "gpu deploy: NVIDIA keeps the image when the template names none for it" "image: ollama/ollama:latest" "$(printf '%s\n' "$_GN_OUT" | awk '/^  ollama:/{f=1} /^  web:/{f=0} f && /image:/{sub(/^ */,""); print}')"
 _GPATH=""; rm -rf "$_G/drm/card2"
 # under the API's errexit and pipefail: a host without a "render" group (Debian containers), without lspci (minimal VM
@@ -3625,6 +3627,25 @@ fake_request POST /templates/bypass-tpl/deploy '{"target_stack":"demo","auto_sta
 check "deploy: bypass template stays open"  0 "$(grep -c '"authelia-forwardauth"' "$_ZZR/demo/bypass-tpl.yml")"
 fake_request POST /templates/routed-tpl/deploy '{"target_stack":"demo2","auto_start":false,"authelia_services":[]}' >/dev/null
 check "deploy: explicit none respected"     0 "$(grep -c '"authelia-forwardauth"' "$_ZZR/demo2/routed-tpl.yml")"
+# romm-streaming: the route is made by the deploy itself (route_override: stream.<domain> to this server's port), the
+# card picked on the sheet goes into the webstation, and the wiring file carries RomM's two snippets with the real address
+for _st in demo demo2; do command cp -f "$WORK/Stacks/$_st/docker-compose.yml" "$WORK/rs-$_st.yml"; command cp -f "$WORK/Stacks/$_st/.env" "$WORK/rs-$_st.env" 2>/dev/null || : > "$WORK/rs-$_st.env"; done
+command rm -rf "$WORK/.templates/romm-streaming"; cp -r "$ROOT/.templates/romm-streaming" "$WORK/.templates/romm-streaming"
+_RS=$(fake_request POST /templates/romm-streaming/deploy '{"target_stack":"demo2","auto_start":false,"gpu":"0000:03:00.0"}' PATH="$_G/bin:$WORK/fakebin:$PATH" DCS_SYSFS_DRM="$_G/drm" DCS_AMDGPU_IDS="$_G/amdgpu.ids")
+check "romm streaming: deploys"                    200 "$(status_of <<< "$_RS")"
+check "romm streaming: the route: stream.<domain>, this server's port 3010, behind Authelia" "1 1 1" "$(grep -c 'Host(`stream.smoke.test`)' "$_ZZR/demo2/romm-streaming.yml" 2>/dev/null) $(grep -cE 'url: "http://[^"]+:3010"' "$_ZZR/demo2/romm-streaming.yml" 2>/dev/null) $(grep -c '"authelia-forwardauth"' "$_ZZR/demo2/romm-streaming.yml" 2>/dev/null)"
+check "romm streaming: no second route for the service itself" no "$([[ -f "$_ZZR/demo2/romm-webstation.yml" ]] && echo yes || echo no)"
+check "romm streaming: the AMD card's render node in the webstation" 1 "$(awk '/^  romm-webstation:/{f=1; next} f && /^  [A-Za-z]/{f=0} f' "$WORK/Stacks/demo2/docker-compose.yml" | grep -c -- '- /dev/dri/renderD129:/dev/dri/renderD129')"
+# the wiring file lands in the stack's App-Data (wherever this install keeps it)
+_rsw() { find "$WORK" -path "$WORK/.templates" -prune -o -name romm-wiring.yml -print 2>/dev/null | head -n 1; }
+_RSW=$(_rsw)
+_RSK=$(grep -m1 '^ROMM_STREAMING_SECRET=' "$WORK/Stacks/demo2/.env" | cut -d= -f2 | tr -d '"')
+check "romm streaming: a secret made, RomM's config block carries the route's address and the secret" "64 1 1 1" "$(printf '%s' "$_RSK" | grep -cE '^[0-9a-f]{64}$' | sed 's/^1$/64/') $(grep -c '^          host: https://stream.smoke.test$' "$_RSW" 2>/dev/null) $(grep -c "STREAMING_BROKER_SECRET=$_RSK\$" "$_RSW" 2>/dev/null) $(grep -c 'STREAMING_BROKER_SECRET=\$ROMM_STREAMING_SECRET$' "$_RSW" 2>/dev/null)"
+[[ -n "$_RSW" ]] && rm -f "$_RSW"
+fake_request POST /templates/romm-streaming/deploy '{"target_stack":"demo","auto_start":false,"variables":{"PORT_ROMM_STREAM":"3020","STREAM_SUBDOMAIN":"games"}}' >/dev/null
+check "romm streaming: another subdomain and port from the deploy's variables" "1 1 1" "$(grep -c 'Host(`games.smoke.test`)' "$_ZZR/demo/romm-streaming.yml" 2>/dev/null) $(grep -cE 'url: "http://[^"]+:3020"' "$_ZZR/demo/romm-streaming.yml" 2>/dev/null) $(grep -c '^          host: https://games.smoke.test$' "$(_rsw)" 2>/dev/null)"
+# the stacks as they were: the sections below count demo's and demo2's services
+for _st in demo demo2; do command cp -f "$WORK/rs-$_st.yml" "$WORK/Stacks/$_st/docker-compose.yml"; command cp -f "$WORK/rs-$_st.env" "$WORK/Stacks/$_st/.env"; rm -f "$WORK/rs-$_st.yml" "$WORK/rs-$_st.env" "$_ZZR/$_st/romm-streaming.yml"; rm -rf "$WORK/Stacks/$_st/App-Data/RomM-Streaming"; done; _RSW=$(_rsw); [[ -n "$_RSW" ]] && rm -rf "$(dirname "$_RSW")"
 # a template deployed with auto_start into a stack that uses the core Redis password (the core stack) before DCS ever started
 # that stack (a fresh install: setup.sh brings the core stack up by itself): the password is made then, as a start makes it,
 # and the stack starts instead of waiting for a secret nobody is meant to type
