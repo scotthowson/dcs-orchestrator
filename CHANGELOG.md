@@ -35,6 +35,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`image-update: <stack>: stack file does not describe its running containers, left alone`), the run is marked as
   needing a look, and "Needs your attention" lists it (`stack_file_refusals` in `GET /images/check-updates`) until the
   file describes its containers again.
+- **The default stacks are created only on a true first run.** The ten seeds are copied only when `Stacks/` holds no
+  stack directory at all, and never on a fleet member (a node, or a VM joining its hub), whose stacks the hub places; an
+  install with any stack of its own never gets them.
 - **A slow VM no longer makes its sites vanish for half an hour.** The hub removed a VM route's Cloudflare DNS record
   whenever one merge of the VMs' routes lacked it, and a VM that answered too slowly (one pegged by an emulator) still
   counted as reachable: on 2026-10-16 the hub deleted and re-made two records 529 times, and every resolver cached the

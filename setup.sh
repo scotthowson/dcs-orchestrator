@@ -231,7 +231,9 @@ fi
 # The stacks are the user's, never git's (4.0.58): a fresh checkout gets the ten default stacks from .config/stacks-seed once
 if [[ "$DRY_RUN" != "true" && -f "$BASE_DIR/.lib/stacks-seed.sh" ]]; then
     source "$BASE_DIR/.lib/stacks-seed.sh"
-    while IFS= read -r _seeded; do _info "Stacks: $_seeded"; done < <(stacks_seed "$BASE_DIR")
+    # a fleet member (a node, or one joining unattended) gets the stacks its hub places, never the defaults
+    _seed_defaults=yes; [[ "$DCS_ROLE" == node || "${DCS_FLEET_ROLE:-}" == member ]] && _seed_defaults=no
+    while IFS= read -r _seeded; do _info "Stacks: $_seeded"; done < <(stacks_seed "$BASE_DIR" "$_seed_defaults")
 fi
 
 # -----------------------------------------------------------------------------

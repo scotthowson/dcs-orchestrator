@@ -36554,7 +36554,7 @@ start_server() {
     _backup_pid_alive "$BACKUP_PID_FILE" || _backup_unpause_all >/dev/null 2>&1 || true
     _backup_tidy_leftovers >/dev/null 2>&1 || true
     # The stack files left git in 4.0.58: what the update to it took comes back, a fresh checkout gets the default stacks
-    stacks_seed "$BASE_DIR" 2>&1 | sed 's/^/  Stacks: /' || true
+    stacks_seed "$BASE_DIR" "$(_fleet_is_member && echo no || echo yes)" 2>&1 | sed 's/^/  Stacks: /' || true
     # The dashboard image's new name (docker-compose-skeleton-ui -> dcs-orchestrator-ui) in the dashboard's compose file
     _dcs_ui_image_migrate || echo "  Dashboard image: ${_DCS_UI_MIGRATE_FILE:-the compose file of DCS-UI} still names ${_DCS_UI_OLD_REPO}: ${_DCS_UI_MIGRATE_ERR:-could not rewrite it}"
 

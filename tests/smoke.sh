@@ -1108,6 +1108,12 @@ rm -rf "$_SD/Stacks/media"; _lib stacks_seed "$_SD" >/dev/null
 check "seed: a stack deleted later stays deleted"   no "$([[ -e "$_SD/Stacks/media" ]] && echo yes || echo no)"
 _SN="$WORK/seed-nogit"; mkdir -p "$_SN/.config"; cp -r "$_SD/.config/stacks-seed" "$_SN/.config/"; _lib stacks_seed "$_SN" >/dev/null
 check "seed: a VM without git gets nothing (the hub places its stacks)" no "$([[ -e "$_SN/Stacks/core" ]] && echo yes || echo no)"
+# a git checkout that already has one stack of its own (a fixture, a hub's single stack), no mark yet: no defaults
+_SO="$WORK/seed-own"; git init -q -b main "$_SO"; mkdir -p "$_SO/.config" "$_SO/Stacks/demo"; cp -r "$_SD/.config/stacks-seed" "$_SO/.config/"
+printf 'services:\n  demo:\n    image: alpine:3\n' > "$_SO/Stacks/demo/docker-compose.yml"; _lib stacks_seed "$_SO" >/dev/null
+check "seed: a Stacks/ with one stack of its own gets no defaults" "demo" "$(ls "$_SO/Stacks" | paste -sd' ')"
+_SM="$WORK/seed-member"; git init -q -b main "$_SM"; mkdir -p "$_SM/.config"; cp -r "$_SD/.config/stacks-seed" "$_SM/.config/"; _lib stacks_seed "$_SM" no >/dev/null
+check "seed: a fleet member's first start gets no defaults, and never later" "no yes" "$([[ -e "$_SM/Stacks/core" ]] && echo yes || echo no) $([[ -e "$_SM/.data/stack-files-seeded" ]] && echo yes || echo no)"
 # the old updater's switch: it tags HEAD, fast-forwards (git deletes the unedited tracked stack files), puts the edited back
 _SU="$WORK/seed-upd"; git init -q -b main "$_SU"; _sgx() { git -C "$_SU" -c user.name=smoke -c user.email=smoke@example.com "$@"; }
 mkdir -p "$_SU/Stacks/core" "$_SU/Stacks/gone"; printf 'services:\n  web:\n    image: nginx\n' > "$_SU/Stacks/core/docker-compose.yml"; printf 'A=1\n' > "$_SU/Stacks/core/.env"; printf 'G=1\n' > "$_SU/Stacks/gone/.env"

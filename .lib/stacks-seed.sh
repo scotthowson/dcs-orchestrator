@@ -11,7 +11,8 @@
 # A seed with the very content of the file it replaces makes git see a rename, and "git diff --name-only" then names only
 # the seed: the 4.0.57 updater would not see that its edited stack files are touched and the update would stop.
 #
-#   stacks_seed DIR            once per install: what the switch to 4.0.58 took comes back, a fresh checkout is seeded
+#   stacks_seed DIR [no]       once per install: what the switch to 4.0.58 took comes back, a fresh checkout is seeded
+#                              (not with "no": a fleet member, whose stacks the hub places)
 #   stacks_untrack DIR         stack files left in git's index leave it (the working tree is never touched)
 #   stacks_snapshot DIR DEST   every stack's docker-compose.yml and .env copied to DEST/Stacks/, their sha256s in DEST/MANIFEST
 #   stacks_guard DIR DEST      every file that differs from that snapshot is put back; prints each path it restored
@@ -39,7 +40,7 @@ stacks_untrack() {
 }
 
 stacks_seed() {
-    local dir="$1" mark="$1/.data/stack-files-seeded" seed="$1/.config/stacks-seed" f s orig tag
+    local dir="$1" defaults="${2:-yes}" mark="$1/.data/stack-files-seeded" seed="$1/.config/stacks-seed" f s orig tag
     stacks_untrack "$dir"
     [[ -e "$mark" ]] && return 0
     _stacks_have_git "$dir" || return 0   # a VM of a fleet (code from the hub, no git): its stacks are the hub's to place
@@ -65,8 +66,9 @@ stacks_seed() {
             fi
         done < <(_stacks_git "$dir" ls-tree -r -z --name-only "$orig" -- Stacks/ 2>/dev/null)
     fi
-    # 2. A fresh checkout (no stack at all): the ten default stacks. A stack deleted later stays deleted (the mark)
-    if [[ -d "$seed" ]] && ! compgen -G "$dir/Stacks/*/docker-compose.yml" >/dev/null; then
+    # 2. A true first run (not one stack directory in Stacks/), not a fleet member: the ten default stacks. A stack deleted
+    #    later stays deleted (the mark); an install that has any stack of its own never gets them
+    if [[ "$defaults" != no && -d "$seed" ]] && ! compgen -G "$dir/Stacks/*/" >/dev/null; then
         for s in "$seed"/*/; do
             s="${s%/}"; s="${s##*/}"
             mkdir -p "$dir/Stacks/$s" || continue
