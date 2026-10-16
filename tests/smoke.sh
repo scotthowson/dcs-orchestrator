@@ -11042,7 +11042,9 @@ check "house: docs: viewers read, admins act" "admin admin admin admin admin" \
     "$(for r in 'POST /dns/technitium/house' 'POST /dns/technitium/house/pause' 'POST /dns/technitium/house/bedtime' 'POST /dns/technitium/house/allow' 'POST /dns/technitium/groups/{id}/clone'; do grep -F "| ${r%% *} | \`${r#* }\` |" "$ROOT/docs/API.md" | awk -F'|' '{gsub(/ /,"",$4); printf "%s ", $4}'; done | sed 's/ $//')"
 # the update: a groups.json and devices.json as 4.0.54 left them (no house rules, nobody exempt): the config is the same, nothing written
 _hs '{"categories":[],"blocked":[],"allowed":[]}' >/dev/null
-tt_req "$TA" DELETE "/dns/technitium/groups/$GK2" '' >/dev/null
+# on the fake clock too: on the real one the delete renders the groups at the runner's hour, and a run at 20:51 (Monday, CI)
+# put Boys in bedtime (20:30); the tick at 11:03 then rightly ended it, an 81st write the check took for a needless one
+tt_req "$TA" DELETE "/dns/technitium/groups/$GK2" '' "DCS_TECHNITIUM_NOW=$MON1000" >/dev/null
 jq '{version, house: {safe_search: false, youtube: "off"}, groups: [.groups[] | del(.color, .icon) | .windows |= map(del(.youtube, .grid))], migration}' "$TW/.data/technitium/groups.json" > "$TW/g.old" && command mv -f "$TW/g.old" "$TW/.data/technitium/groups.json"
 jq '.devices |= map(del(.house_exempt, .allowed, .blocked_names, .override))' "$TW/.data/technitium/devices.json" > "$TW/d.old" && command mv -f "$TW/d.old" "$TW/.data/technitium/devices.json"
 _n=$(_sets); _ttick $((MON1000 + 3600 + 180))
