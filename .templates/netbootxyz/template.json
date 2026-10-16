@@ -1,0 +1,33 @@
+{
+  "name": "netbootxyz",
+  "title": "Netboot.xyz",
+  "description": "Self-hosted PXE/netboot server — boot OS installers, live distros, and utilities over the network from an iPXE menu. Serves TFTP boot files and mirrors assets locally. Pairs with airpxe for Wi-Fi netboot: hosted menu.txt and logo.png are served from the assets volume over HTTP.",
+  "category": "network",
+  "target_stack": "networking-security",
+  "icon": "🥾",
+  "tags": ["pxe", "netboot", "ipxe", "tftp", "os-install", "network-boot", "airpxe"],
+  "variables": [
+    {
+      "name": "PORT_NETBOOTXYZ_UI",
+      "label": "Web UI Port",
+      "description": "Port for the netboot.xyz menu editor web interface",
+      "default": "3000",
+      "required": false
+    },
+    {
+      "name": "PORT_NETBOOTXYZ_HTTP",
+      "label": "Assets HTTP Port",
+      "description": "Port serving local boot assets and hosted menu.txt for airpxe",
+      "default": "8088",
+      "required": false
+    },
+    {
+      "name": "PORT_NETBOOTXYZ_TFTP",
+      "label": "TFTP Port",
+      "description": "UDP port for PXE boot file delivery",
+      "default": "69",
+      "required": false
+    }
+  ],
+  "singleton": true
+}

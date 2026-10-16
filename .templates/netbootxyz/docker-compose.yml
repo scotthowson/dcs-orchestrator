@@ -1,0 +1,25 @@
+services:
+  netbootxyz:
+    platform: linux/amd64
+    container_name: NetbootXYZ
+    # upstream all-in-one image: nginx(/assets) + node webapp(:3000) + in.tftpd + supervisord
+    # NOTE: lscr.io/linuxserver/netbootxyz >=2.x is TFTP-only and has no :latest tag
+    image: ghcr.io/netbootxyz/netbootxyz:0.6.7-nbxyz14
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-UTC}
+      # pin the menu release; otherwise start.sh resolves it via api.github.com (rate limits)
+      - MENU_VERSION=${MENU_VERSION:-3.0.3}
+    volumes:
+      - ${APP_DATA_DIR:-./App-Data}/NetbootXYZ/config:/config
+      - ${APP_DATA_DIR:-./App-Data}/NetbootXYZ/assets:/assets
+    ports:
+      - "${PORT_NETBOOTXYZ_UI:-3000}:3000"
+      - "${PORT_NETBOOTXYZ_HTTP:-8088}:80"
+      - "${PORT_NETBOOTXYZ_TFTP:-69}:69/udp"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s

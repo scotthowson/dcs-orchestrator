@@ -1,0 +1,15 @@
+services:
+  pxe-proxy:
+    container_name: PXE-Proxy
+    platform: linux/amd64
+    image: jpillora/dnsmasq:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${APP_DATA_DIR:-./App-Data}/PXE-Proxy/dnsmasq.conf:/etc/dnsmasq.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep dnsmasq >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

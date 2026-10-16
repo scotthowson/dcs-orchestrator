@@ -1,0 +1,11 @@
+{
+  "name": "pxe-proxy",
+  "title": "PXE Proxy (proxyDHCP)",
+  "description": "proxyDHCP sidecar for netboot.xyz — answers PXE clients with a boot filename when the router cannot set DHCP options 66/67. Does NOT hand out IP addresses. Requires dnsmasq.conf in App-Data/PXE-Proxy (pre-seeded for this LAN); edit the dhcp-range if the subnet changes.",
+  "category": "network",
+  "target_stack": "networking-security",
+  "icon": "📡",
+  "tags": ["pxe", "dhcp", "proxydhcp", "netboot", "tftp", "dnsmasq"],
+  "variables": [],
+  "singleton": true
+}
