@@ -131,7 +131,15 @@ nuked in its VM: the hub forwards the request.
 The **Updates** page checks the release channel (`UPDATE_CHANNEL`: `stable` follows the tagged
 releases, `main` every commit), shows the release notes and applies the update in one click.
 
-- Your files under `Stacks/`, `.templates/`, `.api-auth/` and `.plugins/` stay exactly as they are.
+- Your files under `Stacks/`, `.templates/`, `.api-auth/` and `.plugins/` stay exactly as they are. Git tracks no
+  stack file since 4.0.58 (the ten default stacks ship as seeds in `.config/stacks-seed/`), and every update first
+  copies each stack's `docker-compose.yml` and `.env` to `.data/update-backups/<stamp>/Stacks/` (a `MANIFEST` holds
+  their SHA-256 sums) and afterwards puts back any of them the update changed (audit line and notification
+  `stack_files_restored`).
+- An install that cannot fast-forward (local commits, a diverged history) offers **Align**
+  (`POST /system/update/apply {"confirm": true, "align": true}`): the same copy of the stack files, the code moved to
+  the release, framework edits kept under `.data/update-backups/`, a backup tag to roll back to. Never align with
+  `git reset --hard` by hand.
 - A framework file you edited by hand stops the update until you tick the box to replace it; the old
   copy goes to `.data/update-backups/`. A file whose only change is the executable bit does not count.
 - A backup tag is made first (the last ten are kept), and **Rollback** returns to it.
@@ -148,7 +156,8 @@ git pull --ff-only
 sudo systemctl restart dcs-api
 ```
 
-This skips the safety net: no backup tag, and a conflict with your edits stops `git` instead.
+This skips the safety net: no backup tag, no copy of the stack files, and a conflict with your edits stops `git`
+instead.
 
 ## Unattended updates
 

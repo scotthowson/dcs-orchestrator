@@ -1035,6 +1035,133 @@ RLB=$(printf '%s' "$RL" | body_of | jq -r '.backup_tag')
 rm -f "$WORK/fakebin-se/chcon.log" "$WORK/fakebin-se/labelled."*
 check "selinux: rollback goes through"      200 "$(PATH="$WORK/fakebin-se:$PATH" _upd POST /system/update/rollback "{\"backup_tag\":\"$RLB\"}" | status_of)"
 check "selinux: labelled again after it"    "$UPD/.scripts/api-server.sh" "$(grep -m1 'api-server\.sh' "$WORK/fakebin-se/chcon.log" 2>/dev/null)"
+echo "Stack files: git never holds them, every update copies them aside and puts back what it changed, align instead of a reset by hand (4.0.58)"
+# 2026-10-16: a "git reset --hard" by hand (the old cannot-fast-forward message said to) put the skeleton over every live stack file
+SF_SRC="$WORK/sf-src"; SF_ORIGIN="$WORK/sf-origin.git"; SF="$WORK/sf"
+_sgs() { git -C "$SF_SRC" -c user.name=smoke -c user.email=smoke@example.com "$@"; }
+_sgu() { git -C "$SF" -c user.name=smoke -c user.email=smoke@example.com "$@"; }
+_sfu() { local m="$1" p="$2" b="${3:-}"; printf '%s %s HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s' "$m" "$p" "$TOKEN" "${#b}" "$b" | env DOCKER_COMPOSE_CMD="${DOCKER_COMPOSE_CMD:-docker compose}" "${AUTH[@]}" "$SF/.scripts/api-server.sh" --handle-request 2>/dev/null; }
+_sfsums() { (cd "$SF" && for f in Stacks/*/docker-compose.yml Stacks/*/.env; do [[ -f "$f" ]] && printf '%s %s\n' "$(sha256sum < "$f" | cut -c1-64)" "$f"; done); }
+git init -q --bare "$SF_ORIGIN" && git -C "$SF_ORIGIN" symbolic-ref HEAD refs/heads/main
+git init -q -b main "$SF_SRC"; mkdir -p "$SF_SRC/Stacks/core" "$SF_SRC/Stacks/media" "$SF_SRC/.scripts"
+printf '1.0.0\n' > "$SF_SRC/VERSION"; printf '# Changelog\n' > "$SF_SRC/CHANGELOG.md"; printf 'echo one\n' > "$SF_SRC/.scripts/tool.sh"
+printf 'services:\n  web:\n    image: nginx\n' > "$SF_SRC/Stacks/core/docker-compose.yml"; printf 'A=1\n' > "$SF_SRC/Stacks/core/.env"
+printf 'services:\n  web:\n    image: nginx\n' > "$SF_SRC/Stacks/media/docker-compose.yml"; printf 'B=1\n' > "$SF_SRC/Stacks/media/.env"
+_sgs add -A >/dev/null && _sgs commit -q -m 'release 1.0.0' && _sgs tag v1.0.0 && _sgs remote add origin "$SF_ORIGIN" && _sgs push -q origin main --tags
+git clone -q "$SF_ORIGIN" "$SF"
+mkdir -p "$SF/.scripts" "$SF/.lib" "$SF/.config" "$SF/.data" "$SF/logs" "$SF/.api-auth"
+cp "$API" "$SF/.scripts/" && cp -r "$ROOT/.lib/." "$SF/.lib/" && cp -r "$ROOT/.config/." "$SF/.config/"
+cp "$WORK/.env" "$SF/.env" && cp -r "$WORK/.api-auth/." "$SF/.api-auth/"
+# upstream 2.0.0: the stack files leave git, as in 4.0.58
+_sgs rm -q --cached Stacks/core/docker-compose.yml Stacks/core/.env Stacks/media/docker-compose.yml Stacks/media/.env
+printf 'Stacks/*\n' > "$SF_SRC/.gitignore"; printf '2.0.0\n' > "$SF_SRC/VERSION"; printf 'echo two\n' > "$SF_SRC/.scripts/tool.sh"
+_sgs add -A >/dev/null && _sgs commit -q -m 'release 2.0.0' && _sgs tag v2.0.0 && _sgs push -q origin main --tags
+# the install: core's compose is the owner's 12 services (tracked, edited), media untouched, ai-tools never tracked
+printf 'services:\n  web:\n    image: nginx\n  # and eleven more of mine\n' > "$SF/Stacks/core/docker-compose.yml"
+mkdir -p "$SF/Stacks/ai-tools"; printf 'services:\n  llm:\n    image: ollama/ollama\n' > "$SF/Stacks/ai-tools/docker-compose.yml"; printf 'GPU=1\n' > "$SF/Stacks/ai-tools/.env"
+_sfsums > "$WORK/sf.before"
+R=$(_sfu POST /system/update/apply '{"confirm":true}')
+check "stack files: the update to the release that untracks them goes through" "200 true 2.0.0" "$(printf '%s' "$R" | status_of) $(printf '%s' "$R" | body_of | jq -r '"\(.updated) \(.new_version)"')"
+check "stack files: every one byte for byte what it was" "$(cat "$WORK/sf.before")" "$(_sfsums)"
+check "stack files: the ones git deleted were put back by the guard" "Stacks/core/.env Stacks/media/.env Stacks/media/docker-compose.yml" "$(printf '%s' "$R" | body_of | jq -r '.stack_files_restored | sort | join(" ")')"
+check "stack files: the edited one kept as before"   "Stacks/core/docker-compose.yml" "$(printf '%s' "$R" | body_of | jq -r '.kept_local | join(" ")')"
+check "stack files: git tracks none of them now"     "" "$(_sgu ls-files -- Stacks | paste -sd' ')"
+check "stack files: and git status does not list them" "" "$(_sgu status --porcelain -- Stacks | paste -sd' ')"
+_SFB=$(printf '%s' "$R" | body_of | jq -r '.backup_dir')
+check "snapshot: every stack's compose and .env, the untracked stack too" 6 "$(grep -c . "$_SFB/MANIFEST" 2>/dev/null)"
+check "snapshot: the MANIFEST holds their sha256s" yes "$(cd "$_SFB" && sha256sum -c --quiet MANIFEST >/dev/null 2>&1 && echo yes || echo no)"
+check "snapshot: the .env of a stack git never tracked" 'GPU=1' "$(cat "$_SFB/Stacks/ai-tools/.env" 2>/dev/null)"
+check "guard: an audit line names what it put back" 1 "$(grep '"action":"stack_files_restored"' "$SF/.data/audit.jsonl" 2>/dev/null | grep -c 'Stacks/media/docker-compose.yml')"
+# the check and the message offer the align, never a "git reset --hard" by hand
+printf 'echo local\n' > "$SF/.scripts/tool.sh"; _sgu commit -q -am 'a local commit'
+LOCAL_SHA=$(_sgu rev-parse HEAD)
+printf '3.0.0\n' > "$SF_SRC/VERSION"; printf 'echo three\n' > "$SF_SRC/.scripts/tool.sh"
+_sgs add -A >/dev/null && _sgs commit -q -m 'release 3.0.0' && _sgs tag v3.0.0 && _sgs push -q origin main --tags
+printf 'A=2\n' > "$SF/Stacks/core/.env"; _sfsums > "$WORK/sf.before"
+check "diverged: the check offers the align" "diverged true" "$(_sfu GET /system/update/check | body_of | jq -r '"\(.state) \(.can_align)"')"
+R=$(_sfu POST /system/update/apply '{"confirm":true}')
+check "diverged: nothing moves without align"        "false diverged true 2.0.0" "$(printf '%s' "$R" | body_of | jq -r '"\(.updated) \(.state) \(.can_align)"') $(tr -d '[:space:]' < "$SF/VERSION")"
+check "diverged: the message never says git reset"  no "$(printf '%s' "$R" | body_of | jq -r '.message' | grep -qi 'git reset\|reset --hard' && echo yes || echo no)"
+check "diverged: the message says align"            yes "$(printf '%s' "$R" | body_of | jq -r '.message' | grep -q '"align": true' && echo yes || echo no)"
+R=$(_sfu POST /system/update/apply '{"confirm":true,"align":true}')
+check "align: goes through"                         "200 true true 3.0.0" "$(printf '%s' "$R" | status_of) $(printf '%s' "$R" | body_of | jq -r '"\(.updated) \(.aligned) \(.new_version)"')"
+check "align: HEAD is the release"                  "$(git -C "$SF_SRC" rev-parse v3.0.0)" "$(_sgu rev-parse HEAD)"
+check "align: the framework file is the release's"  'echo three' "$(cat "$SF/.scripts/tool.sh")"
+check "align: every stack file byte for byte"       "$(cat "$WORK/sf.before")" "$(_sfsums)"
+check "align: the local commit is the backup tag's" "$LOCAL_SHA" "$(_sgu rev-parse "$(printf '%s' "$R" | body_of | jq -r '.backup_tag')^{commit}" 2>/dev/null)"
+check "align: audited as aligned"                   1 "$(grep '"action":"SYSTEM_UPDATE"' "$SF/.data/audit.jsonl" | grep -c 'aligned')"
+check "align: refused when there is nothing to align" "false current" "$(_sfu POST /system/update/apply '{"confirm":true,"align":true}' | body_of | jq -r '"\(.updated) \(.state)"')"
+# the guard by itself: a file a switch changed comes back, one it did not change is left alone, a new one is not touched
+_GD="$WORK/sf-guard"; mkdir -p "$_GD/Stacks/a" "$_GD/Stacks/b"; printf 'x\n' > "$_GD/Stacks/a/docker-compose.yml"; printf 'y\n' > "$_GD/Stacks/b/.env"
+_lib stacks_snapshot "$_GD" "$_GD/snap"
+printf 'stub\n' > "$_GD/Stacks/a/docker-compose.yml"; mkdir -p "$_GD/Stacks/c"; printf 'new\n' > "$_GD/Stacks/c/.env"
+check "guard: puts back exactly the changed file"   Stacks/a/docker-compose.yml "$(_lib stacks_guard "$_GD" "$_GD/snap" | paste -sd' ')"
+check "guard: …with its content"                    "x y new" "$(cat "$_GD/Stacks/a/docker-compose.yml" "$_GD/Stacks/b/.env" "$_GD/Stacks/c/.env" | paste -sd' ')"
+check "guard: a second look finds nothing"          "" "$(_lib stacks_guard "$_GD" "$_GD/snap")"
+
+echo "Stack files: the seeds (a fresh checkout once), what the switch to 4.0.58 took comes back, a stack deleted stays deleted"
+_SD="$WORK/seed-fresh"; git init -q -b main "$_SD"; mkdir -p "$_SD/.config/stacks-seed/core" "$_SD/.config/stacks-seed/media"
+printf '|services: {}\n' > "$_SD/.config/stacks-seed/core/docker-compose.yml.seed"; printf '|C=1\n' > "$_SD/.config/stacks-seed/core/.env.seed"; printf '|services: {}\n' > "$_SD/.config/stacks-seed/media/docker-compose.yml.seed"
+_lib stacks_seed "$_SD" >/dev/null
+check "seed: a fresh checkout gets the default stacks" "C=1 yes yes" "$(cat "$_SD/Stacks/core/.env") $([[ -f "$_SD/Stacks/media/docker-compose.yml" ]] && echo yes) $([[ -e "$_SD/.data/stack-files-seeded" ]] && echo yes)"
+rm -rf "$_SD/Stacks/media"; _lib stacks_seed "$_SD" >/dev/null
+check "seed: a stack deleted later stays deleted"   no "$([[ -e "$_SD/Stacks/media" ]] && echo yes || echo no)"
+_SN="$WORK/seed-nogit"; mkdir -p "$_SN/.config"; cp -r "$_SD/.config/stacks-seed" "$_SN/.config/"; _lib stacks_seed "$_SN" >/dev/null
+check "seed: a VM without git gets nothing (the hub places its stacks)" no "$([[ -e "$_SN/Stacks/core" ]] && echo yes || echo no)"
+# the old updater's switch: it tags HEAD, fast-forwards (git deletes the unedited tracked stack files), puts the edited back
+_SU="$WORK/seed-upd"; git init -q -b main "$_SU"; _sgx() { git -C "$_SU" -c user.name=smoke -c user.email=smoke@example.com "$@"; }
+mkdir -p "$_SU/Stacks/core" "$_SU/Stacks/gone"; printf 'services:\n  web:\n    image: nginx\n' > "$_SU/Stacks/core/docker-compose.yml"; printf 'A=1\n' > "$_SU/Stacks/core/.env"; printf 'G=1\n' > "$_SU/Stacks/gone/.env"
+_sgx add -A && _sgx commit -q -m old; _OLD=$(_sgx rev-parse HEAD)
+_sgx rm -q Stacks/core/docker-compose.yml Stacks/core/.env Stacks/gone/.env; _sgx commit -q -m new; _NEW=$(_sgx rev-parse HEAD)
+_sgx reset -q --hard "$_OLD"; _sgx tag dcs-backup-20261016-000000-abc1234 HEAD
+rm -f "$_SU/Stacks/gone/.env"; mkdir -p "$_SU/.data/update-backups/20261016-000000-1"; printf 'Stacks/gone/.env\n' > "$_SU/.data/update-backups/20261016-000000-1/.deleted"
+_sgx merge -q --ff-only "$_NEW"
+check "upgrade: git deleted the unedited stack files" no "$([[ -e "$_SU/Stacks/core/.env" ]] && echo yes || echo no)"
+_lib stacks_seed "$_SU" >/dev/null
+check "upgrade: they are back byte for byte"        "$(git -C "$_SU" show dcs-backup-20261016-000000-abc1234:Stacks/core/docker-compose.yml | sha256sum) A=1" "$(sha256sum < "$_SU/Stacks/core/docker-compose.yml") $(cat "$_SU/Stacks/core/.env" 2>/dev/null)"
+check "upgrade: one the owner had deleted stays gone" no "$([[ -e "$_SU/Stacks/gone/.env" ]] && echo yes || echo no)"
+_SH="$WORK/seed-hand"; git init -q -b main "$_SH"; mkdir -p "$_SH/Stacks/core"; printf 'A=1\n' > "$_SH/Stacks/core/.env"
+git -C "$_SH" -c user.name=s -c user.email=s@x add -A; git -C "$_SH" -c user.name=s -c user.email=s@x commit -q -m old; _OLD=$(git -C "$_SH" rev-parse HEAD)
+git -C "$_SH" -c user.name=s -c user.email=s@x rm -q Stacks/core/.env; git -C "$_SH" -c user.name=s -c user.email=s@x commit -q -m new; _NEW=$(git -C "$_SH" rev-parse HEAD)
+git -C "$_SH" reset -q --hard "$_OLD"; git -C "$_SH" reset -q --hard "$_NEW"   # the reset by hand: no backup tag at ORIG_HEAD
+_lib stacks_seed "$_SH" >/dev/null
+check "upgrade: after a reset by hand no skeleton comes back" no "$([[ -e "$_SH/Stacks/core/.env" ]] && echo yes || echo no)"
+
+echo "Fleet routes: a VM route's DNS record goes only after three merges without it, never while its VM does not answer (4.0.58)"
+# 2026-10-16: a VM pegged by an emulator answered its routes too slowly; the hub deleted rom.* and stream.* 529 times and every
+# resolver cached NXDOMAIN for half an hour each time
+_dep() { local -a _da=("$@"); ( set --; source "$API" >/dev/null 2>&1; set +e
+    _find_cf_token() { echo tok; }; _fleet_domain() { echo example.test; }; _domain_of_host() { echo example.test; }
+    _fleet_load() { echo '{"members":[{"id":"vm1"},{"id":"vm2"}]}'; }; _fleet_hub_hosts_json() { echo '[]'; }
+    _cloudflare_delete_dns() { echo "$1" >> "$WORK/dep-deleted.log"; }; _audit_log() { printf '%s %s\n' "$1" "$2" >> "$WORK/dep-audit.log"; }
+    FLEET_DEPARTED_FILE="$WORK/dep/departed.json" _fleet_routes_departed "${_da[@]}" ) 2>/dev/null; }
+_DEPOLD='{"vm1-rom":"Host(`rom.example.test`)","vm1-stream":"Host(`stream.example.test`)"}'; _DEPNONE='{"http":{"routers":{}}}'
+_DEPSTREAM='{"http":{"routers":{"vm1-stream":{"rule":"Host(`stream.example.test`)"}}}}'
+rm -rf "$WORK/dep" "$WORK/dep-deleted.log" "$WORK/dep-audit.log"; _dep_rm() { grep -c . "$WORK/dep-deleted.log" 2>/dev/null || echo 0; }
+_dep "$_DEPOLD" "$_DEPNONE" '[]'; for _i in 1 2 3 4 5; do _dep '{}' "$_DEPNONE" '["vm2"]'; done
+check "dns: a VM whose routes fetch failed keeps every record (6 merges)" 0 "$(_dep_rm)"
+_dep '{}' "$_DEPNONE" '["vm1","vm2"]'; _dep '{}' "$_DEPNONE" '["vm1","vm2"]'
+check "dns: a host gone from 2 answered merges keeps its record" "0 2" "$(_dep_rm) $(jq -r '."rom.example.test".misses' "$WORK/dep/departed.json")"
+_dep '{}' "$_DEPSTREAM" '["vm1","vm2"]'
+check "dns: gone from 3 answered merges: deleted"   "rom" "$(cat "$WORK/dep-deleted.log" 2>/dev/null | paste -sd' ')"
+check "dns: …and the one that came back is forgotten" "[]" "$(jq -c 'keys' "$WORK/dep/departed.json")"
+for _i in 1 2 3; do _dep '{}' "$_DEPSTREAM" '["vm1","vm2"]'; done
+check "dns: deleted exactly once, audited once"     "1 1" "$(_dep_rm) $(grep -c '^fleet_route_dns_removed rom.example.test' "$WORK/dep-audit.log")"
+check "dns: a host back after 2 misses keeps its record" 0 "$(grep -c stream "$WORK/dep-deleted.log")"
+_dep '{"vm1-stream":"Host(`stream.example.test`)"}' "$_DEPNONE" '["vm1","vm2"]'; _dep '{}' "$_DEPNONE" '["vm1","vm2"]'
+_DEPLAST="$WORK/.data/fleet-update-last.json"; [[ -f "$_DEPLAST" ]] && cp "$_DEPLAST" "$WORK/dep-last.bak"
+printf '{"status":"running","members":["vm1"]}\n' > "$_DEPLAST"; _dep '{}' "$_DEPNONE" '["vm1","vm2"]'; _dep '{}' "$_DEPNONE" '["vm1","vm2"]'
+check "dns: nothing deleted while an update round runs" 0 "$(grep -c stream "$WORK/dep-deleted.log")"
+if [[ -f "$WORK/dep-last.bak" ]]; then mv -f "$WORK/dep-last.bak" "$_DEPLAST"; else rm -f "$_DEPLAST"; fi
+_dep '{}' "$_DEPNONE" '["vm1","vm2"]'
+check "dns: …and the record goes once the round is over" 1 "$(grep -c stream "$WORK/dep-deleted.log")"
+# which members answered their routes this time: an empty answer, an error or a timeout is not "no routes"
+_DEPOK=$( ( set --; source "$API" >/dev/null 2>&1; set +e
+    _fleet_has_members() { return 0; }; _fleet_load() { echo '{"members":[{"id":"vm1","url":"http://192.0.2.1:9876"},{"id":"vm2","url":"http://192.0.2.2:9876"},{"id":"vm3","url":"http://192.0.2.3:9876"},{"id":"vm4","url":"http://192.0.2.4:9876"}]}'; }
+    _fleet_hub_hosts_json() { echo '[]'; }; _fleet_member_hosts_json() { echo '["192.0.2.3"]'; }
+    _fleet_call() { case "$2" in vm1) printf -v "$1" '%s' ''; return 0 ;; vm2) printf -v "$1" '%s' '{"error":"busy"}'; return 0 ;; vm3) printf -v "$1" '%s' '{"http":{"routers":{},"services":{}}}'; return 0 ;; *) printf -v "$1" '%s' ''; return 1 ;; esac; }
+    FLEET_FEED_OK_OUT="$WORK/dep-ok.json" _fleet_merge_feeds '{"http":{"routers":{},"services":{}}}' >/dev/null; cat "$WORK/dep-ok.json" ) 2>/dev/null)
+check "dns: only a well-formed routes answer counts (empty, an error, no answer do not)" '["vm3"]' "$_DEPOK"
 check "user path: Stacks"               0 "$(_lib _api_git_is_user_path Stacks/demo/.env; echo $?)"
 check "user path: scripts are not"      1 "$(_lib _api_git_is_user_path .scripts/api-server.sh; echo $?)"
 sleep 300 & _UPD_SLEEP=$!
@@ -1250,6 +1377,13 @@ cat > "$IMG_DIR/compose" <<'FAKE'
 #!/bin/bash
 # docker compose -f FILE [--env-file F] up -d --force-recreate --no-deps SERVICE: the service's container runs the tag's current image
 ST="$(dirname "$0")/state"
+# docker compose -f FILE [--env-file F] config --services: the services of FILE (a file that says INVALID does not render)
+if [[ " $* " == *" config "* ]]; then
+    f=""; while [[ $# -gt 0 ]]; do [[ "$1" == -f ]] && f="$2"; shift; done
+    grep -q INVALID "$f" && { echo "invalid compose file" >&2; exit 1; }
+    awk '/^services:/ {s = 1; next} /^[^ ]/ {s = 0} s && /^  [A-Za-z0-9._-]+:/ {sub(/^  /, ""); sub(/:.*/, ""); print}' "$f"
+    exit 0
+fi
 echo "$*" >> "$ST/compose.log"
 file=""; svc=""
 while [[ $# -gt 0 ]]; do
@@ -1328,6 +1462,22 @@ _img_reset; : > "$IMG_ST/newer"
 OUT=$(PATH="$IMG_DIR:$PATH" DOCKER_COMPOSE_CMD="$IMG_DIR/compose" "$API" --image-update 2>&1)
 check "job: everything current is a quiet ok"      ok "$(jq -r '.[-1].result' "$WORK/.api-auth/update-history.json" 2>/dev/null)"
 check "job: nothing recreated when all is current" 0 "$(wc -l < "$IMG_ST/compose.log" | tr -d ' ')"
+# 4.0.58: a stack file that does not describe its running containers (a stub where a stack was) is never recreated from
+_img_reset; printf 'services:\n  web:\n    image: nginx\n' > "$WORK/Stacks/imgstack/docker-compose.yml"
+R=$(img_request POST /images/update '{"image":"ghcr.io/x/app:latest","recreate":true}')
+check "stub stack file: nothing recreated from it"  '[] ["imgstack"]' "$(printf '%s' "$R" | body_of | jq -c '.containers_restarted') $(printf '%s' "$R" | body_of | jq -c '.stacks_refused')"
+check "stub stack file: compose never ran up"       0 "$(grep -c -- ' up ' "$IMG_ST/compose.log")"
+check "stub stack file: in Needs your attention"    imgstack "$(img_request GET /images/check-updates | body_of | jq -r '.stack_file_refusals[0].stack')"
+_img_reset; printf 'services:\n  web:\n    image: nginx\n' > "$WORK/Stacks/imgstack/docker-compose.yml"
+OUT=$(PATH="$IMG_DIR:$PATH" DOCKER_COMPOSE_CMD="$IMG_DIR/compose" "$API" --image-update 2>&1)
+check "stub stack file: the nightly job says so"    yes "$(grep -q 'image-update: imgstack: stack file does not describe its running containers, left alone' <<< "$OUT" && echo yes || echo no)"
+check "stub stack file: the nightly job recreated nothing" 0 "$(grep -c -- ' up ' "$IMG_ST/compose.log")"
+check "stub stack file: the run needs a look"       failed "$(jq -r '.[-1].result' "$WORK/.api-auth/update-history.json" 2>/dev/null)"
+_img_reset; printf 'services:\n  app:\n    image: ghcr.io/x/app:latest\n  web:\n    image: INVALID\n' > "$WORK/Stacks/imgstack/docker-compose.yml"
+check "invalid stack file: nothing recreated"       '["imgstack"]' "$(img_request POST /images/update '{"image":"ghcr.io/x/app:latest"}' | body_of | jq -c '.stacks_refused')"
+_img_reset; printf 'services:\n  app:\n    image: ghcr.io/x/app:latest\n  web:\n    image: nginx\n' > "$WORK/Stacks/imgstack/docker-compose.yml"
+check "whole stack file again: recreated"           '["app-1"]' "$(img_request POST /images/update '{"image":"ghcr.io/x/app:latest"}' | body_of | jq -c '.containers_restarted')"
+check "whole stack file again: off the list"        0 "$(img_request GET /images/check-updates | body_of | jq -r '.stack_file_refusals | length')"
 _img_reset
 OUT=$(PATH="$IMG_DIR:$PATH" DOCKER_COMPOSE_CMD="$IMG_DIR/compose" "$API" --image-update --pull-only 2>&1)
 check "job pull only: says so"                     yes "$(grep -q 'recreate containers: false' <<< "$OUT" && echo yes || echo no)"
@@ -3158,8 +3308,10 @@ check "empty stack: a service is not empty"         1 "$(_emp 'services:\n  # fi
 check "empty stack: an inline service is not empty" 1 "$(_emp 'services: {a: {image: alpine}}\n')"
 check "empty stack: an include is not empty"        1 "$(_emp 'include:\n  - other.yml\nservices:\n')"
 check "empty stack: setup.sh's new stack is empty"  0 "$(sed -n "/^services:\$/,/^COMPOSE_EOF\$/p" "$ROOT/setup.sh" | sed '$d' > "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ))"
-_shipped_nonempty=0; for _f in "$ROOT"/Stacks/*/docker-compose.yml; do [[ "$(cp "$_f" "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ))" == 1 ]] && _shipped_nonempty=$((_shipped_nonempty + 1)); done
-check "empty stack: the shipped stacks all start"   "$(ls "$ROOT"/Stacks/*/docker-compose.yml | wc -l)" "$_shipped_nonempty"
+# the default stacks as a fresh checkout gets them (the seeds without their "|", .lib/stacks-seed.sh)
+_SEEDS="$WORK/seeds"; for _f in "$ROOT"/.config/stacks-seed/*/*.seed; do _sn=$(basename "$(dirname "$_f")"); mkdir -p "$_SEEDS/$_sn"; sed 's/^|//' "$_f" > "$_SEEDS/$_sn/$(basename "$_f" .seed)"; done
+_shipped_nonempty=0; for _f in "$_SEEDS"/*/docker-compose.yml; do [[ "$(cp "$_f" "$WORK/emp.yml"; ( eval "$(sed -n '/^_stack_compose_is_empty()/,/^}/p' "$ROOT/.scripts/run.sh")"; _stack_compose_is_empty "$WORK/emp.yml"; echo $? ))" == 1 ]] && _shipped_nonempty=$((_shipped_nonempty + 1)); done
+check "empty stack: the ten shipped stacks all start" "10 10" "$(ls "$_SEEDS"/*/docker-compose.yml | wc -l) $_shipped_nonempty"
 rm -f "$WORK/emp.yml"
 mkdir -p "$WORK/estart/Stacks/e1" "$WORK/estart/Stacks/e2"; : > "$WORK/estart/.env"
 printf 'services:\n  # Add your services here\n' > "$WORK/estart/Stacks/e1/docker-compose.yml"; printf 'services: {}\n' > "$WORK/estart/Stacks/e2/docker-compose.yml"
@@ -3698,10 +3850,10 @@ for _pd in "$ROOT"/tests/fixtures/compose-policy/evasions/*/; do
     check "policy: evasion $_pn refused (fallback)" "1 python yes" "${_pv%% *} $(cut -d' ' -f2 <<< "$_pv") $(_pol_rule_in "${_pv#* * }" 1 "$_pw")"
 done
 # the stacks DCS ships pass without a word, in both engines
-for _ps in "$ROOT"/Stacks/*/; do
+for _ps in "$_SEEDS"/*/; do
     _pn=$(basename "$_ps")
-    check "policy: shipped stack $_pn passes" "0 compose ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$ROOT/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
-    check "policy: shipped stack $_pn passes (fallback)" "0 python ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$ROOT/Stacks" COMPOSE_POLICY_CACHE="$_POLW/cache.json" DCS_POLICY_ENGINE=python DCS_POLICY_PYYAML=0)"
+    check "policy: shipped stack $_pn passes" "0 compose ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$_SEEDS" COMPOSE_POLICY_CACHE="$_POLW/cache.json")"
+    check "policy: shipped stack $_pn passes (fallback)" "0 python ||" "$(_pol "$_ps/docker-compose.yml" "$_pn" COMPOSE_DIR="$_SEEDS" COMPOSE_POLICY_CACHE="$_POLW/cache.json" DCS_POLICY_ENGINE=python DCS_POLICY_PYYAML=0)"
 done
 # a dozen templates as the gallery deploys them (variables at their defaults): passed, warned or allowed as intended
 _polt() { local t="$1" e; e=$(_lib _compose_policy_template_env "$ROOT/.templates/$t/template.json"); mkdir -p "$_POLW/Stacks/tpl"; _pol "$ROOT/.templates/$t/docker-compose.yml" tpl COMPOSE_DIR="$_POLW/Stacks" COMPOSE_POLICY_DIR="$_POLW/Stacks/tpl" COMPOSE_POLICY_ENV_FILE="$e" COMPOSE_POLICY_CACHE="$_POLW/cache.json" "${@:2}"; rm -f "$e"; }

@@ -3,6 +3,50 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.58] - 2026-10-16
+
+### Changed
+
+- **Your stack files are no longer in git, so no update can revert them again.** On 2026-10-16 a server's update stopped
+  with "cannot fast-forward" and told the owner to run `git fetch origin; git reset --hard <sha>`, adding that the stack
+  files were not part of that. They were: git tracked `docker-compose.yml` and `.env` of the ten default stacks, and the
+  reset put the skeleton back over every live stack file (the containers kept running only because Docker still had the
+  old configuration). Now the ten default stacks ship as seeds in `.config/stacks-seed/`, git ignores everything under
+  `Stacks/` but a README, and a fresh checkout gets the default stacks once (`./setup.sh` or the API's first start); a
+  stack you delete stays deleted. An install updating from 4.0.57 or older keeps every stack file byte for byte: the old
+  updater puts back the ones you edited, and the new API's first start brings back, from the release before, the ones
+  git removed because nobody had edited them (never after a `git reset --hard` run by hand, where the skeleton is what
+  did the harm).
+- **Every update copies every stack file aside and puts back what it changed.** Before the code moves, each stack's
+  `docker-compose.yml` and `.env` (stacks git never tracked included) goes to `.data/update-backups/<stamp>/Stacks/`,
+  with a `MANIFEST` of their SHA-256 sums; the last ten copies are kept. After the update every file is compared with
+  that copy, and one that changed or went missing is put back, with an audit line and a `stack_files_restored`
+  notification. The rollback does the same.
+- **"Cannot fast-forward" no longer suggests a `git reset --hard`.** The Updates page offers **Align** instead
+  (`POST /system/update/apply {"confirm": true, "align": true}`, `can_align` in the check): the stack files are copied
+  aside first, the code is moved to the release, framework files edited here are kept under `.data/update-backups/`,
+  the stack files are compared and put back, and a backup tag allows a rollback.
+
+### Fixed
+
+- **The nightly image update never recreates a container from a stack file that does not describe it.** Before it
+  recreates anything it renders the stack file (`compose config`) and checks that every service running from that
+  folder is in it: a stub with one nginx can no longer replace a 12-service stack. Such a stack is left alone
+  (`image-update: <stack>: stack file does not describe its running containers, left alone`), the run is marked as
+  needing a look, and "Needs your attention" lists it (`stack_file_refusals` in `GET /images/check-updates`) until the
+  file describes its containers again.
+- **A slow VM no longer makes its sites vanish for half an hour.** The hub removed a VM route's Cloudflare DNS record
+  whenever one merge of the VMs' routes lacked it, and a VM that answered too slowly (one pegged by an emulator) still
+  counted as reachable: on 2026-10-16 the hub deleted and re-made two records 529 times, and every resolver cached the
+  "no such name" for 30 minutes each time. Now a VM whose routes did not come back as a proper answer this time (slow,
+  failing, an error, unreachable) keeps every record; a host is removed only after it was missing from three answered
+  merges in a row (`.data/fleet/departed.json` remembers since when, a host that comes back is forgotten), never while
+  an update round runs, and `fleet_route_dns_removed` is logged only for the actual removal.
+- **A VM no longer says its Docker Engine is current from a stale package index.** One VM showed "Current" at 29.8.2
+  while another saw 29.9.1: the check read an index nobody had refreshed. The check now refreshes the index first
+  (`apt-get update` / `dnf makecache`, read-only, with a time limit) and reports `index_stale` with the time of the
+  last refresh when it could not.
+
 ## [4.0.57] - 2026-10-16
 
 ### Added

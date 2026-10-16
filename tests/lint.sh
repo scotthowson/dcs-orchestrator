@@ -7,6 +7,12 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 rc=0
+# the default stacks' seeds as the files they stand for (.lib/stacks-seed.sh: a "|" before every line)
+SEEDS=$(mktemp -d "${TMPDIR:-/tmp}/dcs-lint-seeds-XXXXXX") || exit 2
+trap 'rm -rf "$SEEDS"' EXIT
+for f in .config/stacks-seed/*/*.seed; do
+    s=$(basename "$(dirname "$f")"); mkdir -p "$SEEDS/$s" && sed 's/^|//' "$f" > "$SEEDS/$s/$(basename "$f" .seed)"
+done
 
 # (the VM images' scripts that run inside the VM have no .sh extension: dcs-init, dcs-hub-init, dcs-grubcfg, the kernel-install plugin)
 mapfile -t SCRIPTS < <(git ls-files -co --exclude-standard '*.sh' 'setup.sh' 'start.sh' 'stop.sh' 'restart.sh' 'status.sh' '.config/settings.cfg' 'vm-images/*/sbin/*' 'vm-images/*/install.d/*' 2>/dev/null | sort -u)
@@ -51,14 +57,18 @@ echo "dashboard image: the release's minor line for a release, the version's own
 # a hub and its dashboard are one version: the compose file of the core stack pins the dashboard image while VERSION is a
 # release candidate (the API's update check and the update follow that file) and goes back to the minor line (4.0 for 4.0.x,
 # a tag the dashboard's release moves) with the release. docs/OPERATIONS.md: "Pinned images"
-ui_tag=$(sed -n -E 's/^[[:space:]]+image:[[:space:]]*"?ghcr\.io\/[^"[:space:]]+-ui:([^"[:space:]]+)"?.*$/\1/p' Stacks/core-infrastructure/docker-compose.yml | head -1)
+ui_tag=$(sed -n -E 's/^[[:space:]]+image:[[:space:]]*"?ghcr\.io\/[^"[:space:]]+-ui:([^"[:space:]]+)"?.*$/\1/p' "$SEEDS/core-infrastructure/docker-compose.yml" | head -1)
 dcs_ver=$(tr -d '[:space:]' < VERSION)
 if [[ "$dcs_ver" == *-* ]]; then
-    [[ "$ui_tag" == "$dcs_ver" ]] || { echo "  VERSION is the release candidate $dcs_ver: Stacks/core-infrastructure/docker-compose.yml must pin the dashboard image to :$dcs_ver (it says :${ui_tag:-nothing})"; rc=1; }
+    [[ "$ui_tag" == "$dcs_ver" ]] || { echo "  VERSION is the release candidate $dcs_ver: .config/stacks-seed/core-infrastructure/docker-compose.yml must pin the dashboard image to :$dcs_ver (it says :${ui_tag:-nothing})"; rc=1; }
 else
     ui_line=$(cut -d. -f1-2 <<< "$dcs_ver")
-    [[ "$ui_tag" == "$ui_line" ]] || { echo "  VERSION $dcs_ver is a release: the dashboard image in Stacks/core-infrastructure/docker-compose.yml must be :$ui_line, the release's minor line (it says :${ui_tag:-nothing})"; rc=1; }
+    [[ "$ui_tag" == "$ui_line" ]] || { echo "  VERSION $dcs_ver is a release: the dashboard image in .config/stacks-seed/core-infrastructure/docker-compose.yml must be :$ui_line, the release's minor line (it says :${ui_tag:-nothing})"; rc=1; }
 fi
+
+echo "Stack seeds: a \"|\" before every line"
+# a seed edited without it would lose a line's first character when it is seeded
+grep -n -v '^|' .config/stacks-seed/*/*.seed | sed 's/^/  missing "|": /' | grep . && rc=1
 
 echo "Core containers: no-new-privileges"
 # Every service of the stacks DCS ships and of its own security templates runs with no-new-privileges (docs/TEMPLATES.md, "Hardening");
@@ -71,7 +81,7 @@ _nnp_missing() {
         svc != "" && line !~ /^[ \t]*#/ && line ~ /no-new-privileges[:=]true/ { ok = 1 }
         END { if (svc != "" && !ok) print svc }' "$1"
 }
-NNP_CORE=(Stacks/*/docker-compose.yml .templates/crowdsec/docker-compose.yml .templates/traefik/docker-compose.yml .templates/authelia/docker-compose.yml)
+NNP_CORE=("$SEEDS"/*/docker-compose.yml .templates/crowdsec/docker-compose.yml .templates/traefik/docker-compose.yml .templates/authelia/docker-compose.yml)
 for f in "${NNP_CORE[@]}"; do
     [[ -f "$f" ]] || continue
     while IFS= read -r svc; do
@@ -115,7 +125,7 @@ fi
 
 if docker compose version >/dev/null 2>&1; then
     echo "Compose validation: stacks"
-    for d in Stacks/*/; do
+    for d in "$SEEDS"/*/; do
         [[ -f "$d/docker-compose.yml" ]] || continue
         if ! (cd "$d" && docker compose --env-file "$ROOT/.env.example" config -q 2>/dev/null || docker compose config -q 2>/dev/null); then
             echo "  invalid compose: $d"; rc=1

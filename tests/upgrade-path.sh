@@ -192,6 +192,16 @@ while IFS= read -r f; do
     [[ -f "$INST/$f" ]] && git -C "$ROOT" cat-file -e "$TARGET:$f" 2>/dev/null && { KEPT_FILE="$f"; break; }
 done < <(git -C "$ROOT" diff --name-only "$FROM_SHA" "$TARGET" -- Stacks .templates .api-auth .plugins 2>/dev/null)
 [[ -n "$KEPT_FILE" ]] && printf '\n# edited on this server, kept by every update\n' >> "$INST/$KEPT_FILE"
+# the stacks as an owner leaves them: a compose file edited (a template deployed into it), a stack git never tracked,
+# the rest as they came. Until 4.0.58 git tracked the default stacks; the switch to a release that does not must keep
+# every one of them byte for byte (2026-10-16: a "git reset --hard" by hand put the skeleton over all of them)
+[[ -f "$INST/Stacks/media-services/docker-compose.yml" ]] && printf '  # a service deployed here from a template\n' >> "$INST/Stacks/media-services/docker-compose.yml"
+mkdir -p "$INST/Stacks/ai-tools" && printf 'services:\n  llm:\n    image: ollama/ollama\n' > "$INST/Stacks/ai-tools/docker-compose.yml" && printf 'GPU=1\n' > "$INST/Stacks/ai-tools/.env"
+stack_sums() { (cd "$INST" && for f in Stacks/*/docker-compose.yml Stacks/*/.env; do [[ -f "$f" ]] && printf '%s %s %s\n' "$(sha256sum < "$f" | cut -c1-64)" "$(stat -c %a "$f")" "$f"; done); }
+stack_sums > "$FP/stacks.before"
+# the user files the old updater counts as kept: edited, tracked, and touched by the update
+EXPECT_KEPT=$(comm -12 <(git -C "$INST" -c core.fileMode=false status --porcelain --untracked-files=no -- Stacks .templates .api-auth .plugins | cut -c4- | sort) \
+    <(git -C "$ROOT" diff --name-only "$FROM_SHA" "$TARGET" -- Stacks .templates .api-auth .plugins | sort) | paste -sd' ')
 
 # ---- what must come through the update unchanged: content and mode of every state file, and the modes of their folders
 STATE_DIRS=(.api-auth .secrets .config/themes .data/crowdsec .data/schedules)
@@ -221,7 +231,7 @@ check "check: nothing newer yet" "false current $FROM" "$(bd "$R" | jq -r '"\(.a
 git -C "$ORIGIN" update-ref refs/heads/main "$TARGET" && git -C "$ORIGIN" tag "$REL" "$TARGET"
 R=$(api GET /system/update/check)
 check "check: the new release is offered" "true behind $REL $NEW_VER" "$(bd "$R" | jq -r '"\(.available) \(.state) \(.latest_name) \(.latest_version)"' 2>/dev/null)"
-check "check: the edited template is listed as kept" "${KEPT_FILE:-}" "$(bd "$R" | jq -r '.local_changes.kept | join(" ")' 2>/dev/null)"
+check "check: the edited user files are listed as kept" "$EXPECT_KEPT" "$(bd "$R" | jq -r '.local_changes.kept | sort | join(" ")' 2>/dev/null)"
 check "check: no framework conflicts" "" "$(bd "$R" | jq -r '.local_changes.conflicts | join(" ")' 2>/dev/null)"
 check "check: the listener can restart itself" reexec "$(bd "$R" | jq -r '.restart_method' 2>/dev/null)"
 OLD_PID="$LPID"
@@ -230,7 +240,7 @@ AB=$(bd "$APPLY")
 check "apply: answered" 200 "$(st "$APPLY")"
 check "apply: updated from $FROM_VER to $NEW_VER" "true $FROM_VER $NEW_VER" "$(jq -r '"\(.updated) \(.previous_version) \(.new_version)"' <<< "$AB" 2>/dev/null)"
 check "apply: the restart is scheduled in place" "true reexec" "$(jq -r '"\(.restart_scheduled) \(.restart.method)"' <<< "$AB" 2>/dev/null)"
-check "apply: the edited template kept" "${KEPT_FILE:-}" "$(jq -r '.kept_local | join(" ")' <<< "$AB" 2>/dev/null)"
+check "apply: the edited user files kept" "$EXPECT_KEPT" "$(jq -r '.kept_local | sort | join(" ")' <<< "$AB" 2>/dev/null)"
 check "apply: nothing replaced" "" "$(jq -r '.replaced_local | join(" ")' <<< "$AB" 2>/dev/null)"
 BACKUP_TAG=$(jq -r '.backup_tag // empty' <<< "$AB" 2>/dev/null)
 check "apply: a backup tag to roll back to" yes "$([[ -n "$BACKUP_TAG" ]] && git -C "$INST" rev-parse -q --verify "refs/tags/$BACKUP_TAG^{commit}" 2>/dev/null | grep -qx "$FROM_SHA" && echo yes || echo no)"
@@ -254,8 +264,11 @@ LPID=$(cat "$INST/.data/api-server.pid" 2>/dev/null)
 check "restarted in place (the same process)" "$OLD_PID" "$LPID"
 check "VERSION is the new one" "$NEW_VER" "$(tr -d '[:space:]' < "$INST/VERSION")"
 check "HEAD is the commit under test" "$TARGET" "$(git -C "$INST" rev-parse HEAD)"
-check "the owner's tracked files are the only modified ones, as before" "$(paste -sd' ' "$FP/dirty.before")" \
+check "the owner's tracked files are the only modified ones, as before (git no longer tracks a stack file)" "$(grep -v '^Stacks/' "$FP/dirty.before" | paste -sd' ')" \
     "$(git -C "$INST" -c core.fileMode=false status --porcelain --untracked-files=no | cut -c4- | sort | paste -sd' ')"
+same "every stack's docker-compose.yml and .env: byte for byte and mode what it was (edited, untouched and never tracked)" "$FP/stacks.before" <(stack_sums)
+check "git tracks no stack file" "$(git -C "$ROOT" ls-tree -r --name-only "$TARGET" -- Stacks | grep -E '^Stacks/[^/]+/(docker-compose\.yml|\.env)$' | paste -sd' ')" "$(git -C "$INST" ls-files -- 'Stacks/*/*' | paste -sd' ')"
+check "git status does not list a stack file" "" "$(git -C "$INST" status --porcelain -- Stacks | grep -E 'docker-compose\.yml|\.env' | paste -sd' ')"
 same "every state file: same content and mode (.env, .api-auth, .secrets, themes, CrowdSec, schedules, fleet, user edits)" "$FP/before" "$FP/after"
 check ".env is still 600" 600 "$(stat -c %a "$INST/.env")"
 same ".env is byte for byte what it was" "$FP/env.before" "$INST/.env"
@@ -285,7 +298,7 @@ check "the API key is still listed" Homarr "$(bd "$(api GET /auth/keys)" | jq -r
 check "the audit log kept every earlier line" yes "$(head -c "$(stat -c %s "$FP/audit.before")" "$INST/.data/audit.jsonl" | cmp -s - "$FP/audit.before" && echo yes || echo no)"
 UPD_LINE=$(grep '"action":"SYSTEM_UPDATE"' "$INST/.data/audit.jsonl" 2>/dev/null)
 check "one SYSTEM_UPDATE line" 1 "$(printf '%s' "$UPD_LINE" | grep -c . )"
-_kn=0; [[ -n "$KEPT_FILE" ]] && _kn=1
+_kn=$(wc -w <<< "$EXPECT_KEPT" | tr -d ' ')
 check "…with the versions and the kept count" yes "$(jq -r '.detail' <<< "$UPD_LINE" 2>/dev/null | grep -qF "$FROM_VER→$NEW_VER" && jq -r '.detail' <<< "$UPD_LINE" | grep -qE "kept $_kn user files, replaced 0\)" && echo yes || echo no)"
 check "no container, image or volume was touched" "" "$(grep -E '(^| )(up|down|pull|push|rm|rmi|tag|stop|start|kill|restart|run|create|exec|prune|load|import|commit)( |$)' "$FAKE/state/calls.log" | sort -u | head -5)"
 

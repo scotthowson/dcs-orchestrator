@@ -496,12 +496,13 @@ check "leave: …on disk too"                          no "$([[ -e "$HUB/.data/f
 echo "The hub's DNS follows the VMs' routes"
 # function level, with the Cloudflare calls stood in for: which hosts lose their record when the routes file is rewritten
 printf '{"members":[{"id":"vmx","name":"vmx","url":"http://127.0.0.1:1","reachable":false,"stacks":[]},{"id":"vmy","name":"vmy","url":"http://127.0.0.1:1","reachable":true,"stacks":[]}],"join_tokens":[],"hub":null}\n' > "$W/fleet-dns.json"
-_departed() {   # OLD MERGED -> the hosts whose record would be removed
-    local _old="$1" _new="$2"; : > "$W/dns-del"
-    ( set --; cd "$HUB" && export FLEET_FILE="$W/fleet-dns.json" && source "$HUB/.scripts/api-server.sh" >/dev/null 2>&1
+_departed() {   # OLD MERGED -> the hosts whose record would be removed (4.0.58: after three merges in a row without them, in
+                # which their member answered; vmy answers, vmx does not)
+    local _old="$1" _new="$2"; : > "$W/dns-del"; rm -f "$W/departed.json"
+    ( set --; cd "$HUB" && export FLEET_FILE="$W/fleet-dns.json" FLEET_DEPARTED_FILE="$W/departed.json" && source "$HUB/.scripts/api-server.sh" >/dev/null 2>&1
       _find_cf_token() { echo tok; }; _fleet_domain() { echo example.org; }; _fleet_hub_hosts_json() { echo '["hubown.example.org"]'; }
       _cloudflare_delete_dns() { printf '%s ' "$1" >> "$W/dns-del"; }; _audit_log() { :; }
-      _fleet_routes_departed "$_old" "$_new" ) >/dev/null 2>&1
+      for _m in 1 2 3; do _fleet_routes_departed "$_old" "$_new" '["vmy"]'; _old='{}'; done ) >/dev/null 2>&1
     cat "$W/dns-del"
 }
 _r() { jq -nc --arg r "$1" '{http: {routers: ($r | split(" ") | map(select(length > 0) | split("=")) | map({key: .[0], value: {rule: ("Host(`" + .[1] + "`)")}}) | from_entries)}}'; }

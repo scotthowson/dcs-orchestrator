@@ -394,7 +394,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/system/crontab/system` | admin | System-level cron entries |
 | POST | `/system/crontab` | admin | Update user crontab |
 | POST | `/system/restart` | admin | Restart the API listener without root: it re-executes itself (older listeners under systemd are relaunched by the unit) |
-| POST | `/system/update/apply` | admin | Update to the channel's release {confirm, replace_local, restart}; user files are kept, a backup tag allows rollback |
+| POST | `/system/update/apply` | admin | Update to the channel's release {confirm, replace_local, restart, align}; user files are kept, every stack file is copied aside and put back if the update changed it, a backup tag allows rollback; align: true moves an install that cannot fast-forward (diverged or ahead) to the release (framework edits kept under .data/update-backups) |
 | POST | `/system/ui-update/apply` | admin | Pull latest DCS-UI image and recreate container |
 | POST | `/system/update/rollback` | admin | Return to a backup tag {backup_tag, restart}; user files are kept, edited framework files backed up |
 | POST | `/system/os-update/check` | admin | List available OS package updates (a terminal session, or passwordless sudo as on a VM the hub built) |

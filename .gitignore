@@ -7,8 +7,6 @@
 # ── Local configuration (contains secrets) ──────────────────────────────────
 .env
 !.env.example
-# Per-stack .env files are templates, not secrets
-!Stacks/*/.env
 *.bak
 *.bak.*
 
@@ -37,6 +35,12 @@ logs/*
 
 # ── Persistent container data ───────────────────────────────────────────────
 App-Data/
+
+# ── The stacks are the user's, never git's (4.0.58) ─────────────────────────
+# A tracked stack file was replaced by a "git reset --hard". The ten default stacks ship as seeds in
+# .config/stacks-seed/ and a fresh checkout gets them once (.lib/stacks-seed.sh)
+Stacks/*
+!Stacks/README.md
 
 # ── Editors and tooling ─────────────────────────────────────────────────────
 .claude/settings.local.json

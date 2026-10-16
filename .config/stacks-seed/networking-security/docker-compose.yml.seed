@@ -1,0 +1,11 @@
+|services:
+|  whoami:
+|    container_name: skeleton-whoami
+|    image: traefik/whoami
+|    restart: unless-stopped
+|    security_opt:
+|      - no-new-privileges:true
+|    environment:
+|      - TZ=${TZ:-UTC}
+|    ports:
+|      - "8080:80"

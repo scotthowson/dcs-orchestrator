@@ -228,6 +228,12 @@ if [[ -n "$JOIN_ONLY_HUB" ]]; then
     exit $rc
 fi
 
+# The stacks are the user's, never git's (4.0.58): a fresh checkout gets the ten default stacks from .config/stacks-seed once
+if [[ "$DRY_RUN" != "true" && -f "$BASE_DIR/.lib/stacks-seed.sh" ]]; then
+    source "$BASE_DIR/.lib/stacks-seed.sh"
+    while IFS= read -r _seeded; do _info "Stacks: $_seeded"; done < <(stacks_seed "$BASE_DIR")
+fi
+
 # -----------------------------------------------------------------------------
 # What kind of machine this is: the OS, bare metal or a guest (a QEMU/KVM guest
 # is most likely a Proxmox VM, an LXC container most likely lives on a Proxmox

@@ -71,6 +71,8 @@ VM builds, the [Proxmox guide's table](PROXMOX.md#7-troubleshooting) goes step b
 
 | Symptom | Cause and fix |
 |---|---|
+| The Updates page says the install *cannot fast-forward* (diverged) | It carries commits the release does not have. Press **Align**: the stack files are copied aside and put back, the code moves to the release, a backup tag allows a rollback. Do not run `git reset --hard` by hand: before 4.0.58 git tracked the stack files and that put the skeleton over every one of them. |
+| The nightly image update says *stack file does not describe its running containers, left alone* | The stack's `docker-compose.yml` no longer names every service that runs from it (a stub, a file cut short) or does not render. Nothing was recreated. Restore the file (Stacks page history, `.data/update-backups/<stamp>/Stacks/`, a backup), then run the image update again. |
 | The update stops: *local changes to framework files would be overwritten* | You edited a file DCS ships. Tick the box to replace it (your copy is kept in `.data/update-backups/`), or undo the edit. |
 | Fedora: after an update the API does not start; `journalctl -u dcs-api` says `203/EXEC` | SELinux: the new script lost its `bin_t` label. 3.9.9 and later put it back by themselves. By hand: `chcon -t bin_t ~/.Docker-Compose-Skeleton-AIO/.scripts/api-server.sh && sudo systemctl restart dcs-api`, and run `sudo .scripts/install-service.sh` once. |
 | An image update reported success but the containers kept the old image | Fixed in 3.9.9: updates now recreate the containers on an older copy. Update DCS, then press *Recreate* on the Updates page. |

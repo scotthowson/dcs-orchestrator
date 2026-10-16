@@ -25,7 +25,8 @@ version is `API_VERSION` in `.scripts/api-server.sh`. `CHANGELOG.md` is kept per
 | `.scripts/api-docs.sh` | generates `docs/API.md` and the `GET /` catalogue from the router |
 | `.scripts/run.sh`, `stop.sh`, `update.sh`, `update_all_stacks.sh`, `clean-up.sh`, `ntfy-status.sh` | sourced by the entry points |
 | `.scripts/*.sh` (others) | standalone utilities with `--help` |
-| `Stacks/<category>/` | ten stacks, each `docker-compose.yml` + `.env` |
+| `Stacks/<category>/` | the user's stacks, each `docker-compose.yml` + `.env`; git tracks none of it (4.0.58) |
+| `.config/stacks-seed/<category>/` | the ten default stacks (`docker-compose.yml.seed`, `.env.seed`: the file with `\|` before every line, so git never sees a rename of the old `Stacks/` files and the 4.0.57 updater keeps working), copied into `Stacks/` once on a fresh checkout (`.lib/stacks-seed.sh`); edit them with the `\|` kept |
 | `.templates/<name>/` | 103 templates: `docker-compose.yml`, `template.json`, optional `config/` |
 | `.plugins/<name>/` | plugins: `plugin.json`, `hooks/`, `cards/` (see `.plugins/README.md`) |
 | `.api-auth/`, `.data/`, `.secrets/`, `logs/` | runtime state written by the API (git-ignored except the JSON templates in `.api-auth/`) |
