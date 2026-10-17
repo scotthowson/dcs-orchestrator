@@ -4,7 +4,7 @@ Generated from the router in `.scripts/api-server.sh` by `.scripts/api-docs.sh` 
 Run `.scripts/api-docs.sh` after adding or changing a route; CI fails when this file is stale.
 
 The API listens on `API_BIND:API_PORT` (default `0.0.0.0:9876`) and answers JSON.
-Every endpoint below is `512` in total.
+Every endpoint below is `514` in total.
 
 ## Access levels
 
@@ -132,6 +132,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/stacks/{stack}/logs` | user | Recent log lines of a stack |
 | GET | `/stacks/{stack}/files` | admin | The files of a stack's folder (compose, .env, configuration; no data, logs, caches, certificates or edit backups), each base64: what a hub keeps of a VM's stack |
 | GET | `/stacks/{stack}/appdata` | user | Where a stack's App-Data is. A stack this server runs: its folder {placement: "local", path, exists}. A VM's stack on a hub: Stacks/<name>/VM-App-Data on the hub is a live view of the VM's App-Data (sshfs over the hub's ssh key), with whether it is mounted and why not {placement: "vm", state: mounted\|waiting\|unavailable\|held\|off, mounted, link, path, remote, access, reason, member, member_name} |
+| GET | `/stacks/{stack}/backup-excludes` | user | The folders and files of the stack's App-Data its backups leave out (.dcs-backup-exclude in its folder): the patterns, examples, what each matches now (size and files, measured in 15 seconds at most) and the largest folders to suggest (10 seconds at most) |
 | GET | `/stacks/{stack}/compose` | user | The stack's docker-compose.yml |
 | GET | `/stacks/{stack}/env` | admin | The stack's .env file |
 | GET | `/stacks/{stack}` | user | Stack detail: services, containers and images |
@@ -155,6 +156,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/stacks/{stack}/stop` | admin | Start, stop, restart or update (pull + recreate) a stack |
 | POST | `/stacks/{stack}/restart` | admin | Start, stop, restart or update (pull + recreate) a stack |
 | POST | `/stacks/{stack}/update` | admin | Start, stop, restart or update (pull + recreate) a stack |
+| PUT | `/stacks/{stack}/backup-excludes` | admin | Set the folders and files of the stack's App-Data its backups leave out {patterns: [...]}: relative to the App-Data, tar wildcards, at most 100; no absolute path, no .. (moves into a VM and App-Data drive moves still carry everything) |
 
 ## Containers
 

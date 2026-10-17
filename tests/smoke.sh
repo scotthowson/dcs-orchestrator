@@ -200,6 +200,8 @@ check "routes/check validates subdomain" 400 "$(auth_request GET '/routes/check?
 check "snapshot name validated"         400 "$(auth_request GET '/snapshots/evil.tar.gz/download' | status_of)"
 check "image ref validated"             400 "$(auth_request POST '/images/--help/update' | status_of)"
 check "compose rollback id validated"   400 "$(auth_request POST '/stacks/demo/compose/rollback' '{"version_id":"../../x"}' | status_of)"
+check "backup excludes: the route answers"     200 "$(auth_request GET /stacks/demo/backup-excludes | status_of)"
+check "backup excludes: the stack name is checked" 400 "$(auth_request PUT '/stacks/..%2fx/backup-excludes' '{"patterns":[]}' | status_of)"
 
 echo "Backups and snapshots"
 # A throwaway install of its own: the backup engine reads, moves and restores whole stack folders. The reader is the
@@ -263,6 +265,33 @@ check "restore: a stack not in the backup is refused" "nope is not in this backu
 check "restore: one stack"                            "ok other false" "$(_bk _bkr "$BKA" other | { IFS='|' read -r e r; printf '%s %s' "$e" "$(jq -r '"\(.stacks | join(",")) \(.install)"' <<< "$r")"; })"
 check "restore: VERSION stays the code's"            9.9.9-smoke "$(cat "$BKW/VERSION")"
 cp "$ROOT/VERSION" "$BKW/VERSION"
+# exclusions (.dcs-backup-exclude): left out of the stack's part, said in the manifest and the listing; a restore keeps what is on disk
+mkdir -p "$BKW/Stacks/demo/App-Data/RomM/library/snes"; head -c 2097152 /dev/zero > "$BKW/Stacks/demo/App-Data/RomM/library/snes/game.sfc"; echo cfg > "$BKW/Stacks/demo/App-Data/RomM/config.yml"
+check "excludes: ../x is refused"                     400 "$(_bk handle_stack_backup_excludes_put demo '{"patterns":["../x"]}' | status_of)"
+check "excludes: a .. inside is refused"              400 "$(_bk handle_stack_backup_excludes_put demo '{"patterns":["RomM/../../x"]}' | status_of)"
+check "excludes: an absolute path is refused"         400 "$(_bk handle_stack_backup_excludes_put demo '{"patterns":["/abs"]}' | status_of)"
+check "excludes: more than 100 are refused"           400 "$(_bk handle_stack_backup_excludes_put demo "$(jq -nc '{patterns: [range(101) | "d\(.)"]}')" | status_of)"
+check "excludes: not a list is refused"               400 "$(_bk handle_stack_backup_excludes_put demo '{"patterns":"RomM"}' | status_of)"
+check "excludes: nothing written by a refusal"        no "$([[ -e "$BKW/Stacks/demo/.dcs-backup-exclude" ]] && echo yes || echo no)"
+check "excludes: saved, tidied, once each"            "200 RomM/library,*.iso" "$(_bk handle_stack_backup_excludes_put demo '{"patterns":["./RomM/library/"," *.iso ","RomM/library",""]}' | { r=$(cat); printf '%s %s' "$(status_of <<< "$r")" "$(body_of <<< "$r" | jq -r '.patterns | join(",")')"; })"
+check "excludes: in the stack's folder, one per line" "RomM/library *.iso" "$(grep -v '^#' "$BKW/Stacks/demo/.dcs-backup-exclude" | tr '\n' ' ' | sed 's/ $//')"
+_BXG=$(_bk handle_stack_backup_excludes demo | body_of)
+_2m() { jq -r 'if . >= 2097152 and . < 2300000 then "2M" else . end'; }   # du counts the folders' blocks too
+check "excludes: the dry run sizes each pattern"      "RomM/library 2M 1|*.iso 0 0" "$(jq -r '[.matched[] | "\(.pattern) \(if .size_bytes >= 2097152 and .size_bytes < 2300000 then "2M" else .size_bytes end) \(.files)"] | join("|")' <<< "$_BXG")"
+check "excludes: …examples and the big folders"       "yes yes" "$(jq -r '(.examples | length > 0), (any(.suggestions[]; .path == "RomM/library" and .size_bytes >= 2097152))' <<< "$_BXG" | sed 's/true/yes/' | tr '\n' ' ' | sed 's/ $//')"
+check "excludes: a comment and a bad line in the file are skipped" "RomM/library *.iso" "$(printf '# note\n../evil\n/abs\n' >> "$BKW/Stacks/demo/.dcs-backup-exclude"; _bk _backup_excludes demo | tr '\n' ' ' | sed 's/ $//')"
+BKR=$(_bk _bkb Docker-Compose-Backup-2026-01-01_000010-demo.tar.gz demo)
+_BXA="$BKW/backups/Docker-Compose-Backup-2026-01-01_000010-demo.tar.gz"
+check "excludes: the stack backup leaves the folder out" "0 1" "$(tar -xzOf "$_BXA" ./.dcs-backup/stacks/demo.tar | tar -tf - | grep -c 'RomM/library') $(tar -xzOf "$_BXA" ./.dcs-backup/stacks/demo.tar | tar -tf - | grep -cx './App-Data/RomM/config.yml')"
+check "excludes: the manifest lists them, with the bytes" 'RomM/library,*.iso|2M|2M' "$(_m=$(tar -xzOf "$_BXA" ./.dcs-backup/manifest.json); printf '%s|%s|%s' "$(jq -r '.excludes.demo | join(",")' <<< "$_m")" "$(jq '.excluded_bytes' <<< "$_m" | _2m)" "$(jq '.parts[] | select(.name == "demo") | .excluded_bytes' <<< "$_m" | _2m)")"
+check "excludes: the result and the listing show excluded_bytes" "2M 2M" "$(jq -r '.excluded_bytes' <<< "${BKR#*|}" | _2m) $(_bk handle_backup_list | body_of | jq -r '.backups[] | select(.filename | endswith("000010-demo.tar.gz")) | .excluded_bytes' | _2m)"
+BKR=$(_bk _bkb Docker-Compose-Backup-2026-01-01_000011.tar.gz)
+check "excludes: the full backup leaves it out too"   "0 2M" "$(tar -xzOf "$BKW/backups/Docker-Compose-Backup-2026-01-01_000011.tar.gz" ./.dcs-backup/stacks/demo.tar | tar -tf - | grep -c 'RomM/library') $(jq -r '.excluded_bytes' <<< "${BKR#*|}" | _2m)"
+echo changed > "$BKW/Stacks/demo/App-Data/RomM/config.yml"; echo new-rom > "$BKW/Stacks/demo/App-Data/RomM/library/snes/new.sfc"
+BKR=$(_bk _bkr "$_BXA" demo)
+check "excludes: a restore keeps the excluded folder on disk" "ok cfg 2097152 new-rom" "$(printf '%s' "${BKR%%|*}") $(cat "$BKW/Stacks/demo/App-Data/RomM/config.yml") $(stat -c %s "$BKW/Stacks/demo/App-Data/RomM/library/snes/game.sfc" 2>/dev/null) $(cat "$BKW/Stacks/demo/App-Data/RomM/library/snes/new.sfc" 2>/dev/null)"
+check "excludes: …and not a copy in the set aside"    0 "$(find "$BKW/.data/pre-restore" -path '*RomM/library*' -name '*.sfc' | wc -l)"
+rm -rf "$BKW/Stacks/demo/App-Data/RomM" "$BKW/Stacks/demo/.dcs-backup-exclude" "$BKW"/backups/*00001[01]*
 # an archive changed by hand: _bkcraft OUT JQ-FILTER (the manifest), with the files in $BKW/craft-extra added under .dcs-backup
 _bkcraft() {
     local d="$BKW/craft"; rm -rf "$d"; mkdir -p "$d"; tar -xzf "$BKA" -C "$d"
@@ -3191,6 +3220,17 @@ _RCR=$(_lib eval "FLEET_READER=plain; _recovery_restore '${_RCB%%|*}' smoke-pass
 check "recovery: …on a new machine without the folder it says so, nothing made" "yes|no" "$(grep -q 'zz-new: its App-Data .* is not there' <<< "$_RCR" && echo yes)|$([[ -e "$_DRV/appdata/zz-new" ]] && echo yes || echo no)"
 mv "$_DRV/appdata/zz-new.away" "$_DRV/appdata/zz-new"
 rm -f "${_RCB%%|*}" "${_RCB%%|*}.sha256"
+# exclusions on a drive's App-Data: its part leaves them out, the restore and the recovery bundle keep what is on disk
+mkdir -p "$_DRV/appdata/zz-new/big"; head -c 1048576 /dev/zero > "$_DRV/appdata/zz-new/big/blob"; echo 'big' > "$WORK/Stacks/zz-new/.dcs-backup-exclude"
+_BKF=$(FLEET_READER=plain _lib eval 'BACKUP_DEST_DIR="'"$_DRV"'/bk"; BACKUP_PAUSE=false; _backup_build "zz-ad-excl.tar.gz" zz-new >/dev/null; echo "$BACKUP_DEST_DIR/zz-ad-excl.tar.gz"')
+check "excludes: the drive's App-Data part leaves it out" "0 yes" "$(tar -xzOf "$_BKF" ./.dcs-backup/appdata/zz-new.tar | tar -tf - | grep -c '^\./big') $(tar -xzOf "$_BKF" ./.dcs-backup/appdata/zz-new.tar | tar -tf - | grep -qx './App/a.txt' && echo yes)"
+FLEET_READER=plain _lib eval "BACKUP_DEST_DIR='$_DRV/bk'; _backup_restore_run '$_BKF' zz-new >/dev/null"
+check "excludes: …restored, the drive keeps it"      1048576 "$(stat -c %s "$_DRV/appdata/zz-new/big/blob" 2>/dev/null)"
+_RCB=$(_lib eval 'FLEET_READER=plain; RECOVERY_DEST_DIR="'"$WORK"'/rcv-excl"; _recovery_bundle_create smoke-pass-123 zz-new >/dev/null; printf "%s" "$RCV_FILE"')
+check "excludes: the recovery bundle leaves it out, says so" "0 big" "$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:smoke-pass-123 -in "$_RCB" 2>/dev/null | tar -xzOf - ./appdata/zz-new.tar 2>/dev/null | tar -tf - | grep -c '^\./big') $(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:smoke-pass-123 -in "$_RCB" 2>/dev/null | tar -xzOf - ./manifest.json 2>/dev/null | jq -r '.appdata_parts[] | select(.stack == "zz-new") | .excluded | join(",")')"
+_lib eval "FLEET_READER=plain; RECOVERY_DEST_DIR='$WORK/rcv-excl'; _recovery_restore '$_RCB' smoke-pass-123 >/dev/null"
+check "excludes: …its restore keeps it on the drive" 1048576 "$(stat -c %s "$_DRV/appdata/zz-new/big/blob" 2>/dev/null)"
+rm -rf "$WORK/rcv-excl" "$_BKF" "$_BKF.sha256" "$_DRV/appdata/zz-new/big" "$WORK/Stacks/zz-new/.dcs-backup-exclude"
 # (the stacks these checks made go again: later sections count the stacks they find)
 rm -rf "$WORK/Stacks/zz-ad" "$WORK/Stacks/zz-plain" "$WORK/Stacks/zz-new" "$WORK/Stacks/zz-old" "$WORK/Stacks/zz-plain2" "$WORK/.data/appdata-guard.json"
 # --- a template deployed into a stack whose App-Data is on its own drive keeps the placeholder (Compose resolves it there;

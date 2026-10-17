@@ -3,6 +3,22 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.59] - 2026-10-17
+
+### Added
+
+- **Folders and files a stack's backups leave out.** A stack can now keep part of its App-Data out of its backups: a
+  76 GB ROM library in `RomM/library`, a cache, a download folder. The stack page has an *Excluded from backups* card
+  (one pattern per row, and *Suggest* offers the largest folders with their size), or
+  `PUT /stacks/<name>/backup-excludes {"patterns": [...]}`. The patterns are kept in the stack's folder as
+  `.dcs-backup-exclude` (one per line, relative to the App-Data, tar wildcards, `#` comments), so they travel with the
+  stack and survive updates; an absolute path, a `..` and more than 100 patterns are refused.
+  `GET /stacks/<name>/backup-excludes` says how much each pattern leaves out right now. The stack backup, the full
+  backup and the recovery bundle leave the matches out, the backup's manifest lists them with the bytes saved, and
+  `GET /backups` shows `excluded_bytes` per archive. A restore never deletes an excluded folder that is on disk: it
+  stays where it is. Moving a stack into a VM, back to the hub, or its App-Data to another drive still carries
+  everything.
+
 ## [4.0.58] - 2026-10-16
 
 ### Changed

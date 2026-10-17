@@ -228,6 +228,18 @@ Framework files you edited by hand are never replaced unattended: the Updates pa
 - **Room.** Nothing is staged in `/tmp`. The parts are written next to the archive, so the destination needs about twice
   the data free while a backup runs; the backup says so before it starts when it does not.
 - **No rsync needed** (the DCS VM images have none: before 4.0.28 a backup there finished "done" with an empty archive).
+- **Folders a stack's backups leave out** *(4.0.59)*. A ROM library, a media cache or a download folder inside a stack's
+  App-Data can be kept out of its backups: the stack page's *Excluded from backups* card, or
+  `PUT /stacks/<name>/backup-excludes {"patterns": ["RomM/library", "*.iso"]}`. The patterns live in the stack's folder as
+  `.dcs-backup-exclude` (one per line, relative to the App-Data, tar `--exclude` wildcards, `#` comments, at most 100; no
+  absolute path, no `..`), so they travel with the stack and no update touches them. `GET /stacks/<name>/backup-excludes`
+  says what each pattern matches now (size and files, measured in 15 seconds at most) and suggests the largest folders.
+  The stack backup, the full backup and the recovery bundle leave the matches out; the manifest names the patterns
+  (`excludes`) and the bytes left out (`excluded_bytes`, also in `GET /backups`). **A restore never deletes them**: what
+  the patterns match on disk is put back from the set aside after the archive's copy is in place. Excluded data is not
+  backed up anywhere by DCS: back it up where it lives if it matters. **Moves carry everything**: moving a stack into a
+  VM, back to the hub, or its App-Data to another drive copies the whole folder, exclusions included (they are not
+  backups). The rollback snapshots and the update copies hold compose and `.env` only, so they are not concerned.
 
 **Restoring** asks for a confirmation and runs in the background (*GET /backups/status*):
 
