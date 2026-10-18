@@ -3655,6 +3655,18 @@ check "hub: compose of the VM stack"    200 "$(auth_request GET /stacks/smoke-ph
 check "hub: unknown stack still 404"    404 "$(auth_request GET /stacks/nope-none | status_of)"
 _TPL=$(ls "$ROOT/.templates" | head -1)
 check "hub: dry run lands on the VM"    200 "$(auth_request POST "/templates/$_TPL/dry-run" '{"target_stack":"smoke-photos"}' | status_of)"
+# consent travels with the request: a save of the VM stack's compose through the hub records the exception in the VM's
+# own compose policy, not the hub's
+_VMC=$(auth_request GET /stacks/smoke-photos/compose | body_of | jq -r '.content // empty' 2>/dev/null)
+_VMP=$(printf 'services:\n  vmpriv:\n    image: busybox:1\n    privileged: true\n')
+_r=$(auth_request POST /stacks/smoke-photos/compose "$(jq -nc --arg c "$_VMP" '{content: $c}')")
+check "vm consent: refused without consent, structured" "422 privileged vmpriv" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy_refusals[0] | "\(.rule) \(.service)"' 2>/dev/null)"
+_r=$(auth_request POST /stacks/smoke-photos/compose "$(jq -nc --arg c "$_VMP" '{content: $c, allow_policy: [{rule: "privileged", service: "vmpriv"}]}')")
+check "vm consent: saved through the hub with allow_policy" 200 "$(status_of <<< "$_r")"
+check "vm consent: …pushed into the VM" true "$(body_of <<< "$_r" | jq -r '.pushed' 2>/dev/null)"
+check "vm consent: …the VM's own policy holds it (the hub's account), and the hub's copy's" "busybox dcs-hub busybox admin" "$(jq -r '.allow[0] | "\(.image) \(.added_by)"' "$VMWORK/.data/compose-policy.local.json" 2>/dev/null) $(jq -r '.allow[0] | "\(.image) \(.added_by)"' "$WORK/.data/compose-policy.local.json" 2>/dev/null)"
+[[ -n "$_VMC" ]] && auth_request POST /stacks/smoke-photos/compose "$(jq -nc --arg c "$_VMC" '{content: $c}')" >/dev/null
+rm -f "$VMWORK/.data/compose-policy.local.json"; auth_request PUT /config/compose-policy '{"allow":[]}' >/dev/null
 # a template deployed into the VM's stack through the hub: the VM's own graphics card (its /status, read through the hub)
 # goes into the service, and its route_override route is the VM's, at the address the hub knows it by, with the deploy's
 # subdomain and port; the hub's Traefik feed takes it from there
@@ -4008,6 +4020,33 @@ _r=$(auth_request POST /templates/import "$(jq -nc '{name: "zz-imp", compose: "s
 check "api: template import: refused"            "422 pid:host no" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $([[ -d "$WORK/.templates/zz-imp" ]] && echo yes || echo no)"
 _r=$(auth_request POST /templates/zz-evil/update "$(jq -nc '{compose: "services:\n  zz-evil:\n    image: alpine:3\n    security_opt: [\"seccomp:unconfined\"]\n"}')")
 check "api: template update: refused, the template unchanged" "422 security_opt:seccomp=unconfined 1" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.refused[0].rule') $(grep -c ROOTDIR "$WORK/.templates/zz-evil/docker-compose.yml")"
+# consent: a refusal comes back structured (policy_refusals); an admin's allow_policy records it as this server's
+# exception (scoped to the image, the service or the stack, with who, when and why) and the deploy or save goes through
+_r=$(auth_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c}')")
+check "consent: a refused save names each refusal" "422 privileged a 4 alpine:3 image alpine" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy_refusals[0] | "\(.rule) \(.service) \(.line) \(.image) \(.scope_suggestion.kind) \(.scope_suggestion.value)"')"
+check "consent: the editor's check offers the same refusals" "privileged image alpine" "$(auth_request POST /stacks/zz-pol/compose/validate "$(jq -nc --arg c "$_PRIV" '{content: $c}')" | body_of | jq -r '.policy_refusals[0] | "\(.rule) \(.scope_suggestion.kind) \(.scope_suggestion.value)"')"
+check "consent: an allow_policy that is not a list is refused" 400 "$(auth_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c, allow_policy: "yes"}')" | status_of)"
+check "consent: a viewer's consent is not taken" 403 "$(viewer_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c, allow_policy: [{rule: "privileged", service: "a"}]}')" | status_of)"
+_r=$(auth_request POST /stacks/zz-pol/compose "$(jq -nc --arg c "$_PRIV" '{content: $c, allow_policy: [{rule: "privileged", service: "a"}, {rule: "pid:host", service: "a"}]}')")
+check "consent: the save goes through, the refusal now a warning" "200 privileged" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.warned[0].rule')"
+check "consent: …recorded for the image, only what was refused" "1 alpine privileged admin compose save for zz-pol" "$(jq -r '"\(.allow | length) \(.allow[0].image) \(.allow[0].rules | join(",")) \(.allow[0].added_by) \(.allow[0].source)"' "$WORK/.data/compose-policy.local.json" 2>/dev/null)"
+check "consent: …audited" yes "$(grep '"policy_exception_added"' "$WORK/.data/audit.jsonl" 2>/dev/null | grep -q 'admin allowed privileged for the image alpine' && echo yes || echo no)"
+_r=$(auth_request GET /config/compose-policy | body_of | jq -c '.local | .allow += [{image: "busybox", rules: ["cap:SYS_ADMIN"], reason: "by hand"}]')
+auth_request PUT /config/compose-policy "$_r" >/dev/null
+check "consent: a PUT keeps who added an exception" "2 admin" "$(jq -r '"\(.allow | length) \(.allow[0].added_by)"' "$WORK/.data/compose-policy.local.json" 2>/dev/null)"
+auth_request PUT /config/compose-policy '{"allow":[]}' >/dev/null
+mkdir -p "$WORK/.templates/zz-priv"
+printf '{"name":"zz-priv","title":"Priv","category":"other","variables":[],"policy_needs":[{"rule":"privileged","service":"zz-priv","reason":"the smoke test runs it privileged"}]}\n' > "$WORK/.templates/zz-priv/template.json"
+printf 'services:\n  zz-priv:\n    image: busybox:1\n    privileged: true\n' > "$WORK/.templates/zz-priv/docker-compose.yml"
+rm -f "$WORK/.data/cache"/templates*.http
+check "consent: the catalogue lists a template's needs" "privileged zz-priv the smoke test runs it privileged" "$(auth_request GET /templates | body_of | jq -r '.templates[] | select(.name == "zz-priv") | .policy_needs[0] | "\(.rule) \(.service) \(.reason)"' 2>/dev/null)"
+_r=$(auth_request POST /templates/zz-priv/deploy '{"target_stack":"zz-pol"}' DOCKER_COMPOSE_CMD=true)
+check "consent: a deploy that needs consent is refused, structured" "422 privileged zz-priv busybox 0" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy_refusals[0] | "\(.rule) \(.service) \(.scope_suggestion.value)"') $(grep -c zz-priv "$WORK/Stacks/zz-pol/docker-compose.yml")"
+_r=$(auth_request POST /templates/zz-priv/deploy '{"target_stack":"zz-pol","allow_policy":[{"rule":"privileged","service":"zz-priv","scope":"service"}]}' DOCKER_COMPOSE_CMD=true)
+check "consent: deploy with allow_policy goes through" "200 privileged" "$(status_of <<< "$_r") $(body_of <<< "$_r" | jq -r '.policy.warned[0].rule' 2>/dev/null)"
+check "consent: …recorded for the image and service, the template's reason" "busybox zz-priv privileged the smoke test runs it privileged" "$(jq -r '.allow[0] | "\(.image) \(.service) \(.rules | join(",")) \(.reason)"' "$WORK/.data/compose-policy.local.json" 2>/dev/null)"
+auth_request PUT /config/compose-policy '{"allow":[]}' >/dev/null
+rm -rf "$WORK/.templates/zz-priv"
 rm -rf "$WORK/.templates/zz-evil" "$WORK/Stacks/zz-pol"
 # API keys: for a dashboard or a script that can only send a fixed header. Made by an admin, shown once, kept as a hash;
 # "read" reads what a viewer may, "operate" also does what a bot may; never an admin, never an account

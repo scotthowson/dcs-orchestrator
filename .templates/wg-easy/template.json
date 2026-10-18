@@ -21,5 +21,8 @@
       "default": "",
       "required": true
     }
+  ],
+  "policy_needs": [
+    {"rule": "cap:SYS_MODULE", "service": "wg-easy", "reason": "wg-easy loads the kernel's WireGuard module when the host has not loaded it"}
   ]
 }

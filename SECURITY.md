@@ -88,6 +88,16 @@ refusal is still reported, as a warning with its reason; an allowed warning is l
 allowed image is trusted with its rules whatever its `command` says: allow by stack when in doubt. A
 template's own `host_access` (and a deploy's `allow_privileged`) is allowed for that deploy.
 
+Consent: a refused deploy or compose save answers 422 with `policy_refusals` (`rule`, `service`, `line`, `image`,
+`message` and a `scope_suggestion`). An admin who sends the same request again with `allow_policy: [{rule, service,
+scope}]` (`scope`: `image`, the default, `service` for that image in that service only, or `stack`) records each
+refusal the server itself found, and only those, as an entry in `.data/compose-policy.local.json` with who added it,
+when, on what and why (the template's `policy_needs` reason, or the caller's), audited as `policy_exception_added` and
+sent to the notification channels; then the file is judged again. A template says what it needs in `policy_needs:
+[{rule, service, reason}]` (`tests/lint.sh` holds it to what the rules refuse without any exception); the dashboard
+shows that before the deploy, every box unticked. The exceptions are listed on the Config page and removed there (or
+with `PUT /config/compose-policy`). A deploy into a VM carries the consent to the VM: the exception is the VM's.
+
 Where it runs: an edit (`POST /stacks/{s}/compose`, the editors' checks `POST /stacks/{s}/compose/validate`
 and `POST /compose/validate` with the findings and their lines), `POST /stacks/{s}/files` (the folder
 is put back when the result is refused), a `.env` save and a container's environment change (refused

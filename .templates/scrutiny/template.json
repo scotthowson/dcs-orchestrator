@@ -22,5 +22,10 @@
       "default": "8482",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "cap:SYS_ADMIN", "service": "scrutiny", "reason": "Scrutiny reads NVMe drive health with admin commands that need SYS_ADMIN"},
+    {"rule": "cap:SYS_RAWIO", "service": "scrutiny", "reason": "smartctl sends raw commands to the disks to read their S.M.A.R.T. data"},
+    {"rule": "privileged", "service": "scrutiny", "reason": "Scrutiny's all-in-one image runs privileged so it can see every disk of the host"}
   ]
 }

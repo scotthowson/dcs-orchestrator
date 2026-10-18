@@ -21,5 +21,9 @@
       "default": "3001",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "bind:/proc:ro", "service": "dashdot", "reason": "dash. reads the host's processor, memory and network figures from /proc (read-only)"},
+    {"rule": "bind:/sys:ro", "service": "dashdot", "reason": "dash. reads the host's hardware and disk details from /sys (read-only)"}
   ]
 }

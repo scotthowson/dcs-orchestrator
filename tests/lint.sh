@@ -178,14 +178,24 @@ if command -v python3 >/dev/null 2>&1 || docker compose version >/dev/null 2>&1;
         export BASE_DIR="$ROOT" COMPOSE_DIR="$work/Stacks" COMPOSE_POLICY_CACHE="$work/cache.json" COMPOSE_POLICY_LOCAL="$work/none.json"
         DOCKER_COMPOSE_CMD="docker compose"; docker compose version >/dev/null 2>&1 || DOCKER_COMPOSE_CMD=""
         source "$ROOT/.lib/compose-policy.sh"
+        bare="$work/bare-policy.json"; jq ".allow = []" "$ROOT/.config/compose-policy.json" > "$bare"
         n=0
         for d in "$ROOT"/.templates/*/; do
             [[ -f "$d/docker-compose.yml" ]] || continue
             n=$((n + 1))
             e=$(_compose_policy_template_env "$d/template.json")
             rc=0; COMPOSE_POLICY_ENV_FILE="$e" COMPOSE_POLICY_DIR="$work/Stacks/template-check" _compose_policy_check "$d/docker-compose.yml" "" || rc=$?
-            rm -f "$e"
             (( rc == 0 )) || printf "  .templates/%s: %s\n" "$(basename "$d")" "$(_compose_policy_brief)"
+            # policy_needs: what the rules refuse with no exception at all is what a deploy may ask the admin to allow,
+            # so the template declares each of it (rule, service, reason); a declared need nothing refuses is a warning
+            COMPOSE_POLICY_SHIPPED="$bare" COMPOSE_POLICY_ENV_FILE="$e" COMPOSE_POLICY_DIR="$work/Stacks/template-check" _compose_policy_check "$d/docker-compose.yml" "" || true
+            rm -f "$e"
+            jq -r --argjson v "$COMPOSE_POLICY" --arg t "$(basename "$d")" '"'"'
+                (.policy_needs // []) as $n | [$v.refused[] | {rule, service}] | unique as $r
+                | ($r[] | select(. as $f | $n | any(.rule == $f.rule and .service == $f.service and ((.reason // "") | length) > 0) | not)
+                    | "  .templates/\($t): refused without a declared need: add {rule: \"\(.rule)\", service: \"\(.service)\", reason} to policy_needs"),
+                  ($n[] | select(. as $d | $r | any(.rule == $d.rule and .service == $d.service) | not)
+                    | "  warning: .templates/\($t): policy_needs declares \(.rule) for \(.service), which the policy does not refuse")'"'"' "$d/template.json" 2>/dev/null
         done
         echo "  $n templates judged by $(jq -r .engine <<< "$COMPOSE_POLICY")"
     ' _ "$ROOT" 2>&1)

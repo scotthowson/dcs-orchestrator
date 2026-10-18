@@ -14,5 +14,8 @@
       "default": "8492",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "bind:/sys:ro", "service": "cadvisor", "reason": "cAdvisor reads every container's processor, memory and disk use from the kernel's cgroup files under /sys (read-only)"}
   ]
 }

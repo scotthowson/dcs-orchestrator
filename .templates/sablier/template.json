@@ -6,5 +6,8 @@
   "target_stack": "core-infrastructure",
   "icon": "⏱️",
   "tags": ["scaling", "on-demand", "idle", "proxy", "docker", "resource-management"],
-  "variables": []
+  "variables": [],
+  "policy_needs": [
+    {"rule": "docker-socket:rw", "service": "sablier", "reason": "Sablier starts and stops the on-demand containers through the Docker API"}
+  ]
 }

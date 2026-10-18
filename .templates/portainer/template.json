@@ -21,5 +21,8 @@
       "required": false
     }
   ],
-  "singleton": true
+  "singleton": true,
+  "policy_needs": [
+    {"rule": "docker-socket:rw", "service": "portainer", "reason": "Portainer manages this server's Docker: the Docker API is what it is for"}
+  ]
 }

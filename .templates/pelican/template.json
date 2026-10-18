@@ -144,5 +144,9 @@
       "default": "/srv/pelican/servers",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "docker-socket:rw", "service": "pelican-wings", "reason": "Wings creates and manages the game-server containers through the Docker API"},
+    {"rule": "privileged", "service": "pelican-wings", "reason": "Wings mounts the server filesystems and applies resource limits"}
   ]
 }

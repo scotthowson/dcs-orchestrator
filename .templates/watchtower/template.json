@@ -28,5 +28,8 @@
       "required": false
     }
   ],
-  "singleton": true
+  "singleton": true,
+  "policy_needs": [
+    {"rule": "docker-socket:rw", "service": "watchtower", "reason": "Watchtower pulls new images and recreates the containers through the Docker API"}
+  ]
 }

@@ -42,5 +42,8 @@
       "required": false,
       "type": "password"
     }
+  ],
+  "policy_needs": [
+    {"rule": "security_opt:seccomp=unconfined", "service": "webtop", "reason": "the browsers in the Webtop desktop sandbox themselves with system calls Docker's default profile blocks"}
   ]
 }

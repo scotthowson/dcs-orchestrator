@@ -22,5 +22,11 @@
       "required": false
     }
   ],
-  "singleton": true
+  "singleton": true,
+  "policy_needs": [
+    {"rule": "bind:/proc:ro", "service": "netdata", "reason": "Netdata reads the metrics of the host and of every process from /proc (read-only)"},
+    {"rule": "bind:/sys:ro", "service": "netdata", "reason": "Netdata reads hardware, disk and cgroup metrics from /sys (read-only)"},
+    {"rule": "cap:SYS_ADMIN", "service": "netdata", "reason": "Netdata's collectors need SYS_ADMIN to read cgroup and network namespace details (Netdata's own install instructions)"},
+    {"rule": "security_opt:apparmor=unconfined", "service": "netdata", "reason": "Netdata's documented setup turns AppArmor off so its collectors can read what they measure"}
+  ]
 }

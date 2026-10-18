@@ -67,5 +67,11 @@
       "service": "photoprism",
       "use": "video"
     }
+  ],
+  "policy_needs": [
+    {"rule": "security_opt:apparmor=unconfined", "service": "photoprism", "reason": "PhotoPrism's own compose file turns AppArmor off: its TensorFlow and video tools need it"},
+    {"rule": "security_opt:seccomp=unconfined", "service": "photoprism", "reason": "PhotoPrism's own compose file turns seccomp off: its TensorFlow and video tools make system calls Docker's default profile blocks"},
+    {"rule": "security_opt:apparmor=unconfined", "service": "photoprism-db", "reason": "the database of PhotoPrism's own compose file runs with AppArmor off"},
+    {"rule": "security_opt:seccomp=unconfined", "service": "photoprism-db", "reason": "the database of PhotoPrism's own compose file runs with seccomp off"}
   ]
 }

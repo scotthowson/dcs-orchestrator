@@ -32,5 +32,13 @@
       "default": "9101",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "bind:/:ro", "service": "cadvisor", "reason": "cAdvisor reads every container's file system from the host's root (read-only)"},
+    {"rule": "bind:/sys:ro", "service": "cadvisor", "reason": "cAdvisor reads every container's cgroup figures from /sys (read-only)"},
+    {"rule": "device:/dev/disk", "service": "cadvisor", "reason": "cAdvisor reads the disks' input/output statistics through /dev/disk"},
+    {"rule": "privileged", "service": "cadvisor", "reason": "cAdvisor's documented setup runs privileged to measure every container from the host's side"},
+    {"rule": "bind:/:ro", "service": "node-exporter", "reason": "the node exporter measures the host's file systems: it reads the host's root (read-only)"},
+    {"rule": "pid:host", "service": "node-exporter", "reason": "the node exporter counts and measures the host's processes: it needs the host's process list"}
   ]
 }

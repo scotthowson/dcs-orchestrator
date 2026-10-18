@@ -83,6 +83,9 @@ def notes:
     (if .route_override then "Routed as `" + (.route_override.subdomain // "?") + "` to port " + ((.route_override.port // "?") | tostring) else empty end),
     (if ((.optional_services // []) | length) > 0
        then "Optional: " + (((.optional_services | map(if type == "object" then .service else . end)) | map("`" + . + "`")) | join(", "))
+       else empty end),
+    (if ((.policy_needs // []) | length) > 0
+       then "Needs: " + ((.policy_needs | map("`" + .rule + "` (" + .service + ")")) | join(", "))
        else empty end)
   ] | join(" · ");
 

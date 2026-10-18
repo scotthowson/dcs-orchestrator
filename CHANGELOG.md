@@ -3,6 +3,27 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [4.0.60] - 2026-10-18
+
+### Added
+
+- **One informed click for a template or a compose edit that needs more of the host.** Pelican Wings needs the Docker
+  socket and privileged mode, Scrutiny raw access to the disks, Netdata `/proc` and `/sys`: the compose policy refuses
+  those unless they are allowed for the image, and until now the only way to allow them was to write the exception by
+  hand with `PUT /config/compose-policy`. Now a refused deploy or compose save answers with `policy_refusals` (the rule,
+  the service, the line, the image, the plain-English reason and a suggested scope), and the same request sent again
+  with `allow_policy: [{rule, service, scope}]` by an admin records each refusal as this server's own exception: for
+  that image (the default), for that image in that service only, or for that stack. Only what the server itself
+  refused is recorded, with who allowed it, when, on what and why; it is audited as `policy_exception_added` and sent
+  to the notification channels, and the file is judged again. A template now says what it needs and why in
+  `policy_needs` (14 built-in templates do: Pelican, Portainer, Watchtower, Sablier, Netdata, cAdvisor, the Prometheus
+  exporters, dash., Duplicati, Scrutiny, PhotoPrism, Webtop, Tailscale and wg-easy); `GET /templates` lists it,
+  `docs/TEMPLATES.md` shows "Needs: …", and `tests/lint.sh` fails a template the policy refuses without a declared
+  need. The dashboard shows the needs on the deploy sheet before the deploy, every box unticked, and a refusal with
+  *Allow and deploy* or *Allow and save*. The Config page lists the exceptions with who added them and when, each
+  with Remove. A deploy or save into a VM carries the consent to the VM: the exception is in the VM's own policy.
+  Nothing in the default policy changed.
+
 ## [4.0.59] - 2026-10-17
 
 ### Added

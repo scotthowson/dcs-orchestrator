@@ -46,5 +46,8 @@
       "default": "",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "cap:SYS_MODULE", "service": "tailscale", "reason": "Tailscale loads the kernel's WireGuard and tun modules when the host has not loaded them"}
   ]
 }

@@ -77,7 +77,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | GET | `/export/{health|system|config}` | user | Export data |
 | POST | `/config` | admin | Update allow-listed .env settings |
 | POST | `/metrics/snapshot` | admin | Record a metrics sample now |
-| PUT | `/config/compose-policy` | admin | Replace this server's own compose-policy exceptions {allow: [{image \| stack, service?, rules: [...], reason}], devices: {warn, ignore}} |
+| PUT | `/config/compose-policy` | admin | Replace this server's own compose-policy exceptions {allow: [{image \| stack, service?, rules: [...], reason, added_by?, added_at?, source?}], devices: {warn, ignore}} |
 
 ## Authentication
 
@@ -144,7 +144,7 @@ Rate limiting answers `429`; a fresh install answers `401` with a message pointi
 | POST | `/batch/update` | admin | Pull images for several stacks and recreate what changed |
 | POST | `/stacks/{stack}/compose/validate` | user | Validate compose content for a stack without saving it |
 | POST | `/stacks/{stack}/files` | admin | Write a stack's files {files: [{path, mode, content (base64)}], prune: false}: the hub pushing the files it owns into this VM's stack folder; on a hub, a VM stack's files are written here and pushed on |
-| POST | `/stacks/{stack}/compose` | admin | Save the stack's docker-compose.yml (policy-scanned, previous version kept) |
+| POST | `/stacks/{stack}/compose` | admin | Save the stack's docker-compose.yml (policy-scanned, previous version kept); a refusal answers 422 with policy_refusals, {allow_policy: [{rule, service, scope}]} allows them as this server's exception |
 | POST | `/stacks/{stack}/env` | admin | Save the stack's .env file |
 | POST | `/stacks/{stack}/compose/rollback` | admin | Restore a saved compose version |
 | POST | `/stacks/{stack}/clone` | admin | Clone a stack |

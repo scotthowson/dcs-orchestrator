@@ -24,5 +24,8 @@
       "default": "8200",
       "required": false
     }
+  ],
+  "policy_needs": [
+    {"rule": "bind:/:ro", "service": "duplicati", "reason": "Duplicati backs up the host's files: it reads the whole file system (read-only) to pick the folders to back up"}
   ]
 }

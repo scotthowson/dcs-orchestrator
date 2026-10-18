@@ -32,7 +32,7 @@ the first start.
    | Step | What happens |
    |---|---|
    | Variables | Required ones checked; values with line breaks or shell characters refused; empty secrets generated |
-   | Compose policy | The services as they will run (variables filled in) are judged: privileged mode, host namespaces, dangerous mounts, devices and capabilities are refused unless `.config/compose-policy.json` (or the server's own exceptions) allows them for the image, and what the template declares in `host_access` is allowed for its deploy ([SECURITY.md](../SECURITY.md#compose-policy)) |
+   | Compose policy | The services as they will run (variables filled in) are judged: privileged mode, host namespaces, dangerous mounts, devices and capabilities are refused unless `.config/compose-policy.json` (or the server's own exceptions) allows them for the image, and what the template declares in `host_access` is allowed for its deploy; what it needs beyond that is listed in `policy_needs` (`[{rule, service, reason}]`) and allowed only when the admin ticks it on the deploy sheet ([SECURITY.md](../SECURITY.md#compose-policy)) |
    | Conflicts | A second copy of a one-per-host template is refused, and so are clashing service names and host ports |
    | Merge | The stack's `docker-compose.yml` is backed up, the services, volumes and networks are merged in, and the result is validated (the backup comes back if it is invalid); new variables go to the stack's `.env` |
    | Config files | The template's `config/` files are copied into the app's `App-Data` folder, never over files that exist |
@@ -178,7 +178,7 @@ MQTT, DNS), *Optional* services can be left out.
 | 🎵 **Navidrome**<br>[`navidrome`](../.templates/navidrome) | Navidrome streams your music collection to the browser and to any Subsonic app (Symfonium, play:Sub, DSub, Ultrasonic…) | 4533 | `media-services` | Own sign-in |
 | 🎟️ **Ombi**<br>[`ombi`](../.templates/ombi) | Request page for Plex, Emby and Jellyfin: your users ask for films, series and music, and an approved request goes to Radarr, Sonarr or Lidarr | 3579 | `media-services` | Own sign-in |
 | 🙋 **Overseerr**<br>[`overseerr`](../.templates/overseerr) | Request page for a Plex server: people search for a film or a series, ask for it, and an approved request goes to Radarr or Sonarr | 5055 | `media-services` | Own sign-in |
-| 🌄 **PhotoPrism**<br>[`photoprism`](../.templates/photoprism) | PhotoPrism indexes your photo library with face recognition, maps and automatic tagging, all on your own hardware | 2342 | `storage-backup` | Own sign-in |
+| 🌄 **PhotoPrism**<br>[`photoprism`](../.templates/photoprism) | PhotoPrism indexes your photo library with face recognition, maps and automatic tagging, all on your own hardware | 2342 | `storage-backup` | Own sign-in · Needs: `security_opt:apparmor=unconfined` (photoprism), `security_opt:seccomp=unconfined` (photoprism), `security_opt:apparmor=unconfined` (photoprism-db), `security_opt:seccomp=unconfined` (photoprism-db) |
 | 📺 **Plex Media Server**<br>[`plex`](../.templates/plex) | Plex Media Server with LinuxServer.io image — organize and stream your personal media collection with hardware transcoding support | 32400 | `media-services` | Own sign-in |
 | 🔍 **Prowlarr**<br>[`prowlarr`](../.templates/prowlarr) | Indexer manager for the \*arr stack — centralizes all indexer/tracker configuration and syncs them to Sonarr, Radarr, Lidarr, and Readarr automatically | 9696 | `media-services` | Own sign-in |
 | 🎬 **Radarr**<br>[`radarr`](../.templates/radarr) | Automated movie management — monitors RSS feeds, searches indexers, and manages your movie library | 7878 | `media-services` | Own sign-in |
@@ -199,9 +199,9 @@ MQTT, DNS), *Optional* services can be left out.
 | 🚨 **Alertmanager**<br>[`alertmanager`](../.templates/alertmanager) | Alertmanager takes the alerts Prometheus raises, groups and silences them, and sends them on to Discord, e-mail, a webhook and more | 9093 | `monitoring-management` |  |
 | 📊 **Beszel**<br>[`beszel`](../.templates/beszel) | Beszel is a lightweight server monitor: CPU, memory, disk, network and per-container stats with history and alerts, in a few MB of RAM | 8790 | `monitoring-management` |  |
 | 📡 **Beszel Agent**<br>[`beszel-agent`](../.templates/beszel-agent) | The agent side of Beszel: reports this host and its containers to a Beszel hub | 45876 | `monitoring-management` |  |
-| 📦 **cAdvisor**<br>[`cadvisor`](../.templates/cadvisor) | cAdvisor measures CPU, memory, network and disk use of every container on this host and offers them to Prometheus at /metrics, with a simple web page of its own | 8492 | `monitoring-management` |  |
+| 📦 **cAdvisor**<br>[`cadvisor`](../.templates/cadvisor) | cAdvisor measures CPU, memory, network and disk use of every container on this host and offers them to Prometheus at /metrics, with a simple web page of its own | 8492 | `monitoring-management` | Needs: `bind:/sys:ro` (cadvisor) |
 | 👁️ **Changedetection.io**<br>[`changedetection`](../.templates/changedetection) | Monitor any website for changes — price drops, restocks, content updates, page outages | 5050 | `monitoring-management` |  |
-| ⚡ **dash.**<br>[`dashdot`](../.templates/dashdot) | Minimal, beautiful server dashboard showing CPU, RAM, storage, and network at a glance | 3001 | `monitoring-management` |  |
+| ⚡ **dash.**<br>[`dashdot`](../.templates/dashdot) | Minimal, beautiful server dashboard showing CPU, RAM, storage, and network at a glance | 3001 | `monitoring-management` | Needs: `bind:/proc:ro` (dashdot), `bind:/sys:ro` (dashdot) |
 | 🏠 **Dashy**<br>[`dashy`](../.templates/dashy) | Feature-rich homelab dashboard with status checking, widgets, themes, icon packs, and multi-page layouts | 4000 | `web-applications` | One per host |
 | 🔄 **Diun**<br>[`diun`](../.templates/diun) | Docker Image Update Notifier — monitors your running containers and alerts you when newer versions are available on the registry | — | `monitoring-management` |  |
 | 📜 **Dozzle**<br>[`dozzle`](../.templates/dozzle) | Lightweight real-time Docker container log viewer | 9999 | `monitoring-management` |  |
@@ -214,12 +214,12 @@ MQTT, DNS), *Optional* services can be left out.
 | 🏠 **Homer**<br>[`homer`](../.templates/homer) | Static start page for your services, built from one YAML file: groups, links, icons, a search box and live status cards for common apps | 8560 | `web-applications` |  |
 | 📈 **Jellystat**<br>[`jellystat`](../.templates/jellystat) | Jellystat is Tautulli for Jellyfin: watch history, most played, active streams and library statistics | 3008 | `media-services` |  |
 | 🏎️ **MySpeed**<br>[`myspeed`](../.templates/myspeed) | MySpeed tests your internet connection on a schedule (Ookla, LibreSpeed or Cloudflare servers) and keeps up to 30 days of download, upload and ping, so you can see whether you get the speed you pay for | 5216 | `monitoring-management` |  |
-| 📈 **Netdata**<br>[`netdata`](../.templates/netdata) | Real-time performance monitoring with per-second granularity | 19999 | `monitoring-management` | One per host |
+| 📈 **Netdata**<br>[`netdata`](../.templates/netdata) | Real-time performance monitoring with per-second granularity | 19999 | `monitoring-management` | One per host · Needs: `bind:/proc:ro` (netdata), `bind:/sys:ro` (netdata), `cap:SYS_ADMIN` (netdata), `security_opt:apparmor=unconfined` (netdata) |
 | 🔋 **NUT UPS Server**<br>[`nut-upsd`](../.templates/nut-upsd) | Network UPS Tools server for a USB-connected UPS | 3493 | `monitoring-management` |  |
-| 📊 **Portainer CE**<br>[`portainer`](../.templates/portainer) | Lightweight Docker management UI with real-time container monitoring, stack deployment, image management, and multi-environment support | 9443 | `monitoring-management` | One per host |
+| 📊 **Portainer CE**<br>[`portainer`](../.templates/portainer) | Lightweight Docker management UI with real-time container monitoring, stack deployment, image management, and multi-environment support | 9443 | `monitoring-management` | One per host · Needs: `docker-socket:rw` (portainer) |
 | 🔥 **Prometheus**<br>[`prometheus`](../.templates/prometheus) | Prometheus time-series metrics collection and alerting system | 9090 | `monitoring-management` |  |
-| 🔭 **Prometheus exporters**<br>[`prometheus-exporters`](../.templates/prometheus-exporters) | Node Exporter (host CPU, memory, disks, network) and cAdvisor (per-container resources) for the Prometheus template | 9100 | `monitoring-management` |  |
-| 💽 **Scrutiny**<br>[`scrutiny`](../.templates/scrutiny) | Scrutiny reads S.M.A.R.T. data from every disk and NVMe on this host, keeps the history and warns before a drive fails, with a clean dashboard | 8482 | `monitoring-management` |  |
+| 🔭 **Prometheus exporters**<br>[`prometheus-exporters`](../.templates/prometheus-exporters) | Node Exporter (host CPU, memory, disks, network) and cAdvisor (per-container resources) for the Prometheus template | 9100 | `monitoring-management` | Needs: `bind:/:ro` (cadvisor), `bind:/sys:ro` (cadvisor), `device:/dev/disk` (cadvisor), `privileged` (cadvisor), `bind:/:ro` (node-exporter), `pid:host` (node-exporter) |
+| 💽 **Scrutiny**<br>[`scrutiny`](../.templates/scrutiny) | Scrutiny reads S.M.A.R.T. data from every disk and NVMe on this host, keeps the history and warns before a drive fails, with a clean dashboard | 8482 | `monitoring-management` | Needs: `cap:SYS_ADMIN` (scrutiny), `cap:SYS_RAWIO` (scrutiny), `privileged` (scrutiny) |
 | 📶 **SmokePing**<br>[`smokeping`](../.templates/smokeping) | SmokePing pings a list of hosts every few minutes and draws latency and packet loss over time, which shows when a connection is unstable and since when | 8490 | `monitoring-management` |  |
 | 🏎️ **SpeedTest Tracker**<br>[`speedtest-tracker`](../.templates/speedtest-tracker) | Self-hosted internet speed test tracker that runs automated Ookla speedtests and displays results in a beautiful dashboard with historical graphs | 8765 | `monitoring-management` |  |
 | 📡 **Uptime Kuma**<br>[`uptime-kuma`](../.templates/uptime-kuma) | Uptime Kuma self-hosted uptime monitoring tool with status pages and notifications | 3001 | `monitoring-management` |  |
@@ -292,10 +292,10 @@ MQTT, DNS), *Optional* services can be left out.
 | 📋 **PrivateBin**<br>[`privatebin`](../.templates/privatebin) | Minimalist, open-source online pastebin where the server has zero knowledge of pasted data | 8888 | `communication-collaboration` |  |
 | 📝 **Reactive Resume**<br>[`reactive-resume`](../.templates/reactive-resume) | Free, privacy-first resume builder | 3200 | `web-applications` | Own sign-in |
 | 🖥️ **RustDesk Server**<br>[`rustdesk`](../.templates/rustdesk) | Self-hosted remote desktop server — open-source TeamViewer/AnyDesk alternative | — | `miscellaneous-services` |  |
-| ⏱️ **Sablier**<br>[`sablier`](../.templates/sablier) | Sablier on-demand container scaling that starts containers when traffic arrives and stops them after idle timeout | — | `core-infrastructure` |  |
+| ⏱️ **Sablier**<br>[`sablier`](../.templates/sablier) | Sablier on-demand container scaling that starts containers when traffic arrives and stops them after idle timeout | — | `core-infrastructure` | Needs: `docker-socket:rw` (sablier) |
 | 📄 **Stirling-PDF**<br>[`stirling-pdf`](../.templates/stirling-pdf) | Powerful self-hosted PDF manipulation toolkit with 50+ tools — merge, split, convert, compress, sign, OCR, redact, and more | 8088 | `development-tools` |  |
 | ⌨️ **Web Terminal**<br>[`web-terminal`](../.templates/web-terminal) | A full terminal on this server in a browser tab: the same shell as ssh, with colours, full-screen programs (htop, vim, tmux) and copy and paste | — | `core-infrastructure` | One per host |
-| 🪟 **Webtop**<br>[`webtop`](../.templates/webtop) | A full Linux desktop (Alpine XFCE by default) in a browser tab, from LinuxServer | 3016 | `miscellaneous-services` |  |
+| 🪟 **Webtop**<br>[`webtop`](../.templates/webtop) | A full Linux desktop (Alpine XFCE by default) in a browser tab, from LinuxServer | 3016 | `miscellaneous-services` | Needs: `security_opt:seccomp=unconfined` (webtop) |
 
 ### Productivity
 
@@ -344,7 +344,7 @@ MQTT, DNS), *Optional* services can be left out.
 | 🔔 **ntfy**<br>[`ntfy`](../.templates/ntfy) | Simple HTTP-based push notification server | 8093 | `communication-collaboration` | Own sign-in |
 | 🚀 **Semaphore UI**<br>[`semaphore`](../.templates/semaphore) | Modern web UI for running Ansible playbooks, Terraform, Bash scripts, and more | 3033 | `development-tools` |  |
 | 🔄 **Syncthing**<br>[`syncthing`](../.templates/syncthing) | Peer-to-peer file synchronization — keeps folders in sync across devices without a cloud middleman | 8384 | `storage-backup` |  |
-| 🗼️ **Watchtower**<br>[`watchtower`](../.templates/watchtower) | Automatic Docker container updater that monitors running containers, pulls new images, and gracefully restarts services with the latest version | — | `core-infrastructure` | One per host |
+| 🗼️ **Watchtower**<br>[`watchtower`](../.templates/watchtower) | Automatic Docker container updater that monitors running containers, pulls new images, and gracefully restarts services with the latest version | — | `core-infrastructure` | One per host · Needs: `docker-socket:rw` (watchtower) |
 | 🌊 **Z-Wave JS UI**<br>[`zwave-js-ui`](../.templates/zwave-js-ui) | Z-Wave JS UI runs a Z-Wave USB controller (Aeotec Z-Stick, Zooz ZST39, Home Assistant Connect ZWA-2…) with a web page to include and configure devices, and offers them to Home Assistant over WebSocket or to an MQTT broker | 8496 | `miscellaneous-services` |  |
 | 🐝 **Zigbee2MQTT**<br>[`zigbee2mqtt`](../.templates/zigbee2mqtt) | Zigbee2MQTT bridges a Zigbee USB coordinator (Sonoff Dongle Plus, SkyConnect, ConBee…) to MQTT with a web frontend and Home Assistant discovery | 8081 | `miscellaneous-services` |  |
 
@@ -357,10 +357,10 @@ MQTT, DNS), *Optional* services can be left out.
 | 🛡️ **Gluetun**<br>[`gluetun`](../.templates/gluetun) | A VPN client in a container that other containers send their traffic through | 8888 | `networking-security` | Not routed: `gluetun` |
 | 🛰️ **Headscale**<br>[`headscale`](../.templates/headscale) | Headscale is a self-hosted Tailscale control server: your own mesh VPN with MagicDNS and no account at Tailscale | 8585 | `networking-security` | Own sign-in |
 | 🔎 **SearXNG**<br>[`searxng`](../.templates/searxng) | Privacy-respecting metasearch engine | 8888 | `web-applications` |  |
-| 🔗 **Tailscale**<br>[`tailscale`](../.templates/tailscale) | Joins this host to your Tailscale network (or a Headscale one) so you reach it from anywhere without opening ports | — | `networking-security` |  |
+| 🔗 **Tailscale**<br>[`tailscale`](../.templates/tailscale) | Joins this host to your Tailscale network (or a Headscale one) so you reach it from anywhere without opening ports | — | `networking-security` | Needs: `cap:SYS_MODULE` (tailscale) |
 | 🔐 **Vaultwarden**<br>[`vaultwarden`](../.templates/vaultwarden) | Lightweight, self-hosted Bitwarden-compatible password manager written in Rust | 8222 | `networking-security` | Own sign-in |
 | 🛡️ **VPN (Private Internet Access, WireGuard)**<br>[`vpn-gluetun`](../.templates/vpn-gluetun) | DCS's own VPN: a WireGuard tunnel to Private Internet Access through Gluetun, for the containers you choose and nothing else (qBittorrent, say) | 8899 | `networking-security` | Not routed: `gluetun` |
-| 🔒 **WireGuard Easy**<br>[`wg-easy`](../.templates/wg-easy) | Simplest way to run WireGuard VPN with a web-based management UI | — | `networking-security` |  |
+| 🔒 **WireGuard Easy**<br>[`wg-easy`](../.templates/wg-easy) | Simplest way to run WireGuard VPN with a web-based management UI | — | `networking-security` | Needs: `cap:SYS_MODULE` (wg-easy) |
 
 ### Network
 
@@ -382,7 +382,7 @@ MQTT, DNS), *Optional* services can be left out.
 
 | Template | What it does | Port | Stack | Notes |
 |---|---|---|---|---|
-| 💾 **Duplicati**<br>[`duplicati`](../.templates/duplicati) | Free encrypted backup to cloud storage — supports S3, Backblaze B2, Google Drive, OneDrive, SFTP, and 25+ backends | 8200 | `storage-backup` |  |
+| 💾 **Duplicati**<br>[`duplicati`](../.templates/duplicati) | Free encrypted backup to cloud storage — supports S3, Backblaze B2, Google Drive, OneDrive, SFTP, and 25+ backends | 8200 | `storage-backup` | Needs: `bind:/:ro` (duplicati) |
 | 📁 **File Browser**<br>[`filebrowser`](../.templates/filebrowser) | Clean, web-based file manager with upload, download, preview, rename, and edit capabilities | 8095 | `storage-backup` |  |
 | 🗃️ **Kopia**<br>[`kopia`](../.templates/kopia) | Kopia makes fast, encrypted, deduplicated backups to a local folder, S3, B2, SFTP or a cloud drive, with a web UI for snapshots and restores | 51515 | `storage-backup` |  |
 | 🪣 **MinIO Object Storage**<br>[`minio`](../.templates/minio) | MinIO high-performance S3-compatible object storage server | 9001 | `storage-backup` | Own sign-in |
@@ -414,7 +414,7 @@ MQTT, DNS), *Optional* services can be left out.
 | ⌨️ **MonkeyType**<br>[`monkeytype`](../.templates/monkeytype) | Self-hosted typing test application with customizable themes, multiple test modes, and detailed statistics tracking | 5001 | `entertainment-personal` |  |
 | 🦙 **Ollama (Standalone)**<br>[`ollama`](../.templates/ollama) | Run large language models locally: Gemma, Qwen, Llama, Mistral and hundreds more, with a REST API for any app | 11434 | `development-tools` |  |
 | 🤖 **Open WebUI + Ollama**<br>[`open-webui`](../.templates/open-webui) | ChatGPT-style chat for local models: Open WebUI with Ollama, entirely on your hardware (no cloud, no API keys) | 3100 | `development-tools` |  |
-| 🎮 **Pelican Panel + Wings**<br>[`pelican`](../.templates/pelican) | Open-source game server management panel with a companion Wings daemon | 8005 | `entertainment-personal` |  |
+| 🎮 **Pelican Panel + Wings**<br>[`pelican`](../.templates/pelican) | Open-source game server management panel with a companion Wings daemon | 8005 | `entertainment-personal` | Needs: `docker-socket:rw` (pelican-wings), `privileged` (pelican-wings) |
 | 🕹️ **RomM**<br>[`romm`](../.templates/romm) | RomM is a ROM manager and web player for your retro game library | 8495 | `entertainment-personal` |  |
 | 🎮 **RomM Emulator Streaming**<br>[`romm-streaming`](../.templates/romm-streaming) | RomM 5.4's emulator streaming: a desktop with PCSX2, Dolphin, DuckStation, RPCS3, PPSSPP, Flycast, xemu and RetroArch that RomM launches games into, streamed to the browser over WebRTC | 3010 | `entertainment-personal` | Not routed: `romm-webstation` · Routed as `stream` to port 3010 |
 | 🪓 **Valheim Server**<br>[`valheim`](../.templates/valheim) | A dedicated Valheim server that installs and updates itself from Steam, with automatic world backups | 2456 | `entertainment-personal` | Not routed: `valheim` |
