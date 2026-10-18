@@ -5,6 +5,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Pelican deploy now gives a working panel and a Wings that joins it, with nothing left to do by hand.** On
+  2026-10-18 a deploy into a VM left a panel with no database (SQLite's `DB_DATABASE=pelican` points into the image's
+  own folder: every request logged `Database file at path [/var/www/html/database/pelican] does not exist`), no admin,
+  no node, Wings restarting for want of `/etc/pelican/config.yml`, and no route or DNS record. Now: SQLite's file is
+  `/pelican-data/database/database.sqlite` in the persistent volume; the panel answers at `panel.<domain>` and Wings at
+  `play.<domain>` (`PANEL_SUBDOMAIN`, `WINGS_SUBDOMAIN`), both without Authelia (Pelican signs people in itself, Wings
+  checks its own token), and `PANEL_APP_URL` is filled from the panel's route; after the start DCS does the installer's
+  first run: migrations, the admin `admin` (`PANEL_ADMIN_EMAIL`, password in the secret `PELICAN_ADMIN_PASSWORD`), this
+  machine as the node (`https://play.<domain>` on 443 through the route, Wings plain on 8080 behind it) and Wings'
+  `config.yml` from the panel, then restarts both. A panel already installed is left alone. Wings' SFTP port is
+  published as itself (the panel tells Wings to listen on the node's SFTP port).
+- **A template can name each service's subdomain** (`"route_subdomains": {"<service>": "<VARIABLE>"}` in
+  template.json), and a VM's route for a service of a bypass template (`pelican-panel` of `pelican`) stays off
+  Authelia on the hub like the template's own.
+
 ### Changed
 
 - **The Pelican template keeps the panel's cache, sessions and queue in a small Valkey (Redis) container.** With the

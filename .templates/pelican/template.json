@@ -1,24 +1,44 @@
 {
   "name": "pelican",
   "title": "Pelican Panel + Wings",
-  "description": "Open-source game server management panel with a companion Wings daemon. Supports SQLite or MySQL, keeps its cache, sessions and queue in a small Valkey (Redis) container, works behind Traefik/Cloudflare. After deploy, configure Wings via the template editor config.yml with your panel token.",
+  "description": "Open-source game server management panel with a companion Wings daemon. Supports SQLite or MySQL, keeps its cache, sessions and queue in a small Valkey (Redis) container, works behind Traefik/Cloudflare. DCS does the first run itself: the database, an admin (user admin, password in the secret PELICAN_ADMIN_PASSWORD), this machine as the node and Wings' config. The panel answers at panel.<domain>, Wings at play.<domain>; game ports and SFTP go to this machine directly (forward them on the router).",
   "category": "gaming",
   "target_stack": "entertainment-personal",
   "icon": "\ud83c\udfae",
   "tags": ["gaming", "game-server", "panel", "minecraft", "management", "pelican", "wings"],
   "config_path": "Pelican",
+  "auth": "bypass",
+  "auth_note": "Pelican signs people in itself, and Wings is called by the panel and the browser with its own token: both routes stay off Authelia.",
+  "route_subdomains": { "pelican-panel": "PANEL_SUBDOMAIN", "pelican-wings": "WINGS_SUBDOMAIN" },
   "variables": [
     {
       "name": "PANEL_APP_URL",
       "label": "Panel URL",
-      "description": "Public URL of the Pelican Panel (e.g. https://pelican.example.com)",
-      "default": "http://localhost:8005",
-      "required": true
+      "description": "Leave empty: DCS fills it with the panel's route (https://panel.<domain>), else http://<this server>:<panel port>",
+      "default": "",
+      "required": false,
+      "fill": "public_url",
+      "service": "pelican-panel",
+      "port_var": "PANEL_PORT_HTTP"
+    },
+    {
+      "name": "PANEL_SUBDOMAIN",
+      "label": "Panel subdomain",
+      "description": "The panel's address is https://<this>.<your domain>",
+      "default": "panel",
+      "required": false
+    },
+    {
+      "name": "WINGS_SUBDOMAIN",
+      "label": "Wings subdomain",
+      "description": "Wings' address (the node's FQDN) is https://<this>.<your domain>: the panel and the browser's console talk to it",
+      "default": "play",
+      "required": false
     },
     {
       "name": "PANEL_ADMIN_EMAIL",
       "label": "Admin Email",
-      "description": "Email for panel identity and Let's Encrypt certificates",
+      "description": "Email of the admin user DCS makes on the first run (username admin)",
       "default": "admin@example.com",
       "required": false
     },
@@ -88,7 +108,8 @@
     {
       "name": "PANEL_DB_NAME",
       "label": "MySQL Database",
-      "default": "pelican",
+      "description": "For MySQL: the database name (e.g. pelican). The default is SQLite's file in the persistent /pelican-data: keep it for SQLite",
+      "default": "/pelican-data/database/database.sqlite",
       "required": false,
       "show_if": { "PANEL_DB_CONNECTION": "mysql" }
     },
