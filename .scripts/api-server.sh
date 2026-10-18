@@ -16413,7 +16413,7 @@ _pelican_post_deploy() {
     done
     docker exec "$p" true 2>/dev/null || { echo "[dcs] Pelican-Panel is not running: first run skipped" >> "$log"; return 0; }
     if docker exec "$p" grep -q '^APP_INSTALLED=true' /pelican-data/.env 2>/dev/null; then
-        echo "[dcs] Pelican is installed already: first run skipped" >> "$log"; return 0
+        echo "[dcs] Pelican is installed already: first run skipped" >> "$log"; _pelican_eggs "$p" "$log"; return 0
     fi
     # sqlite: the file the image links into the app (database/database.sqlite) lives in /pelican-data; php-fpm (www-data) writes it
     [[ "$(_pv PANEL_DB_CONNECTION)" == mysql ]] || docker exec "$p" sh -c 'f=/pelican-data/database/database.sqlite; [ -f $f ] || touch $f; chown www-data:www-data $f' 2>>"$log"
@@ -16455,6 +16455,19 @@ _pelican_post_deploy() {
         sleep 5
     done
     docker restart Pelican-Wings >>"$log" 2>&1 || true
+    _pelican_eggs "$p" "$log"
+}
+
+# A panel with no eggs gets every egg of the official pelican-eggs index (the panel's own index command, then its
+# importer for each URL); a panel that has eggs is left alone. ~330 eggs, about a minute from GitHub.
+_pelican_eggs() {
+    local p="$1" log="$2"
+    docker exec -u www-data "$p" php artisan p:egg:update-index >/dev/null 2>>"$log" || { echo "[dcs] Pelican: the egg index could not be fetched, no eggs loaded" >> "$log"; return 0; }
+    docker exec -u www-data "$p" php artisan tinker --execute '
+        if (App\Models\Egg::count() > 0) { echo "[dcs] Pelican has eggs already: egg import skipped\n"; return; }
+        $s = app(App\Services\Eggs\Sharing\EggImporterService::class); $n = 0; $f = 0;
+        foreach (cache("eggs.index", []) as $eggs) { foreach (array_keys($eggs) as $u) { try { $s->fromUrl($u); $n++; } catch (\Throwable $e) { $f++; } } }
+        echo "[dcs] Pelican: $n eggs imported from the egg index ($f skipped)\n";' >>"$log" 2>&1 || true
 }
 
 # After a crowdsec deploy started the container: acquisition of Traefik's

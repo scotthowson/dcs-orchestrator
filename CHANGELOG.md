@@ -18,6 +18,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   machine as the node (`https://play.<domain>` on 443 through the route, Wings plain on 8080 behind it) and Wings'
   `config.yml` from the panel, then restarts both. A panel already installed is left alone. Wings' SFTP port is
   published as itself (the panel tells Wings to listen on the node's SFTP port).
+- **A fresh Pelican panel comes with its eggs.** The first run (and any redeploy of a panel that has none) loads every
+  egg of the official pelican-eggs index (~330: the panel's `p:egg:update-index`, then its importer for each egg); a
+  panel that has eggs is left alone. On 2026-10-18 Austin's panel had 0 eggs.
 - **A template can name each service's subdomain** (`"route_subdomains": {"<service>": "<VARIABLE>"}` in
   template.json), and a VM's route for a service of a bypass template (`pelican-panel` of `pelican`) stays off
   Authelia on the hub like the template's own.

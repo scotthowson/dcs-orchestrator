@@ -1,7 +1,7 @@
 {
   "name": "pelican",
   "title": "Pelican Panel + Wings",
-  "description": "Open-source game server management panel with a companion Wings daemon. Supports SQLite or MySQL, keeps its cache, sessions and queue in a small Valkey (Redis) container, works behind Traefik/Cloudflare. DCS does the first run itself: the database, an admin (user admin, password in the secret PELICAN_ADMIN_PASSWORD), this machine as the node and Wings' config. The panel answers at panel.<domain>, Wings at play.<domain>; game ports and SFTP go to this machine directly (forward them on the router).",
+  "description": "Open-source game server management panel with a companion Wings daemon. Supports SQLite or MySQL, keeps its cache, sessions and queue in a small Valkey (Redis) container, works behind Traefik/Cloudflare. DCS does the first run itself: the database, an admin (user admin, password in the secret PELICAN_ADMIN_PASSWORD), this machine as the node, Wings' config and every egg of the official pelican-eggs index. The panel answers at panel.<domain>, Wings at play.<domain>; game ports and SFTP go to this machine directly (forward them on the router).",
   "category": "gaming",
   "target_stack": "entertainment-personal",
   "icon": "\ud83c\udfae",
