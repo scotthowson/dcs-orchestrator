@@ -45,7 +45,7 @@ services:
       - APP_LOCALE=en
       - BEHIND_PROXY=${PANEL_BEHIND_PROXY:-true}
       - LE_EMAIL=${PANEL_ADMIN_EMAIL:-admin@example.com}
-      - TRUSTED_PROXIES=${PANEL_TRUSTED_PROXIES:-0.0.0.0/0}
+      # TRUSTED_PROXIES is not set here: a container env overrides the panel's .env, so its Settings could never change it
       - DB_CONNECTION=${PANEL_DB_CONNECTION:-sqlite}
       - DB_HOST=${PANEL_DB_HOST:-}
       - DB_PORT=${PANEL_DB_PORT:-3306}
@@ -88,6 +88,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PELICAN_SERVER_DIR:-/srv/pelican/servers}:${PELICAN_SERVER_DIR:-/srv/pelican/servers}
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/config:/etc/pelican
+      # the same folder at its host path: Wings hands that path to Docker as the bind source of every game server's passwd
+      - ${WINGS_CONFIG_DIR:-/srv/pelican/config}:${WINGS_CONFIG_DIR:-/srv/pelican/config}
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/data:/var/lib/pelican
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/logs:/var/log/pelican
       - /etc/machine-id:/etc/machine-id:ro

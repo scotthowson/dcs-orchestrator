@@ -16412,6 +16412,10 @@ _pelican_post_deploy() {
         sleep 5
     done
     docker exec "$p" true 2>/dev/null || { echo "[dcs] Pelican-Panel is not running: first run skipped" >> "$log"; return 0; }
+    # panel settings its UI manages live in its .env, never in the container env (that would override them for good):
+    # seeded once, then the panel's Settings own it. shortcut: an installed panel only reads a newly seeded value at its next restart
+    docker exec "$p" grep -q '^TRUSTED_PROXIES=' /pelican-data/.env 2>/dev/null \
+        || docker exec -e "V=$(_pv PANEL_TRUSTED_PROXIES)" "$p" sh -c 'echo "TRUSTED_PROXIES=\"${V:-0.0.0.0/0}\"" >> /pelican-data/.env' 2>>"$log"
     if docker exec "$p" grep -q '^APP_INSTALLED=true' /pelican-data/.env 2>/dev/null; then
         echo "[dcs] Pelican is installed already: first run skipped" >> "$log"; _pelican_eggs "$p" "$log"; return 0
     fi
@@ -16442,6 +16446,11 @@ _pelican_post_deploy() {
         mkdir -p "$ad/Pelican/Wings/config" 2>/dev/null
         out=$(docker exec -u www-data "$p" php artisan p:node:configuration "$id" --format=yaml 2>/dev/null)
         if [[ "$out" == *"token:"* ]]; then
+            # Wings in Docker: game servers' passwd is bind-mounted from a host path (the default /etc/pelican is not one),
+            # the machine-id mount source does not exist either, and the browser's console comes from the panel's origin
+            local wcd; wcd=$(_pv WINGS_CONFIG_DIR); [[ -n "$wcd" ]] || wcd="$ad/Pelican/Wings/config"
+            out=$(printf '%s\n' "$out" | awk -v d="$wcd" '{ print } /^system:/ { print "  user:\n    passwd:\n      enable: true\n      directory: " d "\n  machine_id:\n    enable: false" }')
+            [[ -n "$(_pv PANEL_APP_URL)" ]] && out+=$'\n'"allowed_origins:"$'\n'"- '$(_pv PANEL_APP_URL)'"
             { (umask 077; printf '%s\n' "$out" > "$ad/Pelican/Wings/config/config.yml") 2>/dev/null \
                 || printf '%s\n' "$out" | docker run --rm -i -v "$ad/Pelican/Wings/config:/d" alpine sh -c 'cat > /d/config.yml; chmod 600 /d/config.yml'; } \
                 && echo "[dcs] Pelican: node $fqdn made, Wings' config.yml written" >> "$log"
@@ -19000,6 +19009,12 @@ handle_template_deploy() {
             [[ -n "$_pu" ]] || continue
             _pu_name=$(jq -r '.name' <<< "$_pu"); _pu_svc=$(jq -r '.service // ""' <<< "$_pu"); _pu_port=$(jq -r '.port_var // ""' <<< "$_pu")
             _pu_val=$(printf '%s\n' "$vars" | sed -n "s/^${_pu_name}=//p" | head -n 1)
+            # never a trailing slash: Pelican copies APP_URL into Wings' remote, and Wings then refused every websocket
+            # (Origin https://host != https://host/)
+            if [[ "$_pu_val" == */ ]]; then
+                while [[ "$_pu_val" == */ ]]; do _pu_val="${_pu_val%/}"; done
+                vars=$(printf '%s\n' "$vars" | sed "s|^${_pu_name}=.*|${_pu_name}=${_pu_val}|")
+            fi
             [[ -z "$_pu_val" ]] || continue
             [[ -n "$_pu_dom" ]] || _pu_dom=$(_find_traefik_domain 2>/dev/null)
             _pu_url=""
@@ -19019,6 +19034,15 @@ handle_template_deploy() {
             [[ -n "$_pu_url" ]] || continue
             if grep -q "^${_pu_name}=" <<< "$vars"; then vars=$(printf '%s\n' "$vars" | sed "s|^${_pu_name}=.*|${_pu_name}=${_pu_url}|"); else vars+=$'\n'"${_pu_name}=${_pu_url}"; fi
         done < <(jq -c '.variables[]? | select(.fill == "public_url" and .name != null)' "$tdir/template.json" 2>/dev/null)
+        # A variable that holds an absolute host path in the stack's App-Data ({"fill": "app_data", "path": "<below App-Data>"}),
+        # left empty: for a same-path mount (Pelican's Wings hands that path to Docker as a bind source)
+        local _fa _fa_name _fa_ad
+        while IFS=$'\t' read -r _fa_name _fa; do
+            [[ -n "$_fa_name" && "$_fa" != *..* ]] || continue
+            [[ -z "$(printf '%s\n' "$vars" | sed -n "s/^${_fa_name}=//p" | head -n 1)" ]] || continue
+            [[ -n "$_fa_ad" ]] || { _fa_ad=$(_stack_appdata_override "$target_stack") || _fa_ad="${APP_DATA_DIR:-$target_dir/App-Data}"; [[ "$_fa_ad" == ./* ]] && _fa_ad="$target_dir/${_fa_ad#./}"; }
+            if grep -q "^${_fa_name}=" <<< "$vars"; then vars=$(printf '%s\n' "$vars" | sed "s|^${_fa_name}=.*|${_fa_name}=${_fa_ad}/${_fa}|"); else vars+=$'\n'"${_fa_name}=${_fa_ad}/${_fa}"; fi
+        done < <(jq -r '.variables[]? | select(.fill == "app_data" and .name != null) | [.name, (.path // "")] | @tsv' "$tdir/template.json" 2>/dev/null)
     fi
 
     # --- Required variable validation ---

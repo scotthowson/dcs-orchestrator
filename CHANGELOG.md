@@ -21,6 +21,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A fresh Pelican panel comes with its eggs.** The first run (and any redeploy of a panel that has none) imports the
   268 eggs bundled in `.templates/pelican/eggs` (Scott's panel's set, one panel export per egg, icons inside) through
   the panel's own importer; a panel that has eggs is left alone. On 2026-10-18 Austin's panel had 0 eggs.
+- **Pelican's Wings works with game servers and the browser console from the first deploy** (all found on Austin's
+  live deploy, 2026-10-18). `PANEL_APP_URL` never ends with a slash (any `"fill": "public_url"` value: the slash went
+  into Wings' `remote` and every websocket was refused, "request origin not allowed"); `TRUSTED_PROXIES` is no longer
+  a container env (it overrode the panel's `.env`, so Settings → Trusted Proxies never applied): the first run writes
+  it into `/pelican-data/.env` once; Wings also mounts its config folder at its host path (`WINGS_CONFIG_DIR`, new
+  `"fill": "app_data"` kind: an absolute path below the stack's App-Data), and the generated `config.yml` sets
+  `system.user.passwd.directory` to it (the default `/etc/pelican` made every server fail with "bind source path does
+  not exist: /etc/pelican/passwd"), `system.machine_id.enable: false` and `allowed_origins: [<panel URL>]`.
 - **A template can name each service's subdomain** (`"route_subdomains": {"<service>": "<VARIABLE>"}` in
   template.json), and a VM's route for a service of a bypass template (`pelican-panel` of `pelican`) stays off
   Authelia on the hub like the template's own.

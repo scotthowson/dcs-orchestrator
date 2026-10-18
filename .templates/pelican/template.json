@@ -69,7 +69,7 @@
     {
       "name": "PANEL_TRUSTED_PROXIES",
       "label": "Trusted Proxies",
-      "description": "Which IPs to trust for forwarded HTTPS headers",
+      "description": "Which IPs to trust for forwarded HTTPS headers: written into the panel's .env on the first run; after that the panel's Settings (Trusted Proxies) own it",
       "default": "0.0.0.0/0",
       "required": false,
       "options": [
@@ -164,6 +164,15 @@
       "description": "Absolute host path where game server files are stored",
       "default": "/srv/pelican/servers",
       "required": false
+    },
+    {
+      "name": "WINGS_CONFIG_DIR",
+      "label": "Wings config folder (host path)",
+      "description": "Leave empty: DCS fills it with the absolute path of App-Data/Pelican/Wings/config. Wings sees it at that same path (each game server's passwd files are bind-mounted from it)",
+      "default": "",
+      "required": false,
+      "fill": "app_data",
+      "path": "Pelican/Wings/config"
     }
   ]
 }
