@@ -3,6 +3,17 @@
 All notable changes to DCS Orchestrator are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The Pelican template keeps the panel's cache, sessions and queue in a small Valkey (Redis) container.** With the
+  file cache, the panel's queue worker (root) creates cache folders that the web workers (www-data) cannot write into,
+  and the panel throws `file_put_contents(.../storage/framework/cache/data/..): Failed to open stream` (seen on a live
+  hub on 2026-10-18). The template now adds `pelican-redis` (`valkey/valkey:8-alpine`, no ports, no persistence,
+  128 MB) and points the panel at it (`CACHE_STORE`, `SESSION_DRIVER`, `QUEUE_CONNECTION` = `redis`), the way
+  Pelican recommends for production; the panel starts once Valkey answers its health check.
+
 ## [4.0.58] - 2026-10-16
 
 ### Changed
