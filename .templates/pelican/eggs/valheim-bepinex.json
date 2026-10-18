@@ -1,0 +1,262 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": "https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/valheim/valheim_bepinex/egg-valheim-bep-i-nex.json"
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "Valheim BepINex",
+  "author": "eggs@goover.dev",
+  "uuid": "7cf84d70-b857-4167-b051-ca3e3855c5d7",
+  "description": "A brutal exploration and survival game for 1-10 players, set in a procedurally-generated purgatory\ninspired by viking culture incl the Plugin Framework BepInEx",
+  "icon": null,
+  "tags": [],
+  "features": [
+    "steam_disk_space"
+  ],
+  "docker_images": {
+    "ghcr.io/parkervcp/games:valheim": "ghcr.io/parkervcp/games:valheim"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "export DOORSTOP_ENABLED=1; export DOORSTOP_TARGET_ASSEMBLY=./BepInEx/core/BepInEx.Preloader.dll; export LD_LIBRARY_PATH=\"./doorstop_libs:./linux64:$LD_LIBRARY_PATH\"; export LD_PRELOAD=\"libdoorstop_x64.so:$LD_PRELOAD\"; export LD_LIBRARY_PATH=\"./linux64:$LD_LIBRARY_PATH\"; export SteamAppId=892970; ./valheim_server.x86_64 -nographics -batchmode -name \"{{SERVER_NAME}}\" -port {{SERVER_PORT}} -world \"{{WORLD}}\" -password \"{{PASSWORD}}\" -public {{PUBLIC_SERVER}} -saveinterval {{BACKUP_INTERVAL}} -backups {{BACKUP_COUNT}} -backupshort {{BACKUP_SHORTTIME}} -backuplong {{BACKUP_LONGTIME}} $( [[ {{ENABLE_CROSSPLAY}} -eq 1 ]] && echo \" -crossplay \") > >(sed -uE \"{{CONSOLE_FILTER}}\")"
+  },
+  "config": {
+    "files": "[]",
+    "startup": "{\n    \"done\": \"Game server connected\"\n}",
+    "logs": "[]",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\n# Valheim Installation Script\n#\n# Server Files: /mnt/server\n# Image to install with is 'debian:buster-slim'\napt -y update\napt -y --no-install-recommends --no-install-suggests install wget\n\n## just in case someone removed the defaults.\nif [ \"${STEAM_USER}\" == \"\" ]; then\n    echo -e \"steam user is not set.\n\"\n    echo -e \"Using anonymous user.\n\"\n    # ------------------------------\n    # Steam user defaults\n    # ------------------------------\n    : \"${STEAM_USER:=anonymous}\"\n    : \"${STEAM_PASS:=}\"\n    : \"${STEAM_AUTH:=}\"\nelse\n    echo -e \"user set to ${STEAM_USER}\"\nfi\n\n## download and install steamcmd\ncd /tmp\nmkdir -p /mnt/server/steamcmd\ncurl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz\ntar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd\ncd /mnt/server/steamcmd\n\n# SteamCMD fails otherwise for some reason, even running as root.\n# This is changed at the end of the install process anyways.\nchown -R root:root /mnt\nexport HOME=/mnt/server\n\n## install game using steamcmd\n./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} +app_update ${SRCDS_APPID} ${EXTRA_FLAGS} +quit\n\n## set up 32 bit libraries\nmkdir -p /mnt/server/.steam/sdk32\ncp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so\n\n## set up 64 bit libraries\nmkdir -p /mnt/server/.steam/sdk64\ncp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so\n\necho \"-------------------------------------------------------\"\necho \"installing BepInEx and Selected ModPacks...\"\necho \"-------------------------------------------------------\"\nif ! api_response=$(curl -sfSL -H \"accept: application/json\" \"$BEPINEX_URL\"); then\n        fatal \"Error: could not retrieve BepInEx release info from Thunderstore.io API\"\nfi\n\ndownload_url=$(jq -r  \".latest.download_url\" <<< \"$api_response\" )\nversion_number=$(jq -r  \".latest.version_number\" <<< \"$api_response\" )\n\nif [ ! -z \"$V_MODPACK\" ]\nthen\n#Modpack Name dashes to slashes for URL\nV_MODPACK=$(echo \"$V_MODPACK\" | sed 's/-/\\//g')\n\n#Extract dependencies from ModPack JSON data\nV_MODPACK_DEPENDENCIES=$(curl -sfSL -H \"accept: application/json\" \"https://thunderstore.io/api/experimental/package/${V_MODPACK}\" | jq -r '.dependencies[]')\nfi\n\ncd /mnt/server\n#echo $download_url\nwget --content-disposition $download_url\nunzip -o denikson-BepInExPack_Valheim-${version_number}.zip\ncp -r /mnt/server/BepInExPack_Valheim/* /mnt/server\n\nif [ ! -z \"$V_MODPACK\" ]\nthen\n#Delete Old Mods\nrm -rf /mnt/server/BepInEx/plugins/*\n\n#Download and extract the modpack dlls files\nfor V_MODPACK_DEPENDENCY in $V_MODPACK_DEPENDENCIES; do\n  #ignore bepinex\n  if [[ \"$V_MODPACK_DEPENDENCY\" == *\"denikson-BepInExPack_Valheim\"* ]]; then\n    continue  # Skip this dependency\n  fi\n  \n  #replace dashes with slashes for url\n  V_MODPACK_DEPENDENCY_WITH_SLASH=$(echo \"$V_MODPACK_DEPENDENCY\" | sed 's/-/\\//g')\n  \n  #download dependencies\n  wget -O \"$V_MODPACK_DEPENDENCY.zip\" \"https://thunderstore.io/package/download/$V_MODPACK_DEPENDENCY_WITH_SLASH\"\n\n  #Set the destination directory and ensure it exists\n  destination_directory=\"/mnt/server/BepInEx/plugins\"\n  if [ ! -d \"$destination_directory\" ]; then\n    mkdir -p \"$destination_directory\"\n  fi\n\n  #Extract DLL files from the ZIP and delete the zip file\n  unzip -j \"$V_MODPACK_DEPENDENCY.zip\" \"*.dll\" -d \"$destination_directory\"\n  \n  #Cleanup\n  rm $V_MODPACK_DEPENDENCY.zip\ndone\nfi\n\n##cleanup\necho \"-------------------------------------------------------\"\necho \"cleanup files...\"\necho \"-------------------------------------------------------\"\nrm -fR BepInExPack_Valheim\nrm -fR icon.png\nrm -fR denikson-BepInExPack_Valheim-*\nrm -fR manifest.json\nrm -fR README.m\n\n#rm -fR start_*\n\necho \"-------------------------------------------------------\"\necho \"Installation completed\"\necho \"-------------------------------------------------------\"",
+      "container": "ghcr.io/parkervcp/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": 5,
+      "name": "Auto Update",
+      "description": "",
+      "env_variable": "AUTO_UPDATE",
+      "default_value": "1",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "boolean"
+      ]
+    },
+    {
+      "sort": 10,
+      "name": "Backup Count",
+      "description": "Sets how many automatic backups will be kept. The first is the 'short' backup length, and the rest\nare the 'long' backup length. When default values are used means one backup that is 2 hours old, and\n3 backups that are 12 hours apart. Default: 4.",
+      "env_variable": "BACKUP_COUNT",
+      "default_value": "4",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "numeric",
+        "min:0"
+      ]
+    },
+    {
+      "sort": 9,
+      "name": "Backup Interval",
+      "description": "Change how often the world will save in seconds. Default: 1800 (30 minutes).",
+      "env_variable": "BACKUP_INTERVAL",
+      "default_value": "1800",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "numeric",
+        "min:0"
+      ]
+    },
+    {
+      "sort": 12,
+      "name": "Backup Longtime",
+      "description": "Sets the interval between the subsequent automatic backups in seconds. Default: 43200 (12 hours).",
+      "env_variable": "BACKUP_LONGTIME",
+      "default_value": "43200",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "numeric",
+        "min:0"
+      ]
+    },
+    {
+      "sort": 11,
+      "name": "Backup Shorttime",
+      "description": "Sets the interval between the first automatic backups in seconds. Default: 7200 (2 hours).",
+      "env_variable": "BACKUP_SHORTTIME",
+      "default_value": "7200",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "numeric",
+        "min:0"
+      ]
+    },
+    {
+      "sort": 17,
+      "name": "[System] BepInEx  URL",
+      "description": "",
+      "env_variable": "BEPINEX_URL",
+      "default_value": "https://thunderstore.io/api/experimental/package/denikson/BepInExPack_Valheim/",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "url"
+      ]
+    },
+    {
+      "sort": 14,
+      "name": "[System] Console Filter",
+      "description": "Remove unwanted outputs from the console.",
+      "env_variable": "CONSOLE_FILTER",
+      "default_value": "/^\\(Filename:.*Line:[[:space:]]+[[:digit:]]+\\)$/d; /^([[:space:]]+)?$/d",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "string"
+      ]
+    },
+    {
+      "sort": 6,
+      "name": "Enable Crossplay",
+      "description": "Enable crossplay support",
+      "env_variable": "ENABLE_CROSSPLAY",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "boolean"
+      ]
+    },
+    {
+      "sort": 16,
+      "name": "[System] LD Library Path",
+      "description": "Required to load server libraries.",
+      "env_variable": "LD_LIBRARY_PATH",
+      "default_value": "./linux64",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "string"
+      ]
+    },
+    {
+      "sort": 2,
+      "name": "Server Password",
+      "description": "Server password.",
+      "env_variable": "PASSWORD",
+      "default_value": "secret",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "min:5",
+        "max:20"
+      ]
+    },
+    {
+      "sort": 4,
+      "name": "Public Server",
+      "description": "",
+      "env_variable": "PUBLIC_SERVER",
+      "default_value": "1",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "boolean"
+      ]
+    },
+    {
+      "sort": 1,
+      "name": "Server Name",
+      "description": "Name that appears in server browser.",
+      "env_variable": "SERVER_NAME",
+      "default_value": "My Server",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:60"
+      ]
+    },
+    {
+      "sort": 15,
+      "name": "[System] App ID",
+      "description": "Valheim steam app id for auto updates.",
+      "env_variable": "SRCDS_APPID",
+      "default_value": "896660",
+      "user_viewable": true,
+      "user_editable": false,
+      "rules": [
+        "nullable",
+        "numeric"
+      ]
+    },
+    {
+      "sort": 7,
+      "name": "Beta Branch",
+      "description": "",
+      "env_variable": "SRCDS_BETAID",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "max:30"
+      ]
+    },
+    {
+      "sort": 8,
+      "name": "Beta Password",
+      "description": "",
+      "env_variable": "SRCDS_BETAPASS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "max:30"
+      ]
+    },
+    {
+      "sort": 13,
+      "name": "ModPack",
+      "description": "Enter the Dependency String name for a ModPack to automatically be installed\r\nNOTE: If the modpack Updates, you will need to update this variable with the new Dependency String.\nThis is done to allow Old Versions to be used.\r\nCHANGING THIS REQUIRES A SERVER REINSTALL",
+      "env_variable": "V_MODPACK",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "string",
+        "nullable"
+      ]
+    },
+    {
+      "sort": 3,
+      "name": "World Name",
+      "description": "Name to load if switching between multiple saved worlds.",
+      "env_variable": "WORLD",
+      "default_value": "Dedicated",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "BetterCrewlink Server",
+  "author": "tobiornotto@gmail.com",
+  "uuid": "428c7123-93b6-4b4c-b3b9-71328862ab3e",
+  "description": "An egg designed to allow support for Proximity Chat in Among Us using BetterCrewLink Server",
+  "icon": null,
+  "tags": [],
+  "features": null,
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:nodejs_16": "ghcr.io/parkervcp/yolks:nodejs_16"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "yarn start"
+  },
+  "config": {
+    "files": "{}",
+    "startup": "{\n    \"done\": \"<info> BetterCrewLink Server started\"\n}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\n# Server Files: /mnt/server\r\napt update\r\napt install -y git python3 python3-pip build-essential\r\n\r\nmkdir -p /mnt/server\r\ncd /mnt/server\r\n\r\nINSTALL_REPO=\"https://github.com/OhMyGuus/BetterCrewLink-server.git\"\r\necho -e Install repo set to ${INSTALL_REPO}\r\necho -e \"/mnt/server is empty.\\ncloning files from repo\"\r\necho -e \"running 'git clone --single-branch --branch ${BRANCH} ${INSTALL_REPO} .'\"\r\ngit clone --single-branch --branch ${BRANCH} ${INSTALL_REPO} .\r\n\r\nif [ -f /mnt/server/package.json ]; then\r\n    /usr/local/bin/yarn install\r\nfi\r\n\r\necho -e \"install complete\"\r\nexit 0",
+      "container": "node:16-bookworm",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Github branch",
+      "description": "Select one of the available BetterCrewLink-server branches. Master per default.",
+      "env_variable": "BRANCH",
+      "default_value": "master",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Use HTTPS",
+      "description": "Enables https. You must place privkey.pem and fullchain.pem in your CWD.",
+      "env_variable": "HTTPS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server name",
+      "description": "Specifiy the name of your BetterCrewLink server",
+      "env_variable": "NAME",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:75"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Port",
+      "description": "Choose the port your server should run on",
+      "env_variable": "PORT",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Domain",
+      "description": "Domain of your server or ip of your server",
+      "env_variable": "SERVER_HOSTNAME",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:50"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Path to SSL",
+      "description": "Alternate path to SSL certificates.",
+      "env_variable": "SSLPATH",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:250"
+      ]
+    }
+  ]
+}

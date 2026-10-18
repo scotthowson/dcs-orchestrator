@@ -1,0 +1,73 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:38+00:00",
+  "name": "Krypton",
+  "author": "callum.seabrook@prevarinite.com",
+  "uuid": "fa5489c3-4170-449f-a9cb-167530eacb20",
+  "description": "A fast, lightweight Minecraft server written in Kotlin",
+  "icon": null,
+  "tags": [],
+  "features": [
+    "eula",
+    "java_version",
+    "pid_limit"
+  ],
+  "docker_images": {
+    "Java 8": "ghcr.io/pterodactyl/yolks:java_8",
+    "Java 11": "ghcr.io/pterodactyl/yolks:java_11",
+    "Java 16": "ghcr.io/pterodactyl/yolks:java_16",
+    "Java 17": "ghcr.io/pterodactyl/yolks:java_17",
+    "Java 18": "ghcr.io/pterodactyl/yolks:java_18"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "java -Xms128M -Xmx{{SERVER_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JAR}}"
+  },
+  "config": {
+    "files": "{\n    \"config.conf\": {\n        \"parser\": \"file\",\n        \"find\": {\n            \"  port\": \"  port = {{server.allocations.default.port}}\",\n            \"  ip\": \"  ip = \\\"0.0.0.0\\\"\"\n        }\n    }\n}",
+    "startup": "{\n    \"done\": \")! Type \\\"help\\\" for help.\"\n}",
+    "logs": "{\n    \"custom\": false,\n    \"location\": \"logs\\/latest.log\"\n}",
+    "stop": "stop"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\n#\r\n# Krypton installation script for Pelican\r\n# Created by BomBardyGamer\r\n#\r\n# Server Files: /mnt/server\r\n\r\napt-get update\r\napt-get install -y curl jq unzip\r\n\r\ncd /mnt/server\r\nif [ -z \"${KRYPTON_VERSION}\" ] || [ \"${KRYPTON_VERSION}\" == \"latest\" ]; then\r\n    KRYPTON_VERSION=\"lastSuccessfulBuild\"\r\nfi\r\n\r\nBASE_URL=\"https://ci.kryptonmc.org/job/Krypton/${KRYPTON_VERSION}\"\r\nARTIFACT=`curl \"${BASE_URL}/api/json?tree=artifacts%5BrelativePath%5D\" | jq '.artifacts[0].relativePath' | sed 's/\"//g'`\r\n\r\ncurl -o ${SERVER_JAR} ${BASE_URL}/artifact/${ARTIFACT}\r\nunzip ${SERVER_JAR} \"config.conf\"",
+      "container": "ghcr.io/pelican-eggs/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Krypton Version",
+      "description": "The version of Krypton to download and use.",
+      "env_variable": "KRYPTON_VERSION",
+      "default_value": "latest",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "alpha_num",
+        "between:1,6"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server JAR File",
+      "description": "The name of the server JAR to run the server with.",
+      "env_variable": "SERVER_JAR",
+      "default_value": "Krypton.jar",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    }
+  ]
+}

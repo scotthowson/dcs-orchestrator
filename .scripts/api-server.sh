@@ -16458,16 +16458,19 @@ _pelican_post_deploy() {
     _pelican_eggs "$p" "$log"
 }
 
-# A panel with no eggs gets every egg of the official pelican-eggs index (the panel's own index command, then its
-# importer for each URL); a panel that has eggs is left alone. ~330 eggs, about a minute from GitHub.
+# A panel with no eggs gets the eggs bundled in .templates/pelican/eggs (Scott's set: one panel export per egg, icons
+# inside), through the panel's own importer; a panel that has eggs is left alone.
 _pelican_eggs() {
-    local p="$1" log="$2"
-    docker exec -u www-data "$p" php artisan p:egg:update-index >/dev/null 2>>"$log" || { echo "[dcs] Pelican: the egg index could not be fetched, no eggs loaded" >> "$log"; return 0; }
+    local p="$1" log="$2" src="$TEMPLATES_DIR/pelican/eggs"
+    [[ -d "$src" ]] || return 0
+    docker exec "$p" rm -rf /tmp/dcs-eggs 2>/dev/null
+    docker cp "$src" "$p:/tmp/dcs-eggs" >/dev/null 2>>"$log" || { echo "[dcs] Pelican: the egg bundle could not be copied in, no eggs loaded" >> "$log"; return 0; }
     docker exec -u www-data "$p" php artisan tinker --execute '
         if (App\Models\Egg::count() > 0) { echo "[dcs] Pelican has eggs already: egg import skipped\n"; return; }
         $s = app(App\Services\Eggs\Sharing\EggImporterService::class); $n = 0; $f = 0;
-        foreach (cache("eggs.index", []) as $eggs) { foreach (array_keys($eggs) as $u) { try { $s->fromUrl($u); $n++; } catch (\Throwable $e) { $f++; } } }
-        echo "[dcs] Pelican: $n eggs imported from the egg index ($f skipped)\n";' >>"$log" 2>&1 || true
+        foreach (glob("/tmp/dcs-eggs/*.json") as $j) { try { $s->fromContent(file_get_contents($j), App\Enums\EggFormat::JSON); $n++; } catch (\Throwable $e) { $f++; } }
+        echo "[dcs] Pelican: $n eggs imported from the bundle ($f failed)\n";' >>"$log" 2>&1 || true
+    docker exec "$p" rm -rf /tmp/dcs-eggs 2>/dev/null || true
 }
 
 # After a crowdsec deploy started the container: acquisition of Traefik's
