@@ -10292,9 +10292,9 @@ cst_cloudflare_slowdown() {
         now=$(date +%s)
         cst_call admin POST /crowdsec/cloudflare/sync ''
         cst_j "cloudflare/slowdown ($mode)" '.error.code' rate_limited '.health' ok
-        cst_t "cloudflare/slowdown ($mode): the note says when, not what to lower" '(.error.message | test("slow down") and test("2 min")) and (.error.message | test("CAPACITY") | not)'
+        cst_t "cloudflare/slowdown ($mode): the note says when, not what to lower" '(.error.message | test("rate-limiting list changes; next try at [0-9]{2}:[0-9]{2}")) and (.error.message | test("CAPACITY") | not)'
         until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
-        check "cloudflare/slowdown ($mode): the next try in 2 minutes" yes "$( (( until >= now + 110 && until <= now + 240 )) && echo yes || echo no)"
+        check "cloudflare/slowdown ($mode): the next try in 5 minutes" yes "$( (( until >= now + 295 && until <= now + 420 )) && echo yes || echo no)"
         cst_call admin GET /crowdsec/status
         cst_t "cloudflare/slowdown ($mode): no issue on the CrowdSec page" '[.issues[] | select(.code == "cloudflare_sync")] | length == 0'
         # while it waits, Cloudflare is not asked
@@ -10310,7 +10310,7 @@ cst_cloudflare_slowdown() {
         cfb_dec '[{"id": 150, "value": "198.51.100.50", "origin": "crowdsec"}]'
         cst_call admin POST /crowdsec/cloudflare/sync ''
     done
-    # twice in a row: 2 minutes, then 5
+    # twice in a row: 5 minutes, then 15
     cfb_cfg '{"ratelimit_puts": 2, "ratelimit_mode": "http"}'
     cfb_dec '[{"id": 152, "value": "198.51.100.52", "origin": "crowdsec"}]'
     cst_call admin POST /crowdsec/cloudflare/sync ''
@@ -10318,8 +10318,8 @@ cst_cloudflare_slowdown() {
     now=$(date +%s)
     cst_call admin POST /crowdsec/cloudflare/sync ''
     until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
-    check "cloudflare/slowdown: a second time in a row waits 5 minutes" yes "$( (( until >= now + 290 && until <= now + 420 )) && echo yes || echo no)"
-    cst_t "cloudflare/slowdown: …and says so" '.error.message | test("5 min")'
+    check "cloudflare/slowdown: a second time in a row waits 15 minutes" yes "$( (( until >= now + 895 && until <= now + 1020 )) && echo yes || echo no)"
+    cst_t "cloudflare/slowdown: …and says so" '.error.message | test("next try at [0-9]{2}:[0-9]{2}")'
     cfb_stset '.backoff.until = 0'
     cst_call admin POST /crowdsec/cloudflare/sync ''
     cst_j "cloudflare/slowdown: then it goes" '.error' null
@@ -10409,54 +10409,84 @@ cst_cloudflare_slowdown() {
     cst_env CLOUDFLARE_BOUNCER_PUSH_GAP 0
 }
 
-# -- a list Cloudflare got stuck on: every change refused with "slow down" (429, its retry-after 60 s) while the account's budget is untouched
+# -- Cloudflare rate-limiting changes of the list (10040, the free plan's live answer), and a list whose changes it never finishes
 cfb_list_ips() { cfb_st "[.lists[][] | select(.name == \"$1\") | .items[].ip] | sort | join(\" \")"; }
 cfb_plan() { cfb_cfg "{\"max_lists\": $2, \"zones\": [{\"id\": \"zone-example-test\", \"name\": \"example.test\", \"account\": {\"id\": \"acc-lab\", \"name\": \"Lab account\"}, \"plan\": \"$1\"}]}"; }   # the zone's plan, the lists it holds
+cfb_state() { jq -r "$1" "$CST/.data/crowdsec/cloudflare.json"; }
+cfb_sync_quick() { cfb_src eval "_crowdsec_cf_lib; CFB_OP_POLLS=1; _cfb_sync ${1:-}" >/dev/null; }   # a sync that follows a bulk operation one second
 cst_cloudflare_stuck() {
-    local now until a0
+    local now until a0 p0 l0 waits="" i
     cfb_dec '[{"id": 170, "value": "198.51.100.70", "origin": "crowdsec"}]'
     cst_call admin POST /crowdsec/cloudflare/sync ''
     check "cloudflare/stuck: a list to start from" "198.51.100.70" "$(cfb_items)"
+    # 10040 on every change of the list: rate_limited, never a fresh list; the waits 5, 15, 60, 180 min, then 6 h
     cfb_cfg '{"stick_lists": true}'
     cfb_dec '[{"id": 171, "value": "198.51.100.71", "origin": "crowdsec"}]'
+    a0=$(cst_audit_n crowdsec_cloudflare_recreate); l0=$(cfb_calls '^POST /client/v4/accounts/acc-lab/rules/lists$')
     now=$(date +%s)
     cst_call admin POST /crowdsec/cloudflare/sync ''
-    cst_j "cloudflare/stuck: within the two hours it is a slow down" '.error.code' rate_limited
+    cst_j "cloudflare/10040: rate_limited, not list_stuck" '.error.code' rate_limited
     until=$(jq -r '.error.retry_at' <<< "$CST_BODY")
-    check "cloudflare/retry-after: Cloudflare's 60 s, not the 2 minutes of the ladder" yes "$( (( until >= now + 55 && until <= now + 90 )) && echo yes || echo no)"
-    cst_t "cloudflare/retry-after: …and says so" '.error.message | test("next try in 1 min")'
-    check "cloudflare/stuck: the refusal is counted" 1 "$(jq -r '.rl_streak.count' "$CST/.data/crowdsec/cloudflare.json")"
-    # the streak began more than two hours ago, room for a second list (Pro): a new list, filled, the rule pointed at it, the old one deleted
-    cfb_plan pro 10
-    cfb_stset '.backoff.until = 0 | .rl_streak.since = (now - 7300 | floor)'
-    a0=$(cst_audit_n crowdsec_cloudflare_recreate)
+    check "cloudflare/10040: the first wait is 5 minutes" yes "$( (( until >= now + 295 && until <= now + 330 )) && echo yes || echo no)"
+    cst_t "cloudflare/10040: …the message says when" '.error.message | test("^Cloudflare is rate-limiting list changes; next try at [0-9]{2}:[0-9]{2}\\.$")'
+    for i in 1 2 3 4 5; do
+        cfb_stset '.backoff.until = 0'; now=$(date +%s); cfb_sync_quick
+        waits+="$(( ($(cfb_state '.backoff.until') - now + 30) / 60 )) "
+    done
+    check "cloudflare/10040: each refusal in a row waits longer: 15, 60, 180 min, then 6 h" "15 60 180 360 360 " "$waits"
+    check "cloudflare/10040: no fresh list was tried, nothing recreated" "$a0 $l0 dcs_crowdsec_bans" "$(cst_audit_n crowdsec_cloudflare_recreate) $(cfb_calls '^POST /client/v4/accounts/acc-lab/rules/lists$') $(cfb_st '[.lists[][] | .name] | join(" ")')"
+    check "cloudflare/10040: still rate_limited, the message not repeated in itself" "rate_limited 1" "$(cfb_state '.error.code') $(cfb_state '.error.message' | grep -o 'rate-limiting' | wc -l)"
+    # Sync now: not within 5 minutes of the last try; after them it tries, and a push that goes through resets the waits
+    p0=$(cfb_puts)
     cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/10040: Sync now within 5 minutes of the last try sends nothing" "$p0" "$(cfb_puts)"
+    cst_t "cloudflare/10040: …and says from when it can" '.message | test("rate-limiting list changes; next try at .* Sync now can try again from [0-9]{2}:[0-9]{2}\\.$")'
+    cfb_cfg '{"unstick_lists": true}'
+    cfb_stset '.push_backoff.at = (now - 301 | floor)'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/10040: Sync now after 5 minutes tries, and the push goes through" "$((p0 + 1)) 198.51.100.71" "$(cfb_puts) $(cfb_items)"
+    check "cloudflare/10040: …which resets the waits" "null null null" "$(cfb_state '"\(.error) \(.backoff) \(.push_backoff)"')"
+    # the item set unchanged: no PUT at all, even when the list and the rules are read back
+    cfb_stset '.last_verify = 0'
+    cst_call admin POST /crowdsec/cloudflare/sync ''
+    check "cloudflare/unchanged: the same items are not sent again" "$((p0 + 1))" "$(cfb_puts)"
+
+    # a change Cloudflare leaves pending for more than two hours, room for a second list (Pro): a fresh list, the rule pointed at it
+    cfb_plan pro 10
+    cfb_cfg '{"ops_pending": "dcs_crowdsec_bans"}'
+    cfb_dec '[{"id": 172, "value": "198.51.100.72", "origin": "crowdsec"}]'
+    cfb_sync_quick force
+    check "cloudflare/stuck: a pending change is slow, not stuck yet" "cloudflare_slow 1" "$(cfb_state '"\(.error.code) \(.op_streak.count)"')"
+    cfb_stset '.backoff.until = 0 | .op_streak.since = (now - 7300 | floor)'
+    a0=$(cst_audit_n crowdsec_cloudflare_recreate)
+    cfb_sync_quick force
+    cst_call admin GET /crowdsec/cloudflare
     cst_j "cloudflare/stuck: made afresh" '.error' null '.health' ok '.cloudflare.list' dcs_crowdsec_bans_2
-    check "cloudflare/stuck: the new list holds the bans" "198.51.100.71" "$(cfb_list_ips dcs_crowdsec_bans_2)"
+    check "cloudflare/stuck: the new list holds the bans" "198.51.100.72" "$(cfb_list_ips dcs_crowdsec_bans_2)"
     check "cloudflare/stuck: …the rule blocks it" 'block|true|ip.src in $dcs_crowdsec_bans_2' "$(cfb_rules)"
     check "cloudflare/stuck: …the stuck list is gone" "dcs_crowdsec_bans_2" "$(cfb_st '[.lists[][] | .name] | join(" ")')"
-    check "cloudflare/stuck: …the state is clean" "null null dcs_crowdsec_bans_2" "$(jq -r '"\(.rl_streak) \(.recreate_requested) \(.list_name)"' "$CST/.data/crowdsec/cloudflare.json")"
+    check "cloudflare/stuck: …the state is clean" "null null dcs_crowdsec_bans_2" "$(cfb_state '"\(.op_streak) \(.recreate_requested) \(.list_name)"')"
     check "cloudflare/stuck: …audited" "$((a0 + 1))" "$(cst_audit_n crowdsec_cloudflare_recreate)"
     cst_t "cloudflare/stuck: …and named on the page" '.sync.repaired.what | join(" ") | test("fresh list dcs_crowdsec_bans_2")'
-    cfb_dec '[{"id": 172, "value": "198.51.100.72", "origin": "crowdsec"}]'
-    cst_call admin POST /crowdsec/cloudflare/sync ''
-    cst_j "cloudflare/stuck: the next change is taken" '.error' null
-    check "cloudflare/stuck: …by the new list" "198.51.100.72" "$(cfb_list_ips dcs_crowdsec_bans_2)"
-    # the free plan's one list: the rule out, the list deleted and made again under its name, the rule back
-    cfb_plan free 1; cfb_cfg '{"stick_lists": true}'
+    # the free plan's one list: stuck, but no fresh list is attempted; said plainly
+    cfb_plan free 1; cfb_cfg '{"ops_pending": "dcs_crowdsec_bans_2"}'
     cfb_dec '[{"id": 173, "value": "198.51.100.73", "origin": "crowdsec"}]'
-    cst_call admin POST /crowdsec/cloudflare/sync ''
-    cst_j "cloudflare/stuck, one list: a slow down first" '.error.code' rate_limited
-    cfb_stset '.backoff.until = 0 | .rl_streak.since = (now - 7300 | floor)'
-    a0=$(cst_audit_n crowdsec_cloudflare_recreate)
-    cst_call admin POST /crowdsec/cloudflare/sync ''
-    cst_j "cloudflare/stuck, one list: made again" '.error' null '.cloudflare.list' dcs_crowdsec_bans_2
-    cst_t "cloudflare/stuck, one list: …said so" '.sync.repaired.what | join(" ") | test("made again")'
-    check "cloudflare/stuck, one list: one list, the bans in it" "dcs_crowdsec_bans_2|198.51.100.73" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_list_ips dcs_crowdsec_bans_2)"
-    check "cloudflare/stuck, one list: …not the stuck one" "false" "$(cfb_st '[.lists[][] | .stuck // false] | any')"
-    check "cloudflare/stuck, one list: …the rule is back" 'block|true|ip.src in $dcs_crowdsec_bans_2' "$(cfb_rules)"
-    check "cloudflare/stuck, one list: …audited" "$((a0 + 1))" "$(cst_audit_n crowdsec_cloudflare_recreate)"
+    cfb_sync_quick force
+    cfb_stset '.backoff.until = 0 | .op_streak.since = (now - 7300 | floor)'
+    a0=$(cst_audit_n crowdsec_cloudflare_recreate); l0=$(cfb_calls '^(POST|DELETE) /client/v4/accounts/acc-lab/rules/lists')
+    cfb_sync_quick force
+    check "cloudflare/stuck, one list: no fresh list attempted" "$l0 dcs_crowdsec_bans_2" "$(cfb_calls '^(POST|DELETE) /client/v4/accounts/acc-lab/rules/lists') $(cfb_st '[.lists[][] | .name] | join(" ")')"
+    check "cloudflare/stuck, one list: list_quota, said plainly" "list_quota 1 0" "$(cfb_state '.error.code') $(cfb_state '.error.message' | grep -c 'has no room for a second list, so DCS does not make a fresh one') $(cfb_state '.error.message' | grep -c 'making a fresh list failed')"
+    check "cloudflare/stuck, one list: …and waits 6 hours" yes "$( (( $(cfb_state '.backoff.until') >= $(date +%s) + 21000 )) && echo yes || echo no)"
+    check "cloudflare/stuck, one list: …the rule still blocks the list" 'block|true|ip.src in $dcs_crowdsec_bans_2' "$(cfb_rules)"
+    # 10019 (the account at its list quota, whatever its plan says): the try stops there, nothing else is made or deleted
+    cfb_plan pro 1
+    cfb_stset '.backoff.until = 0 | .op_streak.since = (now - 7300 | floor) | .error = null'
+    cfb_dec '[{"id": 174, "value": "198.51.100.74", "origin": "crowdsec"}]'
+    cfb_sync_quick force
+    check "cloudflare/10019: list_quota, plainly, the one list kept" "list_quota 1 dcs_crowdsec_bans_2" "$(cfb_state '.error.code') $(cfb_state '.error.message' | grep -c 'no room for a second list') $(cfb_st '[.lists[][] | .name] | join(" ")')"
     # by hand (Needs you's button): admins only; back to dcs_crowdsec_bans when there is room
+    cfb_cfg '{"ops_pending": ""}'
     cst_call viewer POST /crowdsec/cloudflare/recreate ''
     cst_is "cloudflare/recreate: a viewer may not" 403
     cfb_plan pro 10
@@ -10464,10 +10494,14 @@ cst_cloudflare_stuck() {
     cst_is "cloudflare/recreate: by hand" 200
     cst_j "cloudflare/recreate: the list" '.cloudflare.list' dcs_crowdsec_bans '.error' null
     cst_t "cloudflare/recreate: …the answer says what was done" '.message | test("^Made afresh: a fresh list dcs_crowdsec_bans ")'
-    check "cloudflare/recreate: one list, the bans, the rule" "dcs_crowdsec_bans|198.51.100.73|block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_items)|$(cfb_rules)"
+    check "cloudflare/recreate: one list, the bans, the rule" "dcs_crowdsec_bans|198.51.100.74|block|true|ip.src in \$dcs_crowdsec_bans" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_items)|$(cfb_rules)"
     cfb_plan free 1
+    cst_call admin POST /crowdsec/cloudflare/recreate ''
+    cst_t "cloudflare/recreate: on a one-list plan it is refused, said plainly" '.message | test("no room for a second list")'
+    check "cloudflare/recreate: …the list untouched" "dcs_crowdsec_bans|198.51.100.74" "$(cfb_st '[.lists[][] | .name] | join(" ")')|$(cfb_items)"
+    cfb_stset '.error = null | del(.backoff)'
     # Needs you: a list that could not be made afresh names the fix
-    cfb_stset '.error = {code: "list_stuck", message: "Cloudflare refuses every change to the list dcs_crowdsec_bans.", at: (now | floor), since: (now | floor)}'
+    cfb_stset '.error = {code: "list_stuck", message: "Cloudflare does not finish changes to the list dcs_crowdsec_bans.", at: (now | floor), since: (now | floor)}'
     cst_call admin GET /crowdsec/status
     cst_j "cloudflare/stuck: Needs you has the button" '[.issues[] | select(.code == "cloudflare_sync")][0].fix.path' /crowdsec/cloudflare/recreate \
         '[.issues[] | select(.code == "cloudflare_sync")][0].fix.method' POST

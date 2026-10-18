@@ -64,9 +64,15 @@ CFB_STUCK_AFTER=600
 # 15 minutes); the least time between two replacements of the list's items
 CFB_RL_MARK="$CROWDSEC_STATE_DIR/.cloudflare.ratelimited"
 CFB_BACKOFF=(120 300 900)
-# a list whose every change Cloudflare refuses with "slow down" while the account's budget is untouched (a bulk operation stuck at
-# Cloudflare: it never clears) for this long is made afresh (_cfb_recreate). CFB_STUCK_AFTER above is the lock's, not this
+# a change of the list that Cloudflare leaves pending or failed (its bulk operation) for this long is a stuck list, made afresh
+# (_cfb_recreate) when the account has room for another list. CFB_STUCK_AFTER above is the lock's, not this
 CFB_LIST_STUCK_AFTER=7200
+# Cloudflare rate-limiting changes of the list (10040, or a 429 to the PUT of its items): the waits before the next push, one step
+# longer each time in a row, back to the first after a push that succeeds. Sync now may try sooner, but not within CFB_PUSH_MIN_RETRY
+CFB_PUSH_BACKOFF=(300 900 3600 10800 21600)
+CFB_PUSH_MIN_RETRY=300
+# how many seconds a push follows its bulk operation before it leaves it for the next sync
+CFB_OP_POLLS=90
 CFB_PUSH_GAP=60   # CLOUDFLARE_BOUNCER_PUSH_GAP overrides it (0-600 s)
 CFB_LOG="${API_LOG_FILE:-$BASE_DIR/logs/api-server.log}"
 # the origins of CrowdSec's own bans (its scenarios, the page, an import, the console) and of the community's
@@ -247,16 +253,26 @@ _cfb_list_load() {
     [[ "$CFB_LIST" == "$CFB_LIST_BASE" || "$CFB_LIST" == "${CFB_LIST_BASE}_2" ]] || CFB_LIST="$CFB_LIST_BASE"
 }
 
-# _cfb_list_stuck — called on a "slow down" answer to a change of the list: counts it in the state's rl_streak (a streak whose last answer
-# is older than CFB_LIST_STUCK_AFTER starts again) and returns 0 when the streak has lasted longer than CFB_LIST_STUCK_AFTER while the
-# account's budget is far from spent (r of the ratelimit header): then it is the list, not DCS's pace
-_cfb_list_stuck() {
+# _cfb_op_stuck — a change of the list Cloudflare left pending or failed: counted in the state's op_streak (since the first such
+# change in a row; a change that completes ends it). 0 when the streak has lasted longer than CFB_LIST_STUCK_AFTER: the list is stuck
+_cfb_op_stuck() {
     local now age
     now=$(date +%s)
-    _cfb_state_set '.rl_streak = (if (.rl_streak.at // 0) < ($now - $gap) then {since: $now, count: 0} else .rl_streak end | .at = $now | .count += 1)' \
-        --argjson now "$now" --argjson gap "$CFB_LIST_STUCK_AFTER" >/dev/null 2>&1
-    age=$(_cfb_state | jq -r --argjson now "$now" '$now - (.rl_streak.since // $now)')
-    [[ "$age" =~ ^[0-9]+$ ]] && (( age > CFB_LIST_STUCK_AFTER )) && [[ "$CFB_RL_LEFT" =~ ^[0-9]+$ ]] && (( 10#$CFB_RL_LEFT >= 100 ))
+    _cfb_state_set '.op_streak = ((.op_streak // {since: $now, count: 0}) | .at = $now | .count += 1)' --argjson now "$now" >/dev/null 2>&1
+    age=$(_cfb_state | jq -r --argjson now "$now" '$now - (.op_streak.since // $now)')
+    [[ "$age" =~ ^[0-9]+$ ]] && (( age > CFB_LIST_STUCK_AFTER ))
+}
+
+# _cfb_push_ratelimited — Cloudflare rate-limits changes of the list (10040): no fresh list (it would not help, and it costs list
+# operations of the same budget), the next push after the next step of CFB_PUSH_BACKOFF; the error says when
+_cfb_push_ratelimited() {
+    local now step delay at
+    now=$(date +%s)
+    step=$(_cfb_state | jq -r --argjson max "${#CFB_PUSH_BACKOFF[@]}" '((.push_backoff.step // 0) + 1) | if . > $max then $max else . end')
+    delay=${CFB_PUSH_BACKOFF[$((step - 1))]}
+    at=$(date -d "@$((now + delay))" '+%H:%M' 2>/dev/null)
+    _cfb_state_set '.push_backoff = {step: $s, at: $now} | .backoff = {step: $s, until: ($now + $d)}' --argjson s "$step" --argjson d "$delay" --argjson now "$now" >/dev/null 2>&1
+    _cfb_fail rate_limited "Cloudflare is rate-limiting list changes; next try at $at."
 }
 
 # _cfb_fail CODE MESSAGE — remember an error (since: when this run of errors began) and set CFB_ERR_CODE / CFB_ERR
@@ -288,6 +304,9 @@ _cfb_cf_ratelimited() {
     [[ "$CFB_CODE" == 429 ]] && return 0
     jq -e '[(.errors // [])[]?.message, (.result.error? // empty)] | map(select(. != null) | tostring) | any(test("rate ?limit|too many"; "i"))' <<< "$CFB_BODY" >/dev/null 2>&1
 }
+
+# _cfb_cf_has_code N — Cloudflare's last answer carries the error code N (10040: rate-limited; 10019: the account is at its list quota)
+_cfb_cf_has_code() { jq -e --argjson c "$1" '[(.errors // [])[]?.code] | index($c) != null' <<< "$CFB_BODY" >/dev/null 2>&1; }
 
 # =============================================================================
 # The token's checks: zones, accounts, rights (reads only, nothing is changed)
@@ -525,8 +544,7 @@ _cfb_push() {
     local acc="$1" lid="$2" items="$3" op st i
     if ! _cfb_cfj PUT "/accounts/$acc/rules/lists/$lid/items" "$items"; then
         local m; m=$(_cfb_cf_msg)
-        if _cfb_cf_ratelimited && _cfb_list_stuck; then
-            _cfb_fail list_stuck "Cloudflare refuses every change to the list $CFB_LIST (a change of the list got stuck at Cloudflare). DCS makes a fresh list and points the rule at it."
+        if _cfb_cf_has_code 10040 || _cfb_cf_ratelimited; then _cfb_push_ratelimited
         elif _cfb_cf_denied; then _cfb_fail missing_permissions "Cloudflare refused to change the list: the token needs Account → Account Filter Lists → Edit."
         elif [[ "$CFB_CODE" == 404 ]]; then _cfb_fail list_gone "The list $CFB_LIST is gone at Cloudflare; DCS makes it again on the next sync."
         elif [[ "$m" =~ [Mm]aximum|[Qq]uota ]]; then _cfb_fail list_full "Cloudflare refused the addresses: $m. Lower the capacity (CLOUDFLARE_BOUNCER_CAPACITY), or free items in your other lists."
@@ -534,22 +552,25 @@ _cfb_push() {
         return 1
     fi
     op=$(jq -r '.result.operation_id // ""' <<< "$CFB_BODY")
-    [[ -n "$op" ]] || return 0
-    for (( i = 0; i < 90; i++ )); do
+    [[ -n "$op" ]] || { _cfb_state_set 'del(.op_streak)' >/dev/null 2>&1; return 0; }
+    for (( i = 0; i < CFB_OP_POLLS; i++ )); do
         _cfb_cf GET "/accounts/$acc/rules/lists/bulk_operations/$op" || { (( i < 3 )) && { sleep 1; continue; }; _cfb_fail cloudflare_error "Cloudflare did not say how the change of the list went: $(_cfb_cf_msg)"; return 1; }
         st=$(jq -r '.result.status // ""' <<< "$CFB_BODY")
         case "$st" in
-            completed) return 0 ;;
+            completed) _cfb_state_set 'del(.op_streak)' >/dev/null 2>&1; return 0 ;;
             failed)
                 local e; e=$(jq -r '.result.error // "no reason given"' <<< "$CFB_BODY")
-                if [[ "$e" =~ [Mm]aximum|[Qq]uota ]] && ! _cfb_cf_ratelimited; then _cfb_fail list_full "Cloudflare could not store the addresses: $e. Lower the capacity (CLOUDFLARE_BOUNCER_CAPACITY), or free items in your other lists."
+                if _cfb_cf_ratelimited; then _cfb_push_ratelimited
+                elif [[ "$e" =~ [Mm]aximum|[Qq]uota ]]; then _cfb_fail list_full "Cloudflare could not store the addresses: $e. Lower the capacity (CLOUDFLARE_BOUNCER_CAPACITY), or free items in your other lists."
+                elif _cfb_op_stuck; then _cfb_fail list_stuck "Cloudflare has failed every change to the list $CFB_LIST for more than $(( CFB_LIST_STUCK_AFTER / 3600 )) hours (the last: $e)."
                 else _cfb_fail cloudflare_error "Cloudflare could not store the addresses: $e"; fi
                 return 1 ;;
         esac
         sleep 1
     done
     _cfb_state_set '.pending_op = {account: $a, id: $o, at: $now}' --arg a "$acc" --arg o "$op" --argjson now "$(date +%s)" >/dev/null 2>&1
-    _cfb_fail cloudflare_slow "Cloudflare is still storing the addresses (operation $op); the next sync looks again."
+    if _cfb_op_stuck; then _cfb_fail list_stuck "Cloudflare has left every change to the list $CFB_LIST pending for more than $(( CFB_LIST_STUCK_AFTER / 3600 )) hours (operation $op)."
+    else _cfb_fail cloudflare_slow "Cloudflare is still storing the addresses (operation $op); the next sync looks again."; fi
     return 1
 }
 
@@ -584,7 +605,7 @@ _cfb_recreate() {
     local -a accs=() zs=() made=() pointed=()
     CFB_RECREATE_DID=""; now=$(date +%s)
     alt="$CFB_LIST_BASE"; [[ "$old" == "$CFB_LIST_BASE" ]] && alt="${CFB_LIST_BASE}_2"
-    _cfb_state_set 'del(.recreate_requested)' >/dev/null 2>&1
+    _cfb_state_set 'del(.recreate_requested) | del(.op_streak)' >/dev/null 2>&1
     # the "slow down" that led here is not to turn the errors below into one
     rm -f "$CFB_RL_MARK"
     mapfile -t accs < <(jq -r 'map(.account) | unique[]' <<< "$zones")
@@ -594,7 +615,7 @@ _cfb_recreate() {
         _cfb_list_delete "$acc" "$alt" || { fail="Cloudflare would not list or delete the account's lists: $(_cfb_cf_msg)"; break; }
         _cfb_cf GET "/accounts/$acc/rules/lists" || { fail="Cloudflare would not list the account's lists: $(_cfb_cf_msg)"; break; }
         n=$(jq '(.result // []) | length' <<< "$CFB_BODY")
-        jq -e --arg a "$acc" --argjson n "$n" --argjson max "$CFB_FREE_LISTS" 'map(select(.account == $a)) | all((.plan // "") == "free" or (.plan // "") == "") and $n >= $max' <<< "$zones" >/dev/null 2>&1 && room=false
+        jq -e --arg a "$acc" --argjson n "$n" --argjson max "$CFB_FREE_LISTS" 'map(select(.account == $a)) | all((.plan // "") == "free" or (.plan // "") == "") and $n >= $max' <<< "$zones" >/dev/null 2>&1 && { room=false; break; }
     done
     # 2a. the new list under the other name, filled, the rules pointed at it, the old one deleted
     if [[ -z "$fail" && "$room" == true ]]; then
@@ -612,7 +633,7 @@ _cfb_recreate() {
             err="$CFB_ERR_CODE"; CFB_LIST="$old"
             for z in "${pointed[@]}"; do _cfb_rule_ensure "$z" >/dev/null 2>&1; done
             for n in "${made[@]}"; do _cfb_cf DELETE "/accounts/${n%%$'\t'*}/rules/lists/${n#*$'\t'}" >/dev/null 2>&1; done
-            # the plan holds fewer lists than its name says: the same name, made again
+            # the account is at its list quota (10019): no room after all
             [[ "$err" == list_quota ]] && { room=false; fail=""; }
         else
             for n in "${made[@]}"; do
@@ -625,21 +646,14 @@ _cfb_recreate() {
             _cfb_state_set '.list_name = $n' --arg n "$alt" >/dev/null 2>&1
         fi
     fi
-    # 2b. one list per account: the rule out, the list deleted and made again under its name, the items, the rule back
+    # no room for a second list (the free plan's one list, or the account at its quota): no fresh list is attempted. Deleting the only
+    # list and making it again would take the rule off the zones and spend list operations Cloudflare may be rate-limiting
     if [[ -z "$fail" && "$room" != true ]]; then
         CFB_LIST="$old"
-        for z in "${zs[@]}"; do _cfb_rule_remove "$z"; (( $? == 1 )) && { fail="Cloudflare would not remove the custom rule in zone $z: $(_cfb_cf_msg)"; break; }; done
-        if [[ -z "$fail" ]]; then
-            for acc in "${accs[@]}"; do
-                _cfb_list_delete "$acc" "$old" || { fail="Cloudflare would not delete the list $old: $(_cfb_cf_msg)"; break; }
-                _cfb_list_ensure "$acc" || { fail="$CFB_ERR"; break; }
-                _cfb_state_set '.accounts = ((.accounts // []) | map(if .id == $a then .list_id = $l else . end))' --arg a "$acc" --arg l "$CFB_LIST_ID" >/dev/null 2>&1
-                _cfb_push "$acc" "$CFB_LIST_ID" "$items" || { fail="$CFB_ERR"; break; }
-            done
-        fi
-        # the rule comes back whatever happened above (it blocks what the list holds)
-        for z in "${zs[@]}"; do _cfb_rule_ensure "$z" || { [[ -n "$fail" ]] || fail="$CFB_ERR"; }; done
-        [[ -n "$fail" ]] || CFB_RECREATE_DID="the list $old deleted and made again (the plan holds one list: the rule was off for a few seconds)"
+        _cfb_log "no fresh list: the account has no room for another list"
+        _cfb_state_set '.backoff = {step: 3, until: ($now + $d)}' --argjson now "$now" --argjson d "${CFB_PUSH_BACKOFF[-1]}" >/dev/null 2>&1
+        _cfb_fail list_quota "Cloudflare will not change the list $CFB_LIST, and this account's plan has no room for a second list, so DCS does not make a fresh one. Delete $CFB_LIST at Cloudflare (Manage Account → Configurations → Lists) and DCS makes it again on the next sync, or wait: DCS tries the list again in $(( CFB_PUSH_BACKOFF[-1] / 3600 )) hours."
+        return 1
     fi
     if [[ -n "$fail" ]]; then
         CFB_LIST="$old"
@@ -647,10 +661,9 @@ _cfb_recreate() {
         _api_audit_log "${CLIENT_IP:-local}" "CROWDSEC_CLOUDFLARE_RECREATE" "${AUTH_USERNAME:-}" "failed: $fail"
         # not again before 15 minutes (each try makes and deletes lists at Cloudflare)
         _cfb_state_set '.backoff = {step: 3, until: ($now + $d)}' --argjson now "$now" --argjson d "${CFB_BACKOFF[-1]}" >/dev/null 2>&1
-        _cfb_fail list_stuck "Cloudflare refuses every change to the list $CFB_LIST (a change of the list got stuck at Cloudflare), and making a fresh list failed: $fail"
+        _cfb_fail list_stuck "Cloudflare does not finish changes to the list $CFB_LIST, and a fresh list could not be made: ${fail%.}."
         return 1
     fi
-    _cfb_state_set 'del(.rl_streak)' >/dev/null 2>&1
     _cfb_log "made afresh: $CFB_RECREATE_DID"
     _api_audit_log "${CLIENT_IP:-local}" "CROWDSEC_CLOUDFLARE_RECREATE" "${AUTH_USERNAME:-}" "$CFB_RECREATE_DID"
     return 0
@@ -882,12 +895,15 @@ _cfb_sync_locked() {
     n_items=$(jq 'length' <<< "$items")
     [[ "$hash" == "$(jq -r '.hash // ""' <<< "$st")" ]] && [[ "$(jq -r --argjson n "$n_items" '(.cf_items // $n) == $n' <<< "$st")" == true ]] && in_step=true
     if [[ "$recreate" != true && "$in_step" == true && ( "$verify" != true || "$(jq -r '.error.code // ""' <<< "$st")" == rate_limited ) ]]; then
-        _cfb_state_set '.last_sync = $now | .error = null | del(.backoff) | del(.rl_streak) | del(.settings_changed) | .dropped = $d | .skipped = $s' --argjson now "$now" \
+        _cfb_state_set '.last_sync = $now | .error = null | del(.backoff) | del(.push_backoff) | del(.op_streak) | del(.settings_changed) | .dropped = $d | .skipped = $s' --argjson now "$now" \
             --argjson d "$(jq '.dropped' <<< "$itemsj")" --argjson s "$(jq '.skipped' <<< "$itemsj")" >/dev/null 2>&1
         return 0
     fi
-    # Cloudflare asked to slow down: nothing is asked of it before the wait is over (the error says until when)
-    if [[ "$recreate" != true ]] && (( now < $(jq -r '.backoff.until // 0' <<< "$st") )); then return 0; fi
+    # Cloudflare asked to slow down: nothing is asked of it before the wait is over (the error says until when). Sync now may try a
+    # rate-limited push sooner, but never within CFB_PUSH_MIN_RETRY of the last try
+    if [[ "$recreate" != true ]] && (( now < $(jq -r '.backoff.until // 0' <<< "$st") )); then
+        [[ "$force" == force ]] && (( now - $(jq -r '.push_backoff.at // 0' <<< "$st") >= CFB_PUSH_MIN_RETRY )) || return 0
+    fi
     # the structure: the zones of the domains (looked up again when the domains changed), the list of each account, the rule of each zone
     local zones accounts
     zones=$(jq -c '.zones // []' <<< "$st"); accounts=$(jq -c '.accounts // []' <<< "$st")
@@ -957,7 +973,7 @@ _cfb_sync_locked() {
     if [[ "$push" == true ]]; then
         _cfb_state_set '.last_push = $now | .accounts = (.accounts | map(.items = $n))' --argjson now "$(date +%s)" --argjson n "$(jq 'length' <<< "$items")" >/dev/null 2>&1
     fi
-    _cfb_state_set '.hash = $h | .raw_hash = $rh | .items = $n | .dropped = $d | .skipped = $s | .last_sync = $now | .error = null | del(.pending_op) | del(.backoff) | del(.rl_streak) | del(.push_waiting) | del(.settings_changed)
+    _cfb_state_set '.hash = $h | .raw_hash = $rh | .items = $n | .dropped = $d | .skipped = $s | .last_sync = $now | .error = null | del(.pending_op) | del(.backoff) | del(.push_backoff) | del(.op_streak) | del(.push_waiting) | del(.settings_changed)
         | (if $v then .last_verify = $now | .cf_items = $n | .cf_checked = $now else . end)
         | (if ($rep | length) > 0 then .repaired = {at: $now, what: $rep} else . end)' \
         --arg h "$hash" --arg rh "$raw_hash" --argjson n "$(jq 'length' <<< "$items")" --argjson d "$(jq '.dropped' <<< "$itemsj")" --argjson s "$(jq '.skipped' <<< "$itemsj")" \
@@ -1296,7 +1312,7 @@ handle_crowdsec_cloudflare_disable() {
                     else "Turned off, but not everything could be removed from Cloudflare: " + ($res.failed | join("; ")) + "." end))}')"
 }
 
-# POST /crowdsec/cloudflare/sync — Sync with Cloudflare now (pull the bans, push them when they changed, read the list and the rules back and repair them) and answer the status; within a minute of the last sync the list is not read back, and a change waits for Cloudflare's one change a minute (message says so: "Already synced N s ago", "The change goes to Cloudflare in N s")
+# POST /crowdsec/cloudflare/sync — Sync with Cloudflare now (pull the bans, push them when they changed, read the list and the rules back and repair them) and answer the status; within a minute of the last sync the list is not read back, and a change waits for Cloudflare's one change a minute (message says so: "Already synced N s ago", "The change goes to Cloudflare in N s"); while Cloudflare rate-limits list changes a push is tried at most every 5 minutes
 handle_crowdsec_cloudflare_sync() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _cfb_enabled || { _api_error 409 "Push bans to Cloudflare is off"; return; }
@@ -1310,7 +1326,10 @@ handle_crowdsec_cloudflare_sync() {
     if [[ "$recent" == true ]]; then _cfb_sync; else _cfb_sync force; fi; rc=$?
     if (( rc == 75 )); then _api_error 409 "A sync with Cloudflare is running already; it finishes in a moment"; return; fi
     st=$(_cfb_state)
-    if [[ "$(jq -r '(.push_waiting.until // 0)' <<< "$st")" -gt "$t0" ]]; then
+    if [[ "$(jq -r '.error.code // ""' <<< "$st")" == rate_limited && "$(jq -r '.backoff.until // 0' <<< "$st")" -gt "$t0" ]]; then
+        local soon; soon=$(( $(jq -r '.push_backoff.at // 0' <<< "$st") + CFB_PUSH_MIN_RETRY ))
+        CFB_STATUS_MESSAGE="$(jq -r '.error.message' <<< "$st")$( (( soon > t0 )) && printf ' Sync now can try again from %s.' "$(date -d "@$soon" '+%H:%M')")"
+    elif [[ "$(jq -r '(.push_waiting.until // 0)' <<< "$st")" -gt "$t0" ]]; then
         CFB_STATUS_MESSAGE="The change goes to Cloudflare in $(( $(jq -r '.push_waiting.until' <<< "$st") - t0 )) s: it takes one change of the list a minute."
     elif [[ "$recent" == true && "$(jq -r '.last_push // 0' <<< "$st")" == "$push_before" ]]; then
         CFB_STATUS_MESSAGE="Already synced $ago s ago."
@@ -1319,7 +1338,7 @@ handle_crowdsec_cloudflare_sync() {
     handle_crowdsec_cloudflare
 }
 
-# POST /crowdsec/cloudflare/recreate — Make the list at Cloudflare afresh (the fix when Cloudflare refuses every change to it: a change of the list got stuck there): a new list gets the bans and the rule of each zone is pointed at it before the old one is deleted; on a plan of one list (the free plan) the list is deleted and made again, the rule off for a few seconds. Answers the status
+# POST /crowdsec/cloudflare/recreate — Make the list at Cloudflare afresh (the fix when Cloudflare leaves every change to it pending or failed): a new list gets the bans and the rule of each zone is pointed at it before the old one is deleted; refused (said in the status) when the account has no room for a second list (the free plan's one list, or its quota). Answers the status
 handle_crowdsec_cloudflare_recreate() {
     _api_check_admin || { _api_error 403 "Admin access required"; return; }
     _cfb_enabled || { _api_error 409 "Push bans to Cloudflare is off"; return; }

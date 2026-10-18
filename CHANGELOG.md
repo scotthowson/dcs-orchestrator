@@ -19,6 +19,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stays where it is. Moving a stack into a VM, back to the hub, or its App-Data to another drive still carries
   everything.
 
+### Fixed
+
+- **Push bans to Cloudflare no longer loops on a free plan that Cloudflare rate-limits.** On a free account (one list
+  allowed) every change of the list was answered "you have been ratelimited" (10040); DCS took that for a stuck list,
+  tried to make a fresh one, was refused ("at the maximum number of lists", 10019), and tried again every 16 minutes for
+  two days, so the rate limit never cleared and the error message repeated itself inside itself. Now 10040 is
+  `rate_limited`: no fresh list, the next push waits 5, 15, 60, 180 minutes, then 6 hours (back to the start after a push
+  that goes through), the status says "Cloudflare is rate-limiting list changes; next try at <time>", and Sync now tries
+  at most every 5 minutes. A fresh list is only made for a change Cloudflare leaves pending or failed for more than two
+  hours, and never when the account has no room for a second list (the free plan's one list, or 10019): DCS says so
+  plainly instead. An unchanged set of addresses is never sent again.
+
 ## [4.0.58] - 2026-10-16
 
 ### Changed

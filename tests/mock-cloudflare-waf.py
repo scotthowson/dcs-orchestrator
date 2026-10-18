@@ -18,7 +18,8 @@ CrowdSec's local API (X-Api-Key, checked against the bouncers of the mock-crowds
 Control (no auth): POST /_mock/config {…merged into the configuration}, POST /_mock/decisions [...], GET /_mock/state.
     POST /_mock/config {"stick_lists": true} marks every list there now as stuck (a bulk operation that never ends at Cloudflare):
     each PUT/POST of its items answers 429 (10040) with retry-after: 60 while the ratelimit header shows the budget untouched; a list
-    made later is not stuck. "retry_after": N adds retry-after: N to the 429 of ratelimit_puts.
+    made later is not stuck. "retry_after": N adds retry-after: N to the 429 of ratelimit_puts. "ops_pending": NAME leaves every
+    bulk operation on the list NAME pending (a list change Cloudflare never finishes); "unstick_lists": true ends stick_lists.
 Every request is appended to state["calls"] as "METHOD path" (the Authorization and X-Api-Key headers are kept apart, in
 state["auth_seen"], so a test can say which token reached the API)."""
 import http.server, json, sys, urllib.parse, pathlib, itertools, threading, ipaddress, re
@@ -119,6 +120,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 for ls in S['lists'].values():
                     for l in ls:
                         l['stuck'] = True
+            if body.pop('unstick_lists', False):
+                for ls in S['lists'].values():
+                    for l in ls:
+                        l.pop('stuck', None)
             S['config'].update(body); save(); return self._send(200, S['config'])
         if p == '/_mock/decisions' and method == 'POST' and isinstance(body, list):
             S['decisions'] = body; save(); return self._send(200, {'n': len(body)})
@@ -224,7 +229,7 @@ class H(http.server.BaseHTTPRequestHandler):
                     if body['name'] in self._list_names(acc):
                         return err(400, 10014, 'duplicate list name')
                     if len(lists) >= S['config']['max_lists']:
-                        return err(400, 10027, 'exceeded maximum number of lists')
+                        return err(400, 10019, 'This account is at the maximum number of lists')
                     l = {'id': hexid(), 'name': body['name'], 'kind': 'ip', 'description': body.get('description', ''), 'items': []}
                     lists.append(l)
                     return env(200, self._list_out(l))
@@ -233,6 +238,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not op:
                     return err(404, 10001, 'operation not found')
                 op['polls'] += 1
+                if S['config'].get('ops_pending') and S['config']['ops_pending'] == op.get('list'):
+                    return env(200, {'id': rest[1], 'status': 'pending'})
                 if op['polls'] < S['config'].get('bulk_steps', 1):
                     return env(200, {'id': rest[1], 'status': 'running'})
                 if op.get('error'):
@@ -280,6 +287,7 @@ class H(http.server.BaseHTTPRequestHandler):
                     else:
                         l['items'] = [{'id': hexid(), 'ip': it['ip'], 'comment': it.get('comment', '')} for it in body]
                         S['ops'][op] = {'polls': 0}
+                    S['ops'][op]['list'] = l['name']
                     return env(200, {'operation_id': op})
             return err(405, 10000, 'method not allowed')
         # -- rulesets
