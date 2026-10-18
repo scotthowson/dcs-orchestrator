@@ -16669,6 +16669,89 @@ _traefik_chain_set() {
     rm -f "$f.tmp"
 }
 
+# After a pelican deploy started the panel: the first run its web installer would do, so the panel opens at its login
+# and Wings joins it: the database, an admin (admin, the deploy's PANEL_ADMIN_EMAIL, the password in the secret
+# PELICAN_ADMIN_PASSWORD), this machine as the node (play.<domain> on 443 through the route, else this host's Wings
+# port) and Wings' config.yml from the panel. A panel that is installed already is left alone. Runs in the deploy's
+# background job; on 2026-10-18 a deploy that skipped all this left a panel with no database and Wings restarting.
+_pelican_post_deploy() {
+    local pvars="$1" ad="$2" routes_on="$3" log="$4" p=Pelican-Panel i pw out id dom fqdn scheme=http proxy=0 port mem disk host
+    _pv() { printf '%s\n' "$pvars" | sed -n "s/^$1=//p" | head -n 1; }
+    for i in $(seq 1 60); do
+        [[ "$(docker inspect -f '{{.State.Health.Status}}' "$p" 2>/dev/null)" == healthy ]] && break
+        sleep 5
+    done
+    docker exec "$p" true 2>/dev/null || { echo "[dcs] Pelican-Panel is not running: first run skipped" >> "$log"; return 0; }
+    # panel settings its UI manages live in its .env, never in the container env (that would override them for good):
+    # seeded once, then the panel's Settings own it. shortcut: an installed panel only reads a newly seeded value at its next restart
+    docker exec "$p" grep -q '^TRUSTED_PROXIES=' /pelican-data/.env 2>/dev/null \
+        || docker exec -e "V=$(_pv PANEL_TRUSTED_PROXIES)" "$p" sh -c 'echo "TRUSTED_PROXIES=\"${V:-0.0.0.0/0}\"" >> /pelican-data/.env' 2>>"$log"
+    if docker exec "$p" grep -q '^APP_INSTALLED=true' /pelican-data/.env 2>/dev/null; then
+        echo "[dcs] Pelican is installed already: first run skipped" >> "$log"; _pelican_eggs "$p" "$log"; return 0
+    fi
+    # sqlite: the file the image links into the app (database/database.sqlite) lives in /pelican-data; php-fpm (www-data) writes it
+    [[ "$(_pv PANEL_DB_CONNECTION)" == mysql ]] || docker exec "$p" sh -c 'f=/pelican-data/database/database.sqlite; [ -f $f ] || touch $f; chown www-data:www-data $f' 2>>"$log"
+    docker exec -u www-data "$p" php artisan migrate --seed --force >>"$log" 2>&1 || { echo "[dcs] Pelican: the database migration failed, first run stopped" >> "$log"; return 0; }
+    pw=$(secrets_get PELICAN_ADMIN_PASSWORD 2>/dev/null) || pw=""
+    if [[ -z "$pw" ]]; then
+        pw=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)
+        secrets_set PELICAN_ADMIN_PASSWORD "$pw" || { echo "[dcs] Pelican: the admin password could not be stored, first run stopped" >> "$log"; return 0; }
+    fi
+    # the password goes in on stdin: never on a command line
+    printf '%s' "$pw" | docker exec -i -u www-data -e "E=$(_pv PANEL_ADMIN_EMAIL)" "$p" sh -c 'php artisan p:user:make -n --email="$E" --username=admin --password="$(cat)" --admin=1' >>"$log" 2>&1 \
+        && echo "[dcs] Pelican: admin user 'admin' made, its password is the secret PELICAN_ADMIN_PASSWORD" >> "$log"
+    # the node: behind the hub's or this server's Traefik, Wings answers https://play.<domain> on 443 and listens on 8080 plain
+    dom=$(_find_traefik_domain 2>/dev/null); host=$(_feed_detected_host 2>/dev/null); [[ -n "$host" ]] || host=localhost
+    if [[ "$routes_on" == true && -n "$dom" && "$dom" != example.com ]]; then
+        fqdn="$(_template_svc_sub "$TEMPLATES_DIR/pelican" pelican-wings "$pvars").$dom"; scheme=https; proxy=1; port=443
+    else fqdn="$host"; port=$(_pv WINGS_PORT); fi
+    mem=$(awk '/^MemTotal:/{print int($2/1024*0.8)}' /proc/meminfo 2>/dev/null); disk=$(df -Pm / 2>/dev/null | awk 'NR==2{print int($4*0.8)}')
+    out=$(docker exec -u www-data "$p" php artisan p:node:make -n --name="$(hostname 2>/dev/null || echo node)" --fqdn="$fqdn" --public=1 \
+        --scheme="$scheme" --proxy="$proxy" --maintenance=0 --maxMemory="${mem:-4096}" --overallocateMemory=0 --maxDisk="${disk:-20480}" \
+        --overallocateDisk=0 --maxCpu=0 --overallocateCpu=0 --uploadSize=256 --daemonListeningPort=8080 --daemonConnectingPort="${port:-8444}" \
+        --daemonSFTPPort="$(_pv WINGS_SFTP_PORT)" --daemonSFTPAlias="$host" --daemonBase="$(_pv PELICAN_SERVER_DIR)" 2>&1)
+    printf '%s\n' "$out" >> "$log"
+    id=$(sed -nE 's/.*has an id of ([0-9]+).*/\1/p' <<< "$out" | head -n 1)
+    if [[ -n "$id" ]]; then
+        mkdir -p "$ad/Pelican/Wings/config" 2>/dev/null
+        out=$(docker exec -u www-data "$p" php artisan p:node:configuration "$id" --format=yaml 2>/dev/null)
+        if [[ "$out" == *"token:"* ]]; then
+            # Wings in Docker: game servers' passwd is bind-mounted from a host path (the default /etc/pelican is not one),
+            # the machine-id mount source does not exist either, and the browser's console comes from the panel's origin
+            local wcd; wcd=$(_pv WINGS_CONFIG_DIR); [[ -n "$wcd" ]] || wcd="$ad/Pelican/Wings/config"
+            out=$(printf '%s\n' "$out" | awk -v d="$wcd" '{ print } /^system:/ { print "  user:\n    passwd:\n      enable: true\n      directory: " d "\n  machine_id:\n    enable: false" }')
+            [[ -n "$(_pv PANEL_APP_URL)" ]] && out+=$'\n'"allowed_origins:"$'\n'"- '$(_pv PANEL_APP_URL)'"
+            { (umask 077; printf '%s\n' "$out" > "$ad/Pelican/Wings/config/config.yml") 2>/dev/null \
+                || printf '%s\n' "$out" | docker run --rm -i -v "$ad/Pelican/Wings/config:/d" alpine sh -c 'cat > /d/config.yml; chmod 600 /d/config.yml'; } \
+                && echo "[dcs] Pelican: node $fqdn made, Wings' config.yml written" >> "$log"
+        fi
+    fi
+    docker exec "$p" sed -i 's/^APP_INSTALLED=.*/APP_INSTALLED=true/' /pelican-data/.env 2>>"$log"
+    # the image's entrypoint exports APP_INSTALLED at start: only a restart lets the panel leave its installer
+    docker restart "$p" >>"$log" 2>&1 || true
+    for i in $(seq 1 60); do
+        [[ "$(docker inspect -f '{{.State.Health.Status}}' "$p" 2>/dev/null)" == healthy ]] && break
+        sleep 5
+    done
+    docker restart Pelican-Wings >>"$log" 2>&1 || true
+    _pelican_eggs "$p" "$log"
+}
+
+# A panel with no eggs gets the eggs bundled in .templates/pelican/eggs (Scott's set: one panel export per egg, icons
+# inside), through the panel's own importer; a panel that has eggs is left alone.
+_pelican_eggs() {
+    local p="$1" log="$2" src="$TEMPLATES_DIR/pelican/eggs"
+    [[ -d "$src" ]] || return 0
+    docker exec "$p" rm -rf /tmp/dcs-eggs 2>/dev/null
+    docker cp "$src" "$p:/tmp/dcs-eggs" >/dev/null 2>>"$log" || { echo "[dcs] Pelican: the egg bundle could not be copied in, no eggs loaded" >> "$log"; return 0; }
+    docker exec -u www-data "$p" php artisan tinker --execute '
+        if (App\Models\Egg::count() > 0) { echo "[dcs] Pelican has eggs already: egg import skipped\n"; return; }
+        $s = app(App\Services\Eggs\Sharing\EggImporterService::class); $n = 0; $f = 0;
+        foreach (glob("/tmp/dcs-eggs/*.json") as $j) { try { $s->fromContent(file_get_contents($j), App\Enums\EggFormat::JSON); $n++; } catch (\Throwable $e) { $f++; } }
+        echo "[dcs] Pelican: $n eggs imported from the bundle ($f failed)\n";' >>"$log" 2>&1 || true
+    docker exec "$p" rm -rf /tmp/dcs-eggs 2>/dev/null || true
+}
+
 # After a crowdsec deploy started the container: acquisition of Traefik's
 # access log, Discord alerts when a webhook is known, and the Traefik bouncer
 # (a LAPI bouncer key, the middleware file, the chain). Runs in the deploy's
@@ -18963,6 +19046,13 @@ _template_ro_sub_port() {
     [[ -n "$v" ]] && v=$(printf '%s\n' "$vs" | sed -n "s/^${v}=//p" | head -n 1) && [[ "$v" =~ ^[0-9]{1,5}$ ]] && port="$v"
     printf '%s %s\n' "${sub:-$name}" "$port"
 }
+# _template_svc_sub TDIR SERVICE VARS — the subdomain of a service's route: the deploy variable template.json names for it
+# ("route_subdomains": {"pelican-panel": "PANEL_SUBDOMAIN"}) when it holds a plain label, else the service's name
+_template_svc_sub() {
+    local v; v=$(jq -r --arg s "$2" '(.route_subdomains // {})[$s] // empty' "$1/template.json" 2>/dev/null)
+    [[ -n "$v" ]] && v=$(printf '%s\n' "$3" | sed -n "s/^${v}=//p" | head -n 1)
+    if [[ "$v" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then printf '%s' "$v"; else printf '%s' "$2"; fi
+}
 
 # _compose_backup DIR TIMESTAMP — before a template deploy or removal changes DIR/docker-compose.yml: a copy as
 # docker-compose.yml.bak.TIMESTAMP (the restore path on failure, and what the deploy history names), keeping the newest 5
@@ -19189,6 +19279,12 @@ handle_template_deploy() {
             [[ -n "$_pu" ]] || continue
             _pu_name=$(jq -r '.name' <<< "$_pu"); _pu_svc=$(jq -r '.service // ""' <<< "$_pu"); _pu_port=$(jq -r '.port_var // ""' <<< "$_pu")
             _pu_val=$(printf '%s\n' "$vars" | sed -n "s/^${_pu_name}=//p" | head -n 1)
+            # never a trailing slash: Pelican copies APP_URL into Wings' remote, and Wings then refused every websocket
+            # (Origin https://host != https://host/)
+            if [[ "$_pu_val" == */ ]]; then
+                while [[ "$_pu_val" == */ ]]; do _pu_val="${_pu_val%/}"; done
+                vars=$(printf '%s\n' "$vars" | sed "s|^${_pu_name}=.*|${_pu_name}=${_pu_val}|")
+            fi
             [[ -z "$_pu_val" ]] || continue
             [[ -n "$_pu_dom" ]] || _pu_dom=$(_find_traefik_domain 2>/dev/null)
             _pu_url=""
@@ -19199,7 +19295,7 @@ handle_template_deploy() {
             elif [[ -n "$_pu_dom" && "$_pu_dom" != "example.com" && "$_pu_dom" =~ ^[A-Za-z0-9.-]+$ && -n "$_pu_svc" ]] \
                && jq -e --arg s "$_pu_svc" '(.routes != false) and ((has("route_services") | not) or ((.route_services // []) | index($s) != null))' <<< "$body" >/dev/null 2>&1; then
                 _pu_sub=$(jq -r --arg s "$_pu_svc" '(.routes // {}) | if type == "object" then (.[$s] // "") else "" end' <<< "$body" 2>/dev/null | grep -m1 -oE 'Host\(`[^`]+`\)' | sed -E 's/Host\(`//; s/`\)//')
-                if [[ "$_pu_sub" =~ ^[A-Za-z0-9.-]+$ ]]; then _pu_url="https://$_pu_sub"; else _pu_url="https://${_pu_svc}.${_pu_dom}"; fi
+                if [[ "$_pu_sub" =~ ^[A-Za-z0-9.-]+$ ]]; then _pu_url="https://$_pu_sub"; else _pu_url="https://$(_template_svc_sub "$tdir" "$_pu_svc" "$vars").${_pu_dom}"; fi
             fi
             if [[ -z "$_pu_url" && -n "$_pu_port" ]]; then
                 _pu_h=$(_feed_detected_host 2>/dev/null); [[ -n "$_pu_h" ]] || _pu_h=localhost
@@ -19208,6 +19304,15 @@ handle_template_deploy() {
             [[ -n "$_pu_url" ]] || continue
             if grep -q "^${_pu_name}=" <<< "$vars"; then vars=$(printf '%s\n' "$vars" | sed "s|^${_pu_name}=.*|${_pu_name}=${_pu_url}|"); else vars+=$'\n'"${_pu_name}=${_pu_url}"; fi
         done < <(jq -c '.variables[]? | select(.fill == "public_url" and .name != null)' "$tdir/template.json" 2>/dev/null)
+        # A variable that holds an absolute host path in the stack's App-Data ({"fill": "app_data", "path": "<below App-Data>"}),
+        # left empty: for a same-path mount (Pelican's Wings hands that path to Docker as a bind source)
+        local _fa _fa_name _fa_ad
+        while IFS=$'\t' read -r _fa_name _fa; do
+            [[ -n "$_fa_name" && "$_fa" != *..* ]] || continue
+            [[ -z "$(printf '%s\n' "$vars" | sed -n "s/^${_fa_name}=//p" | head -n 1)" ]] || continue
+            [[ -n "$_fa_ad" ]] || { _fa_ad=$(_stack_appdata_override "$target_stack") || _fa_ad="${APP_DATA_DIR:-$target_dir/App-Data}"; [[ "$_fa_ad" == ./* ]] && _fa_ad="$target_dir/${_fa_ad#./}"; }
+            if grep -q "^${_fa_name}=" <<< "$vars"; then vars=$(printf '%s\n' "$vars" | sed "s|^${_fa_name}=.*|${_fa_name}=${_fa_ad}/${_fa}|"); else vars+=$'\n'"${_fa_name}=${_fa_ad}/${_fa}"; fi
+        done < <(jq -r '.variables[]? | select(.fill == "app_data" and .name != null) | [.name, (.path // "")] | @tsv' "$tdir/template.json" 2>/dev/null)
     fi
 
     # --- Required variable validation ---
@@ -20470,7 +20575,7 @@ http:
     ${_route_id}-router:
       entryPoints:
         - "websecure"
-      rule: "Host(\`${_svc_name}.${traefik_domain}\`)"
+      rule: "Host(\`$(_template_svc_sub "$tdir" "$_svc_name" "$vars").${traefik_domain}\`)"
       service: "${_route_id}"
       middlewares:
         - "traefik-chain"${_svc_auth_line}
@@ -20788,6 +20893,7 @@ print('\n'.join(result))
             if [[ "$name" == "crowdsec" && "$_up_ok" == "true" ]]; then
                 _crowdsec_post_deploy "$tdir" "$target_stack" "$target_dir" "$vars" "$_activity_log"
             fi
+            [[ "$name" == "pelican" && "$_up_ok" == "true" ]] && _pelican_post_deploy "$vars" "$_ad" "$_routes_on" "$_activity_log"
             _plugin_hooks_now "post-deploy" "$(_hook_ctx "$target_stack" "$(jq -c '. + {started: true}' <<< "$_deploy_ctx")" "$_up_ok")"
             if [[ "$_up_ok" == "false" ]]; then
                 _fire_notifications "stack_failed" "stack=$target_stack" "action=deploy" "template=$name"
@@ -25967,6 +26073,8 @@ _routes_apply_local_chain() {  # JSON in, JSON out: the local chain, plus Authel
             svc="${k%-dcs}"
             while :; do
                 if _authelia_bypass_template "$svc"; then bypass=$(jq -c --arg k "$k" '. + [$k]' <<< "$bypass"); break; fi
+                # a service of a bypass template that routes several (pelican-panel and pelican-wings of pelican)
+                if _authelia_bypass_template "${svc%-*}" && grep -q "^  ${svc}:" "$TEMPLATES_DIR/${svc%-*}/docker-compose.yml" 2>/dev/null; then bypass=$(jq -c --arg k "$k" '. + [$k]' <<< "$bypass"); break; fi
                 [[ -f "$TEMPLATES_DIR/$svc/template.json" || "$svc" != *-* ]] && break
                 svc="${svc#*-}"
             done

@@ -1,0 +1,81 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "Cuberite",
+  "author": "parker@parkervcp.com",
+  "uuid": "fdcfdcb0-10ae-44e3-b027-a3b5562f89a8",
+  "description": "A lightweight, fast and extensible game server for Minecraft",
+  "icon": null,
+  "tags": [],
+  "features": [
+    "eula",
+    "java_version",
+    "pid_limit"
+  ],
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:debian": "ghcr.io/parkervcp/yolks:debian"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "./Cuberite"
+  },
+  "config": {
+    "files": "{\n    \"settings.ini\": {\n        \"parser\": \"ini\",\n        \"find\": {\n            \"Server.Ports\": \"{{server.allocations.default.port}}\",\n            \"Server.Description\": \"{{server.environment.SERV_DESC}}\"\n        }\n    },\n    \"webadmin.ini\": {\n        \"parser\": \"ini\",\n        \"find\": {\n            \"User:admin.Password\": \"{{server.environment.ADMIN_PASS}}\",\n            \"WebAdmin.Ports\": \"{{server.environment.WEB_PORT}}\"\n        }\n    }\n}",
+    "startup": "{\n    \"done\": \"Startup complete\"\n}",
+    "logs": "{}",
+    "stop": "stop"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/ash\r\n# Cuberite\r\n#\r\n# Server Files: /mnt/server\r\n\r\ncd /mnt/server\r\n\r\nARCH=$([[ \"$(uname -m)\" == \"x86_64\" ]] && echo \"x86_64\" || echo \"aarch64\")\r\n\r\nwget https://download.cuberite.org/linux-${ARCH}/Cuberite.tar.gz\r\n\r\ntar -xzf Cuberite.tar.gz\r\n\r\n## install end\r\necho \"-----------------------------------------\"\r\necho \"Installation completed...\"\r\necho \"-----------------------------------------\"",
+      "container": "ghcr.io/pelican-eggs/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Admin Password",
+      "description": "The password for the webadmin panel 'admin' user",
+      "env_variable": "ADMIN_PASS",
+      "default_value": "ChangeMe",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Description",
+      "description": "Server Description",
+      "env_variable": "SERV_DESC",
+      "default_value": "Cuberite on Pelican!",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "WebAdmin Port",
+      "description": "Port for the cuberite webadmin panel.",
+      "env_variable": "WEB_PORT",
+      "default_value": "8080",
+      "user_viewable": true,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "integer",
+        "between:1,65535"
+      ]
+    }
+  ]
+}

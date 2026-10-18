@@ -1,0 +1,109 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "Soldat",
+  "author": "eggs@goover.dev",
+  "uuid": "db399bf1-dd25-4cb2-b7df-8045f65054dc",
+  "description": "Soldat is a unique 2D (side-view) multiplayer action game. It has been influenced by the best of games such as Liero, Worms, Quake, and Counter-Strike and provides a fast-paced gaming experience with tons of blood and flesh. Soldiers fight against each other in 2D battle arenas using a deadly arsenal of military weapons, across 7 default game modes. It features 18 different weapons and 60 maps to frag away on, with full support for user created content.\r\n\r\nSteam: https://store.steampowered.com/app/638490/Soldat/",
+  "icon": null,
+  "tags": [],
+  "features": [
+    "steam_disk_space"
+  ],
+  "docker_images": {
+    "ghcr.io/parkervcp/steamcmd:debian": "ghcr.io/parkervcp/steamcmd:debian"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "./soldatserver"
+  },
+  "config": {
+    "files": "{\n    \"soldat.ini\": {\n        \"parser\": \"ini\",\n        \"find\": {\n            \"NETWORK.Port\": \"{{server.allocations.default.port}}\",\n            \"NETWORK.Max_Players\": \"{{server.environment.MAX_PLAYERS}}\",\n            \"NETWORK.Game_Password\": \"{{server.environment.SRV_PWD}}\",\n            \"NETWORK.Admin_Password\": \"{{server.environment.ADMIN_PASSWD}}\",\n            \"NETWORK.Server_Name\": \"{{server.environment.SRV_NAME}}\"\n        }\n    }\n}",
+    "startup": "{\n    \"done\": \"Done\"\n}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\n# steamcmd Base Installation Script\r\n#\r\n# Server Files: /mnt/server\r\n# Image to install with is 'ghcr.io/parkervcp/installers:debian'\r\n\r\n##\r\n# Install packages. Default packages below are not required if using our existing install image thus speeding up the install process.\r\n#apt -y update\r\n#apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates\r\n\r\n## just in case someone removed the defaults.\r\nif [[ \"${STEAM_USER}\" == \"\" ]] || [[ \"${STEAM_PASS}\" == \"\" ]]; then\r\n    echo -e \"steam user is not set.\\n\"\r\n    echo -e \"Using anonymous user.\\n\"\r\n    STEAM_USER=anonymous\r\n    STEAM_PASS=\"\"\r\n    STEAM_AUTH=\"\"\r\nelse\r\n    echo -e \"user set to ${STEAM_USER}\"\r\nfi\r\n\r\n## download and install steamcmd\r\ncd /tmp\r\nmkdir -p /mnt/server/steamcmd\r\ncurl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz\r\ntar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd\r\nmkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing\r\ncd /mnt/server/steamcmd\r\n\r\n# SteamCMD fails otherwise for some reason, even running as root.\r\n# This is changed at the end of the install process anyways.\r\nchown -R root:root /mnt\r\nexport HOME=/mnt/server\r\n\r\n## install game using steamcmd\r\n./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ \"${WINDOWS_INSTALL}\" == \"1\" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) +app_update ${SRCDS_APPID} $( [[ -z ${SRCDS_BETAID} ]] || printf %s \"-beta ${SRCDS_BETAID}\" ) $( [[ -z ${SRCDS_BETAPASS} ]] || printf %s \"-betapassword ${SRCDS_BETAPASS}\" ) ${INSTALL_FLAGS} validate +quit ## other flags may be needed depending on install. looking at you cs 1.6\r\n\r\n## set up 32 bit libraries\r\nmkdir -p /mnt/server/.steam/sdk32\r\ncp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so\r\n\r\n## set up 64 bit libraries\r\nmkdir -p /mnt/server/.steam/sdk64\r\ncp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so\r\n\r\n## add below your custom commands if needed\r\ncd /mnt/server\r\nchmod +x soldatserver\r\n## install end\r\necho \"-----------------------------------------\"\r\necho \"Installation completed...\"\r\necho \"-----------------------------------------\"",
+      "container": "ghcr.io/parkervcp/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Admin Passwort",
+      "description": "Admin Password for the Server",
+      "env_variable": "ADMIN_PASSWD",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Max Players",
+      "description": "Max Players can join",
+      "env_variable": "MAX_PLAYERS",
+      "default_value": "10",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "numeric",
+        "between:1,20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "ADD IP",
+      "description": "Steam APP ID",
+      "env_variable": "SRCDS_APPID",
+      "default_value": "638500",
+      "user_viewable": true,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "string",
+        "in:638500"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Name",
+      "description": "Name of the Server",
+      "env_variable": "SRV_NAME",
+      "default_value": "MySoldatServer",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:100"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Password",
+      "description": "Password to join Server",
+      "env_variable": "SRV_PWD",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "OpenArena",
+  "author": "parker@parkervcp.com",
+  "uuid": "d0d0ae0f-90ac-493e-a0f2-cbb7762c9028",
+  "description": "OpenArena is a community-produced deathmatch FPS based on GPL idTech3 technology.\r\n\r\nhttp://www.openarena.ws/",
+  "icon": null,
+  "tags": [],
+  "features": null,
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:debian": "ghcr.io/parkervcp/yolks:debian"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "./oa_ded.x86_64 +set net_port {{SERVER_PORT}} +map {{GAME_MAP}}"
+  },
+  "config": {
+    "files": "{}",
+    "startup": "{\n    \"done\": \"AAS initialized\"\n}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\n# dirty install script for openarena\r\n# will get updated more later\r\n\r\nif [ ! -d /mnt/server/ ]; then\r\n\tmkdir -p /mnt/server/\r\nfi\r\n\r\ncd /mnt/server/\r\n\r\nwget http://www.openarena.ws/request.php?4 -O openarena.zip\r\n\r\nunzip -o openarena.zip openarena-*/oa_ded.x86_64 openarena-*/missionpack/* openarena-*/baseoa/*\r\n\r\nmv -f openarena-*/* /mnt/server/\r\n\r\nrm -rf openarena-*/ openarena.zip\r\n\r\n## install end\r\necho \"-----------------------------------------\"\r\necho \"Installation completed...\"\r\necho \"-----------------------------------------\"",
+      "container": "ghcr.io/parkervcp/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Game Map",
+      "description": "The map to load when the server starts.\r\nSee here for all maps available by default - https://openarena.fandom.com/wiki/Maps",
+      "env_variable": "GAME_MAP",
+      "default_value": "aggressor",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string"
+      ]
+    }
+  ]
+}

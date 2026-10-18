@@ -1,0 +1,152 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "Hogwarp",
+  "author": "imkringle@proton.me",
+  "uuid": "9ae78c9d-1d23-4b67-8a58-5c8fca30c124",
+  "description": "A Pterodactyl egg for the Hogwarts Legacy mod Hogwarp - For more info see their Nexus: https://www.nexusmods.com/hogwartslegacy/mods/1378",
+  "icon": null,
+  "tags": [],
+  "features": null,
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:wine_latest": "ghcr.io/parkervcp/yolks:wine_latest"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "export WINEDLLOVERRIDES=\"mscoree=n,b;mshtml=n,b\"; wine HogWarpServer.exe"
+  },
+  "config": {
+    "files": "{\n    \"config.json\": {\n        \"parser\": \"json\",\n        \"find\": {\n            \"ApiKey\": \"{{env.API_KEY}}\",\n            \"Name\": \"{{env.SERV_NAME}}\",\n            \"Port\": \"{{server.allocations.default.port}}\",\n            \"Description\": \"{{env.SERV_DESC}}\",\n            \"MaxPlayer\": \"{{env.MAX_PLAYERS}}\",\n            \"IconUrl\": \"{{env.SERV_ICON}}\"\n        }\n    }\n}",
+    "startup": "{\n    \"done\": \"Server started on port \"\n}",
+    "logs": "{}",
+    "stop": "^^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#Hogwarp Install Script\r\n\r\napt update -y\r\napt install -y curl file unzip\r\n\r\nif [ ! -d /mnt/server ]; then\r\n    mkdir -p /mnt/server/\r\nfi\r\n\r\ncd /mnt/server/\r\nARCHIVE_NAME=\"Hogwarp.zip\"\r\n\r\n# Validate link\r\nif [ ! -z \"${DOWNLOAD_URL}\" ]; then \r\n    if curl --output /dev/null --silent --head --fail ${DOWNLOAD_URL}; then\r\n        echo -e \"link is valid. setting download link to ${DOWNLOAD_URL}\"\r\n        DOWNLOAD_LINK=${DOWNLOAD_URL}\r\n    else        \r\n        echo -e \"link is invalid closing out\"\r\n        exit 2\r\n    fi\r\nfi\r\n\r\ncurl -sSL ${DOWNLOAD_LINK} -o $ARCHIVE_NAME\r\n\r\n# Unpack Server zip\r\n# Backup and restore logic for config.json\r\nif [ -f /mnt/server/config.json ]; then\r\n    mv /mnt/server/config.json /mnt/server/config-backup.json\r\n    unzip -o $ARCHIVE_NAME -d /mnt/server\r\n    rm -f /mnt/server/config.json\r\n    mv /mnt/server/config-backup.json /mnt/server/config.json\r\nelse\r\n    unzip -o $ARCHIVE_NAME -d /mnt/server\r\nfi\r\n\r\n#Create the Plugins folder\r\nmkdir -p /mnt/server/plugins/\r\n\r\n\r\n## Install End\r\necho \"-----------------------------------------\"\r\necho \"Hogwarp Is Installed!\"\r\necho \"-----------------------------------------\"",
+      "container": "ghcr.io/parkervcp/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Hogwarp API Key",
+      "description": "A API required to boot - https://presence.hogwarp.com/login\r\n- If not set on install it will fail. Set API Key then Reinstall Files",
+      "env_variable": "API_KEY",
+      "default_value": "CHANGEME",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Download URL",
+      "description": "URL to pull the files from - By default this is blank. Files can be found in Discord!",
+      "env_variable": "DOWNLOAD_URL",
+      "default_value": "",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Max Players",
+      "description": "Max players for a server, this depends on your Patreon level for Hogwarp\r\nhttps://www.patreon.com/tiltedphoques - ( 4, 8, 16, No Limit ) In that order.",
+      "env_variable": "MAX_PLAYERS",
+      "default_value": "4",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "integer"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Description",
+      "description": "The description that shows on the Multiplayer list",
+      "env_variable": "SERV_DESC",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Icon URL",
+      "description": "The icon that displays on Hogwarps multiplayer listing",
+      "env_variable": "SERV_ICON",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Name",
+      "description": "A name that displays on the Hogwarp list",
+      "env_variable": "SERV_NAME",
+      "default_value": "Ptero Hogwarp Server",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "WineARCH",
+      "description": "Arch type for Wine",
+      "env_variable": "WINEARCH",
+      "default_value": "win64",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "required"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "WINEDEBUG",
+      "description": "",
+      "env_variable": "WINEDEBUG",
+      "default_value": "-all",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "nullable"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Wine Tricks",
+      "description": "",
+      "env_variable": "WINETRICKS_RUN",
+      "default_value": "dotnet8",
+      "user_viewable": false,
+      "user_editable": false,
+      "rules": [
+        "nullable",
+        "string"
+      ]
+    }
+  ]
+}

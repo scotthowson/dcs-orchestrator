@@ -1,0 +1,36 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "LeagueSandbox",
+  "author": "domi@imagine.team",
+  "uuid": "3eeeca1c-51ef-427e-8227-cfec30f49c78",
+  "description": "A simple egg to run LeagueSandbox server in pterodactyl",
+  "icon": null,
+  "tags": [],
+  "features": null,
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:dotnet_6": "ghcr.io/parkervcp/yolks:dotnet_6"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "./GameServerConsole --port {{SERVER_PORT}}"
+  },
+  "config": {
+    "files": "{}",
+    "startup": "{\n    \"done\": \"Game is ready.\"\n}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\n\r\napt update\r\napt install -y zip unzip jq curl wget git\r\n\r\nmkdir -p /mnt/server\r\ncd /mnt/server\r\n\r\ngit clone https://github.com/LeagueSandbox/GameServer.git\r\nrm .git -rf\r\n\r\ncd GameServer/\r\n\r\ngit submodule init\r\ngit submodule update\r\n\r\ndotnet build .\r\ncp -r GameServerConsole/bin/Debug/net6.0/* /mnt/server/\r\ncp -r Content /mnt/server/Content\r\necho \"done\"",
+      "container": "bitnami/dotnet-sdk:6-debian-11",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": []
+}

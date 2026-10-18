@@ -1,4 +1,19 @@
 services:
+  pelican-redis:
+    container_name: Pelican-Redis
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 128M
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   pelican-panel:
     container_name: Pelican-Panel
     image: ghcr.io/pelican-dev/panel:latest
@@ -30,13 +45,24 @@ services:
       - APP_LOCALE=en
       - BEHIND_PROXY=${PANEL_BEHIND_PROXY:-true}
       - LE_EMAIL=${PANEL_ADMIN_EMAIL:-admin@example.com}
-      - TRUSTED_PROXIES=${PANEL_TRUSTED_PROXIES:-0.0.0.0/0}
+      # TRUSTED_PROXIES is not set here: a container env overrides the panel's .env, so its Settings could never change it
       - DB_CONNECTION=${PANEL_DB_CONNECTION:-sqlite}
       - DB_HOST=${PANEL_DB_HOST:-}
       - DB_PORT=${PANEL_DB_PORT:-3306}
-      - DB_DATABASE=${PANEL_DB_NAME:-pelican}
+      # SQLite: an absolute path in the persistent /pelican-data (a plain name lands in the image's database/ folder: no database)
+      - DB_DATABASE=${PANEL_DB_NAME:-/pelican-data/database/database.sqlite}
       - DB_USERNAME=${PANEL_DB_USER:-pelican}
       - DB_PASSWORD=${PANEL_DB_PASSWORD:-}
+      # file cache broke: queue worker (root) creates cache dirs that php-fpm (www-data) cannot write into
+      - CACHE_STORE=redis
+      - SESSION_DRIVER=redis
+      - QUEUE_CONNECTION=redis
+      - REDIS_HOST=pelican-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+    depends_on:
+      pelican-redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:80/up || curl -sf http://127.0.0.1:80/ || exit 1"]
       interval: 60s
@@ -50,8 +76,9 @@ services:
     privileged: true
     restart: always
     ports:
-      - "${WINGS_SFTP_PORT:-2024}:2022"
+      # 8080 first: the route goes to Wings' API. SFTP listens on the port the panel gives it (the node's SFTP port)
       - "${WINGS_PORT:-8444}:8080"
+      - "${WINGS_SFTP_PORT:-2024}:${WINGS_SFTP_PORT:-2024}"
     environment:
       - TZ=${TZ:-UTC}
       - WINGS_UID=${WINGS_UID:-988}
@@ -61,6 +88,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PELICAN_SERVER_DIR:-/srv/pelican/servers}:${PELICAN_SERVER_DIR:-/srv/pelican/servers}
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/config:/etc/pelican
+      # the same folder at its host path: Wings hands that path to Docker as the bind source of every game server's passwd
+      - ${WINGS_CONFIG_DIR:-/srv/pelican/config}:${WINGS_CONFIG_DIR:-/srv/pelican/config}
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/data:/var/lib/pelican
       - ${APP_DATA_DIR:-./App-Data}/Pelican/Wings/logs:/var/log/pelican
       - /etc/machine-id:/etc/machine-id:ro

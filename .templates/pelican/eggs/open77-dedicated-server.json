@@ -1,0 +1,348 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": "https://raw.githubusercontent.com/scotthowson/open77-pelican-egg/main/egg-open77-server.yaml"
+  },
+  "exported_at": "2026-10-18T17:46:38+00:00",
+  "name": "Open77 Dedicated Server",
+  "author": "scott_howson@corruptiongames.net",
+  "uuid": "6b1f0f2e-5a7c-4b47-9d5f-0e77a2c0b138",
+  "description": "OPEN//77 (Cyberpunk 2077 multiplayer) dedicated server. Installs the official Linux x64 build from the Open77 CDN, verifies the published SHA-256, and checks the release API (/server/latest.json or /server/unstable/latest.json) on every start to announce or auto-install updates. Supports stable and unstable channels, version pinning, Warden, RCON, the database bridge and Discord webhook notifications.",
+  "icon": null,
+  "tags": [
+    "open77",
+    "cyberpunk 2077",
+    "dotnet"
+  ],
+  "features": [],
+  "docker_images": {
+    "Dotnet 10": "ghcr.io/pelican-eggs/yolks:dotnet_10",
+    "Debian (recommended)": "ghcr.io/pelican-eggs/yolks:debian"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "bash ./op77-start.sh",
+    "Validate config only": "CHECK_CONFIG_ONLY=1 bash ./op77-start.sh",
+    "Manual (no update check)": "./Open77.Server --config {{CONFIG_FILE}} --no-setup --port {{SERVER_PORT}} --public-ip {{PUBLIC_IP}} --max-players {{MAX_PLAYERS}} --name \"{{SERVER_NAME}}\" --visibility {{VISIBILITY}} --log-level {{LOG_LEVEL}} --set resources.download.listenUrl=http://0.0.0.0:{{DOWNLOAD_PORT}}/ --set resources.download.publicBaseUrl=http://{{PUBLIC_IP}}:{{DOWNLOAD_PORT}}/ {{EXTRA_ARGS}}"
+  },
+  "config": {
+    "files": "[]",
+    "startup": "{\n    \"done\": [\n        \"Listening on\",\n        \"listening on\",\n        \"Server started\",\n        \"Server is ready\",\n        \"Enrolled with master\",\n        \"Master enrollment\",\n        \"Heartbeat\"\n    ]\n}",
+    "logs": "[]",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\n# Open77 dedicated server - Pelican egg installation script\n# Runs inside ghcr.io/pelican-eggs/installers:debian with the egg variables\n# exported in the environment. The server directory is /mnt/server.\nset -euo pipefail\n\nexport SERVER_DIR=/mnt/server\nmkdir -p \"$SERVER_DIR\"\ncd \"$SERVER_DIR\"\n\necho \"[op77] Writing helper scripts\"\ncat > \"$SERVER_DIR/op77-updater.sh\" <<'__OP77_UPDATER__'\n#!/usr/bin/env bash\n# ------------------------------------------------------------------------------\n# op77-updater.sh - Open77 dedicated server release helper for Pelican Panel\n#\n# Talks to the official Open77 release pointer API on the CDN:\n#   stable   : <CDN>/server/latest.json\n#   unstable : <CDN>/server/unstable/latest.json\n# Both pointers advertise immutable archives under <CDN>/server/<version>/.\n#\n# Commands:\n#   install   Install the resolved release (latest for the channel, or the pinned\n#             SERVER_VERSION). Skips when that exact version is already installed.\n#   check     Query the API, print the latest release and whether it is newer than\n#             the installed build. Exit 0 = up to date, 3 = update available.\n#   update    Install the latest release when it is newer than the installed one.\n#   boot      What the start script runs: make sure a build exists, check the API,\n#             notify (console + optional webhook) and auto-update when enabled.\n#   status    Print the installed release.\n#   config    Create server.jsonc when it is missing.\n#\n# Environment (all provided by the egg variables):\n#   RELEASE_CHANNEL   stable | unstable                       (default: stable)\n#   SERVER_VERSION    latest | exact version to pin            (default: latest)\n#   AUTO_UPDATE       1 = install newer builds at boot         (default: 0)\n#   VERIFY_CHECKSUM   1 = verify archiveSha256 from the API    (default: 1)\n#   UPDATE_WEBHOOK_URL Discord-compatible webhook for notices  (optional)\n#   CDN_URL           release CDN origin                       (default: https://cdn.open77.dev)\n#   SERVER_DIR        install directory                        (default: current directory)\n# ------------------------------------------------------------------------------\nset -euo pipefail\n\nOFFICIAL_CDN=\"https://cdn.open77.dev\"\nLEGACY_CDN=\"https://cdn.open2077.net\"\n\nCDN_URL=\"${CDN_URL:-$OFFICIAL_CDN}\"\nCDN_URL=\"${CDN_URL%/}\"\n[ \"$CDN_URL\" = \"$LEGACY_CDN\" ] && CDN_URL=\"$OFFICIAL_CDN\"\n\nRELEASE_CHANNEL=\"$(printf '%s' \"${RELEASE_CHANNEL:-stable}\" | tr '[:upper:]' '[:lower:]')\"\nSERVER_VERSION=\"${SERVER_VERSION:-latest}\"\nAUTO_UPDATE=\"${AUTO_UPDATE:-0}\"\nVERIFY_CHECKSUM=\"${VERIFY_CHECKSUM:-1}\"\nUPDATE_WEBHOOK_URL=\"${UPDATE_WEBHOOK_URL:-}\"\nSERVER_DIR=\"${SERVER_DIR:-$PWD}\"\nPLATFORM=\"linux-x64\"\nBINARY=\"Open77.Server\"\n\nSTATE_FILE=\"$SERVER_DIR/.op77-release\"\nWORK_DIR=\"$SERVER_DIR/.op77-work\"\nBACKUP_DIR=\"$SERVER_DIR/.op77-backups\"\nUSER_AGENT=\"open77-pelican-egg/1.0 (+https://github.com/scotthowson/open77-pelican-egg)\"\n\n# ----------------------------------------------------------------------------- output\nc_reset=$'\\033[0m'; c_info=$'\\033[1;36m'; c_ok=$'\\033[1;32m'; c_warn=$'\\033[1;33m'; c_err=$'\\033[1;31m'\nlog()  { printf '%s[op77]%s %s\\n' \"$c_info\" \"$c_reset\" \"$*\"; }\nok()   { printf '%s[op77]%s %s\\n' \"$c_ok\" \"$c_reset\" \"$*\"; }\nwarn() { printf '%s[op77] WARNING:%s %s\\n' \"$c_warn\" \"$c_reset\" \"$*\" >&2; }\nerr()  { printf '%s[op77] ERROR:%s %s\\n' \"$c_err\" \"$c_reset\" \"$*\" >&2; }\ndie()  { err \"$@\"; exit 1; }\n\nbanner() {\n    local line\n    printf '%s' \"$c_info\"\n    printf '============================================================\\n'\n    for line in \"$@\"; do printf '  %s\\n' \"$line\"; done\n    printf '============================================================\\n'\n    printf '%s' \"$c_reset\"\n}\n\nis_true() { case \"$(printf '%s' \"${1:-}\" | tr '[:upper:]' '[:lower:]')\" in 1|true|yes|on) return 0;; *) return 1;; esac; }\n\n# ----------------------------------------------------------------------------- tiny JSON helpers\n# The pointer is a small, flat document with a known shape, so we avoid a jq\n# dependency (the runtime yolk image does not ship it). Values never contain\n# quotes, so simple extraction is safe. First match wins.\njson_flat()   { tr -d '\\n\\r' ; }\njson_str()    { printf '%s' \"$1\" | grep -oE \"\\\"$2\\\"[[:space:]]*:[[:space:]]*\\\"[^\\\"]*\\\"\" | head -n1 | sed -E 's/^\"[^\"]*\"[[:space:]]*:[[:space:]]*\"(.*)\"$/\\1/'; }\njson_num()    { printf '%s' \"$1\" | grep -oE \"\\\"$2\\\"[[:space:]]*:[[:space:]]*-?[0-9]+\" | head -n1 | grep -oE -- '-?[0-9]+$'; }\njson_object() { printf '%s' \"$1\" | grep -oE \"\\\"$2\\\"[[:space:]]*:[[:space:]]*\\{[^{}]*\\}\" | head -n1 | sed -E 's/^\"[^\"]*\"[[:space:]]*:[[:space:]]*\\{(.*)\\}$/\\1/'; }\njson_escape() { printf '%s' \"$1\" | sed -e 's/\\\\/\\\\\\\\/g' -e 's/\"/\\\\\"/g' | awk 'BEGIN{ORS=\"\\\\n\"} {print}' | sed 's/\\\\n$//'; }\n\n# ----------------------------------------------------------------------------- versions\nvalid_version() {\n    # 2.31.21+op77.138  or  2.31.21-unstable+op77.128\n    [[ \"$1\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-unstable)?\\+op77\\.[0-9]+$ ]]\n}\nversion_is_unstable() { [[ \"$1\" == *-unstable+* ]]; }\nversion_semver()      { printf '%s' \"${1%%[+-]*}\"; }\nversion_build()       { printf '%s' \"${1##*op77.}\"; }\n\n# is_newer CANDIDATE INSTALLED -> 0 when CANDIDATE is a newer build\nis_newer() {\n    local cand=\"$1\" inst=\"$2\" cs is\n    [ -z \"$inst\" ] && return 0\n    [ \"$cand\" = \"$inst\" ] && return 1\n    cs=\"$(version_semver \"$cand\")\"; is=\"$(version_semver \"$inst\")\"\n    if [ \"$cs\" != \"$is\" ]; then\n        [ \"$(printf '%s\\n%s\\n' \"$is\" \"$cs\" | sort -V | tail -n1)\" = \"$cs\" ]\n        return\n    fi\n    [ \"$(version_build \"$cand\")\" -gt \"$(version_build \"$inst\")\" ]\n}\n\n# ----------------------------------------------------------------------------- state\nstate_get() { [ -f \"$STATE_FILE\" ] && sed -n \"s/^$1=//p\" \"$STATE_FILE\" | head -n1 || true; }\nstate_write() {\n    cat > \"$STATE_FILE\" <<EOS\nVERSION=$1\nCHANNEL=$2\nSHA256=$3\nURL=$4\nINSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)\nEOS\n}\ninstalled_version() { state_get VERSION; }\ninstalled_channel() { state_get CHANNEL; }\n\n# ----------------------------------------------------------------------------- API\npointer_url() {\n    case \"$RELEASE_CHANNEL\" in\n        stable)   printf '%s/server/latest.json' \"$CDN_URL\" ;;\n        unstable) printf '%s/server/unstable/latest.json' \"$CDN_URL\" ;;\n        *) die \"RELEASE_CHANNEL must be 'stable' or 'unstable' (got '$RELEASE_CHANNEL')\" ;;\n    esac\n}\n\nhttp_get() {\n    curl -fsSL --retry 3 --retry-delay 2 --max-time 25 \\\n        -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' -A \"$USER_AGENT\" \"$1\"\n}\n\n# Rewrites legacy CDN origin and checks the artefact is on the CDN under /server/\n# (mirrors the release guards of the official website).\nartefact_url_ok() {\n    local url=\"$1\" version=\"$2\"\n    case \"$url\" in\n        \"$CDN_URL/server/$version/\"*|\"$OFFICIAL_CDN/server/$version/\"*) ;;\n        *) return 1 ;;\n    esac\n    case \"$url\" in *'?'*|*'#'*|*'@'*|*'/../'*) return 1 ;; esac\n    return 0\n}\n\n# Populates LATEST_* globals from the channel pointer. Returns 1 on any failure.\nLATEST_VERSION=\"\"; LATEST_URL=\"\"; LATEST_SHA256=\"\"; LATEST_SIZE=\"\"; LATEST_PUBLISHED=\"\"\nLATEST_CLIENT_VERSION=\"\"; LATEST_PROTOCOL=\"\"; LATEST_CHANNEL=\"\"\nfetch_latest() {\n    local url json builds linux proto\n    url=\"$(pointer_url)\"\n    log \"Checking release API: $url\"\n    if ! json=\"$(http_get \"$url\" | json_flat)\"; then\n        warn \"Could not reach the release API at $url\"\n        return 1\n    fi\n    [ -n \"$json\" ] || { warn \"Release API returned an empty document\"; return 1; }\n\n    LATEST_VERSION=\"$(json_str \"$json\" version)\"\n    [ -n \"$LATEST_VERSION\" ] || { warn \"Release API document has no 'version' field\"; return 1; }\n    valid_version \"$LATEST_VERSION\" || { warn \"Unexpected version string in pointer: $LATEST_VERSION\"; return 1; }\n\n    LATEST_CHANNEL=\"$(json_str \"$json\" channel)\"\n    if [ -n \"$LATEST_CHANNEL\" ] && [ \"$LATEST_CHANNEL\" != \"$RELEASE_CHANNEL\" ]; then\n        warn \"Pointer channel '$LATEST_CHANNEL' does not match requested channel '$RELEASE_CHANNEL'\"; return 1\n    fi\n    if [ \"$RELEASE_CHANNEL\" = \"stable\" ] && version_is_unstable \"$LATEST_VERSION\"; then\n        warn \"Stable pointer advertises a preview build ($LATEST_VERSION); refusing it\"; return 1\n    fi\n    if [ \"$RELEASE_CHANNEL\" = \"unstable\" ] && ! version_is_unstable \"$LATEST_VERSION\"; then\n        warn \"Unstable pointer advertises a non-preview build ($LATEST_VERSION); refusing it\"; return 1\n    fi\n\n    builds=\"$(printf '%s' \"$json\" | grep -oE '\"builds\"[[:space:]]*:[[:space:]]*\\{.*' || true)\"\n    linux=\"$(json_object \"$builds\" \"$PLATFORM\")\"\n    if [ -z \"$linux\" ]; then\n        warn \"Release $LATEST_VERSION has no $PLATFORM build in the pointer\"; return 1\n    fi\n    LATEST_URL=\"$(json_str \"$linux\" url)\"\n    LATEST_URL=\"${LATEST_URL/#$LEGACY_CDN\\//$OFFICIAL_CDN/}\"\n    LATEST_SHA256=\"$(json_str \"$linux\" archiveSha256 | tr '[:upper:]' '[:lower:]')\"\n    LATEST_SIZE=\"$(json_num \"$linux\" size || true)\"\n    LATEST_PUBLISHED=\"$(json_str \"$json\" publishedAtUtc)\"\n    [ -n \"$LATEST_PUBLISHED\" ] || LATEST_PUBLISHED=\"$(json_str \"$json\" publishedAt)\"\n    LATEST_CLIENT_VERSION=\"$(json_str \"$json\" clientVersion)\"\n    proto=\"$(json_object \"$json\" protocol)\"\n    if [ -n \"$proto\" ]; then\n        LATEST_PROTOCOL=\"$(json_num \"$proto\" major || true).$(json_num \"$proto\" minor || true)\"\n    fi\n\n    [ -n \"$LATEST_URL\" ] || { warn \"Pointer has no download URL for $PLATFORM\"; return 1; }\n    artefact_url_ok \"$LATEST_URL\" \"$LATEST_VERSION\" || { warn \"Rejected artefact URL outside the release directory: $LATEST_URL\"; return 1; }\n    return 0\n}\n\nprint_latest() {\n    local size_h=\"\"\n    if [ -n \"$LATEST_SIZE\" ]; then size_h=\"$(awk -v b=\"$LATEST_SIZE\" 'BEGIN{printf \"%.1f MB\", b/1000000}')\"; fi\n    log \"Latest $RELEASE_CHANNEL release : $LATEST_VERSION\"\n    [ -n \"$LATEST_PUBLISHED\" ]      && log \"Published                : $LATEST_PUBLISHED\"\n    [ -n \"$size_h\" ]                && log \"Archive size             : $size_h\"\n    [ -n \"$LATEST_CLIENT_VERSION\" ] && log \"Required client version  : $LATEST_CLIENT_VERSION\"\n    [ -n \"$LATEST_PROTOCOL\" ]       && log \"Protocol                 : $LATEST_PROTOCOL\"\n    return 0\n}\n\n# ----------------------------------------------------------------------------- notifications\nnotify() {\n    # notify TITLE LINE...\n    local title=\"$1\"; shift\n    banner \"$title\" \"$@\"\n    [ -n \"$UPDATE_WEBHOOK_URL\" ] || return 0\n    local body=\"\" line payload name\n    name=\"${SERVER_NAME:-Open77 server}\"\n    for line in \"$@\"; do body=\"${body}${line}\"$'\\n'; done\n    payload=\"{\\\"username\\\":\\\"Open77 Egg\\\",\\\"content\\\":\\\"**$(json_escape \"$title\")** - $(json_escape \"$name\")\\\\n$(json_escape \"$body\")\\\"}\"\n    if curl -fsS --max-time 10 -H 'Content-Type: application/json' -A \"$USER_AGENT\" -d \"$payload\" \"$UPDATE_WEBHOOK_URL\" >/dev/null 2>&1; then\n        log \"Webhook notification sent.\"\n    else\n        warn \"Webhook notification failed (UPDATE_WEBHOOK_URL).\"\n    fi\n}\n\n# ----------------------------------------------------------------------------- install\n# install_release VERSION URL SHA256\ninstall_release() {\n    local version=\"$1\" url=\"$2\" sha=\"$3\"\n    local archive=\"$WORK_DIR/open77-server.tar.gz\" staging=\"$WORK_DIR/extract\" src entries bin_dir prev\n\n    mkdir -p \"$SERVER_DIR\" \"$WORK_DIR\"\n    rm -rf \"$staging\" \"$archive\"\n    mkdir -p \"$staging\"\n\n    log \"Downloading $version\"\n    log \"  $url\"\n    curl -fL --retry 3 --retry-delay 3 --max-time 3600 -A \"$USER_AGENT\" --progress-bar -o \"$archive\" \"$url\" \\\n        || die \"Download failed.\"\n\n    if is_true \"$VERIFY_CHECKSUM\"; then\n        if [ -n \"$sha\" ]; then\n            log \"Verifying SHA-256 from the release API\"\n            if ! printf '%s  %s\\n' \"$sha\" \"$archive\" | sha256sum -c --status; then\n                err \"Checksum mismatch for $archive\"\n                err \"  expected $sha\"\n                err \"  actual   $(sha256sum \"$archive\" | cut -d' ' -f1)\"\n                rm -f \"$archive\"\n                exit 1\n            fi\n            ok \"Checksum OK\"\n        else\n            warn \"No archiveSha256 published for this build; skipping verification.\"\n        fi\n    else\n        warn \"Checksum verification disabled (VERIFY_CHECKSUM=0).\"\n    fi\n\n    log \"Extracting\"\n    tar -xzf \"$archive\" -C \"$staging\" || die \"Extraction failed.\"\n\n    # Accept archives with or without a single top-level directory.\n    src=\"$staging\"\n    if [ ! -e \"$src/$BINARY\" ]; then\n        entries=\"$(find \"$staging\" -mindepth 1 -maxdepth 1 | wc -l)\"\n        if [ \"$entries\" -eq 1 ] && [ -d \"$(find \"$staging\" -mindepth 1 -maxdepth 1)\" ]; then\n            src=\"$(find \"$staging\" -mindepth 1 -maxdepth 1)\"\n        fi\n    fi\n    if [ ! -e \"$src/$BINARY\" ]; then\n        bin_dir=\"$(find \"$staging\" -maxdepth 4 -type f -name \"$BINARY\" -printf '%h\\n' | head -n1 || true)\"\n        [ -n \"$bin_dir\" ] && src=\"$bin_dir\"\n    fi\n    [ -e \"$src/$BINARY\" ] || { err \"Could not find $BINARY in the archive. Contents:\"; find \"$staging\" -maxdepth 2 | sed 's/^/    /' >&2; exit 1; }\n\n    # Never clobber the operator's configuration with one shipped in an archive.\n    rm -f \"$src/server.jsonc\"\n\n    prev=\"$(installed_version)\"\n    if [ -n \"$prev\" ] && [ -f \"$SERVER_DIR/server.jsonc\" ]; then\n        mkdir -p \"$BACKUP_DIR\"\n        cp -f \"$SERVER_DIR/server.jsonc\" \"$BACKUP_DIR/server.jsonc.$prev\"\n        log \"Backed up server.jsonc to .op77-backups/server.jsonc.$prev\"\n    fi\n\n    cp -a \"$src\"/. \"$SERVER_DIR\"/\n    chmod +x \"$SERVER_DIR/$BINARY\" 2>/dev/null || true\n    [ -f \"$SERVER_DIR/start.sh\" ] && chmod +x \"$SERVER_DIR/start.sh\"\n\n    state_write \"$version\" \"$RELEASE_CHANNEL\" \"$sha\" \"$url\"\n    rm -rf \"$WORK_DIR\"\n    ok \"Installed Open77 server $version ($RELEASE_CHANNEL)\"\n}\n\npinned() { [ \"$(printf '%s' \"$SERVER_VERSION\" | tr '[:upper:]' '[:lower:]')\" != \"latest\" ]; }\n\n# Resolve the release that SERVER_VERSION / RELEASE_CHANNEL ask for.\n# Sets TARGET_VERSION, TARGET_URL, TARGET_SHA256.\nresolve_target() {\n    TARGET_VERSION=\"\"; TARGET_URL=\"\"; TARGET_SHA256=\"\"\n    if pinned; then\n        valid_version \"$SERVER_VERSION\" || die \"SERVER_VERSION '$SERVER_VERSION' is not a valid Open77 version (e.g. 2.31.21+op77.138).\"\n        TARGET_VERSION=\"$SERVER_VERSION\"\n        TARGET_URL=\"$CDN_URL/server/$SERVER_VERSION/open77-server-$SERVER_VERSION-$PLATFORM.tar.gz\"\n        # Reuse the published checksum when the pin happens to be the current release.\n        if fetch_latest 2>/dev/null && [ \"$LATEST_VERSION\" = \"$SERVER_VERSION\" ]; then\n            TARGET_URL=\"$LATEST_URL\"; TARGET_SHA256=\"$LATEST_SHA256\"\n        fi\n        log \"Pinned release: $TARGET_VERSION\"\n    else\n        fetch_latest || die \"Unable to resolve the latest $RELEASE_CHANNEL release from the API.\"\n        print_latest\n        TARGET_VERSION=\"$LATEST_VERSION\"; TARGET_URL=\"$LATEST_URL\"; TARGET_SHA256=\"$LATEST_SHA256\"\n    fi\n}\n\n# ----------------------------------------------------------------------------- config\nensure_config() {\n    local cfg=\"$SERVER_DIR/${CONFIG_FILE:-server.jsonc}\"\n    [ -f \"$cfg\" ] && return 0\n    local name=\"${SERVER_NAME:-Open77 Server}\" vis port endpoint\n    vis=\"$(printf '%s' \"${VISIBILITY:-Public}\" | tr '[:upper:]' '[:lower:]')\"\n    port=\"${SERVER_PORT:-11778}\"\n    endpoint=\"${PUBLIC_IP:-127.0.0.1}:$port\"\n    log \"Creating $cfg (first-run wizard is skipped inside the panel)\"\n    cat > \"$cfg\" <<EOC\n{\n  // Generated by the Open77 Pelican egg. Edit freely: values set in the panel\n  // (startup variables) are passed as command-line overrides and win at boot,\n  // everything else in this file is used as-is. Warden edits this file too.\n  \"identity\": {\n    \"name\": \"$(printf '%s' \"$name\" | sed 's/\"/\\\\\"/g')\",\n    \"visibility\": \"$vis\"\n  },\n  \"network\": {\n    \"port\": $port,\n    \"publicEndpoint\": \"$endpoint\"\n  },\n  \"logging\": {\n    \"level\": \"${LOG_LEVEL:-info}\"\n  },\n  \"masterServer\": {\n    \"enabled\": true,\n    \"url\": \"https://master.open2077.net/\",\n    // Leave null and provide the key through the OP77_LICENSE_KEY variable.\n    \"licenseKey\": null\n  },\n  \"warden\": {\n    // Managed by the WARDEN_ENABLED / WARDEN_PORT variables at boot.\n    \"enabled\": false,\n    \"bind\": \"127.0.0.1:11780\"\n  },\n  \"rcon\": {\n    // Managed by the RCON_ENABLED / RCON_PORT variables at boot.\n    \"enabled\": false,\n    \"bindAddress\": \"127.0.0.1\",\n    \"port\": 11782,\n    \"passwordEnvironmentVariable\": \"OP77_RCON_PASSWORD\"\n  },\n  \"metrics\": {\n    \"enabled\": false,\n    \"listenUrl\": \"http://127.0.0.1:11783\",\n    \"tokenEnvironmentVariable\": \"OP77_METRICS_TOKEN\"\n  },\n  \"database\": {\n    // Set OP77_DATABASE_CONNECTION in the panel to enable the SQL bridge.\n    \"enabled\": false,\n    \"connectionStringEnvironmentVariable\": \"OP77_DATABASE_CONNECTION\"\n  }\n}\nEOC\n}\n\n# ----------------------------------------------------------------------------- commands\ncmd_status() {\n    local v c t\n    v=\"$(installed_version)\"; c=\"$(installed_channel)\"; t=\"$(state_get INSTALLED_AT)\"\n    if [ -z \"$v\" ]; then log \"No Open77 server build installed in $SERVER_DIR\"; return 1; fi\n    log \"Installed release : $v ($c)\"\n    [ -n \"$t\" ] && log \"Installed at      : $t\"\n    return 0\n}\n\ncmd_install() {\n    resolve_target\n    if [ \"$(installed_version)\" = \"$TARGET_VERSION\" ] && [ -x \"$SERVER_DIR/$BINARY\" ] && ! is_true \"${FORCE:-0}\"; then\n        ok \"Open77 server $TARGET_VERSION is already installed; nothing to do (set FORCE=1 to reinstall).\"\n    else\n        install_release \"$TARGET_VERSION\" \"$TARGET_URL\" \"$TARGET_SHA256\"\n    fi\n    ensure_config\n}\n\n# Returns 0 and sets UPDATE_REASON when the latest release should replace the installed one.\nupdate_available() {\n    local inst ich\n    inst=\"$(installed_version)\"; ich=\"$(installed_channel)\"\n    UPDATE_REASON=\"\"\n    [ -n \"$inst\" ] || { UPDATE_REASON=\"no build installed\"; return 0; }\n    [ \"$LATEST_VERSION\" = \"$inst\" ] && return 1\n    if [ -n \"$ich\" ] && [ \"$ich\" != \"$RELEASE_CHANNEL\" ]; then\n        UPDATE_REASON=\"channel changed from $ich to $RELEASE_CHANNEL\"; return 0\n    fi\n    if is_newer \"$LATEST_VERSION\" \"$inst\"; then\n        UPDATE_REASON=\"newer build published\"; return 0\n    fi\n    return 1\n}\n\ncmd_check() {\n    fetch_latest || return 2\n    print_latest\n    cmd_status || true\n    if update_available; then\n        banner \"UPDATE AVAILABLE: $LATEST_VERSION ($UPDATE_REASON)\" \"Installed: $(installed_version || echo none)\"\n        return 3\n    fi\n    ok \"Installed build is up to date.\"\n    return 0\n}\n\ncmd_update() {\n    fetch_latest || die \"Unable to query the release API.\"\n    print_latest\n    if update_available; then\n        install_release \"$LATEST_VERSION\" \"$LATEST_URL\" \"$LATEST_SHA256\"\n    else\n        ok \"Already on the latest $RELEASE_CHANNEL build ($(installed_version)).\"\n    fi\n    ensure_config\n}\n\ncmd_boot() {\n    local inst\n    inst=\"$(installed_version)\"\n    banner \"Open77 Dedicated Server - Pelican egg\" \\\n           \"Channel : $RELEASE_CHANNEL\" \\\n           \"Version : ${SERVER_VERSION} (installed: ${inst:-none})\" \\\n           \"Auto-update : $(is_true \"$AUTO_UPDATE\" && echo on || echo off)\"\n\n    if [ ! -x \"$SERVER_DIR/$BINARY\" ]; then\n        warn \"Server binary not found; installing.\"\n        cmd_install\n        return 0\n    fi\n\n    if pinned; then\n        if [ \"$inst\" != \"$SERVER_VERSION\" ]; then\n            log \"SERVER_VERSION is pinned to $SERVER_VERSION but $inst is installed; switching.\"\n            cmd_install\n        fi\n        if fetch_latest; then\n            print_latest\n            if [ \"$LATEST_VERSION\" != \"$SERVER_VERSION\" ] && is_newer \"$LATEST_VERSION\" \"$SERVER_VERSION\"; then\n                notify \"Open77 update available: $LATEST_VERSION\" \\\n                    \"Running pinned build $SERVER_VERSION.\" \\\n                    \"Set SERVER_VERSION to 'latest' (or to $LATEST_VERSION) to upgrade.\" \\\n                    \"Published: ${LATEST_PUBLISHED:-unknown}\"\n            fi\n        fi\n        ensure_config\n        return 0\n    fi\n\n    if ! fetch_latest; then\n        warn \"Update check skipped; starting the installed build ($inst).\"\n        ensure_config\n        return 0\n    fi\n    print_latest\n\n    if update_available; then\n        if is_true \"$AUTO_UPDATE\"; then\n            notify \"Open77 update installing: $LATEST_VERSION\" \\\n                \"Reason: $UPDATE_REASON\" \\\n                \"Previous: ${inst:-none}\" \\\n                \"Published: ${LATEST_PUBLISHED:-unknown}\" \\\n                \"${LATEST_CLIENT_VERSION:+Required client: $LATEST_CLIENT_VERSION}\"\n            install_release \"$LATEST_VERSION\" \"$LATEST_URL\" \"$LATEST_SHA256\"\n        else\n            notify \"Open77 update available: $LATEST_VERSION\" \\\n                \"Reason: $UPDATE_REASON\" \\\n                \"Installed: ${inst:-none}\" \\\n                \"Published: ${LATEST_PUBLISHED:-unknown}\" \\\n                \"${LATEST_CLIENT_VERSION:+Required client: $LATEST_CLIENT_VERSION}\" \\\n                \"Enable AUTO_UPDATE in the panel or press Reinstall to upgrade.\"\n        fi\n    else\n        ok \"Installed build $inst is the latest $RELEASE_CHANNEL release.\"\n    fi\n    ensure_config\n}\n\nmain() {\n    local cmd=\"${1:-boot}\"\n    command -v curl >/dev/null 2>&1 || die \"curl is required.\"\n    case \"$cmd\" in\n        install) cmd_install ;;\n        check)   cmd_check ;;\n        update)  cmd_update ;;\n        boot)    cmd_boot ;;\n        status)  cmd_status ;;\n        config)  ensure_config ;;\n        -h|--help|help)\n            sed -n '2,30p' \"$0\" ;;\n        *) die \"Unknown command '$cmd' (install|check|update|boot|status|config)\" ;;\n    esac\n}\n\nmain \"$@\"\n__OP77_UPDATER__\n\ncat > \"$SERVER_DIR/op77-start.sh\" <<'__OP77_START__'\n#!/usr/bin/env bash\n# ------------------------------------------------------------------------------\n# op77-start.sh - Pelican Panel start wrapper for the Open77 dedicated server\n#\n# 1. Runs the release updater (API check, notification, optional auto-update).\n# 2. Translates the egg variables into Open77 startup overrides.\n# 3. exec's Open77.Server so SIGINT (panel Stop) reaches the server directly.\n# ------------------------------------------------------------------------------\nset -euo pipefail\ncd \"${SERVER_DIR:-/home/container}\"\nexport SERVER_DIR=\"$PWD\"\n\nc_warn=$'\\033[1;33m'; c_info=$'\\033[1;36m'; c_reset=$'\\033[0m'\nlog()  { printf '%s[op77]%s %s\\n' \"$c_info\" \"$c_reset\" \"$*\"; }\nwarn() { printf '%s[op77] WARNING:%s %s\\n' \"$c_warn\" \"$c_reset\" \"$*\" >&2; }\nis_true() { case \"$(printf '%s' \"${1:-}\" | tr '[:upper:]' '[:lower:]')\" in 1|true|yes|on) return 0;; *) return 1;; esac; }\n\n[ -f ./op77-updater.sh ] || { echo \"op77-updater.sh is missing - reinstall the server from the panel.\" >&2; exit 1; }\nbash ./op77-updater.sh boot\n\nBINARY=\"./Open77.Server\"\n[ -x \"$BINARY\" ] || chmod +x \"$BINARY\" 2>/dev/null || true\n[ -x \"$BINARY\" ] || { echo \"Open77.Server not found or not executable - reinstall the server.\" >&2; exit 1; }\n\n# ----------------------------------------------------------------------------- public address\nPUBLIC_IP=\"${PUBLIC_IP:-${OP77_PUBLIC_IP:-}}\"\nis_private_ip() {\n    case \"$1\" in\n        \"\"|0.0.0.0|127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|::|::1|fe80:*|fc*|fd*) return 0 ;;\n        *) return 1 ;;\n    esac\n}\nif [ -z \"$PUBLIC_IP\" ]; then\n    if ! is_private_ip \"${SERVER_IP:-}\"; then\n        PUBLIC_IP=\"$SERVER_IP\"\n        log \"Using allocation address as public IP: $PUBLIC_IP\"\n    else\n        for svc in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do\n            PUBLIC_IP=\"$(curl -4 -fsS --max-time 8 \"$svc\" 2>/dev/null | tr -d '[:space:]' || true)\"\n            [ -n \"$PUBLIC_IP\" ] && { log \"Detected public IP via $svc: $PUBLIC_IP\"; break; }\n        done\n    fi\nfi\nif [ -z \"$PUBLIC_IP\" ]; then\n    warn \"Could not determine a public IP. Set the PUBLIC_IP variable; players and resource downloads need it.\"\n    PUBLIC_IP=\"${SERVER_IP:-0.0.0.0}\"\nfi\n\nGAME_PORT=\"${SERVER_PORT:-11778}\"\nDOWNLOAD_PORT=\"${DOWNLOAD_PORT:-11779}\"\n\n# ----------------------------------------------------------------------------- arguments\nARGS=(\n    --config \"${CONFIG_FILE:-server.jsonc}\"\n    --no-setup\n    --port \"$GAME_PORT\"\n    --public-ip \"$PUBLIC_IP\"\n    --public-endpoint \"${PUBLIC_ENDPOINT:-$PUBLIC_IP:$GAME_PORT}\"\n    --set \"resources.download.enabled=true\"\n    --set \"resources.download.listenUrl=http://0.0.0.0:${DOWNLOAD_PORT}/\"\n    --set \"resources.download.publicBaseUrl=http://${PUBLIC_IP}:${DOWNLOAD_PORT}/\"\n)\n[ -n \"${SERVER_NAME:-}\" ]        && ARGS+=(--name \"$SERVER_NAME\")\n[ -n \"${SERVER_DESCRIPTION:-}\" ] && ARGS+=(--description \"$SERVER_DESCRIPTION\")\n[ -n \"${VISIBILITY:-}\" ]         && ARGS+=(--visibility \"$VISIBILITY\")\n[ -n \"${MAX_PLAYERS:-}\" ]        && ARGS+=(--max-players \"$MAX_PLAYERS\")\n[ -n \"${LOG_LEVEL:-}\" ]          && ARGS+=(--log-level \"$LOG_LEVEL\")\n[ -n \"${TICK_RATE:-}\" ]          && ARGS+=(--tick-rate \"$TICK_RATE\")\n\n# Warden (browser admin panel) - needs a second allocation on WARDEN_PORT.\nif is_true \"${WARDEN_ENABLED:-0}\"; then\n    if [ -n \"${WARDEN_PORT:-}\" ]; then\n        ARGS+=(--set \"warden.enabled=true\" --set \"warden.bind=0.0.0.0:${WARDEN_PORT}\")\n        log \"Warden admin panel: http://${PUBLIC_IP}:${WARDEN_PORT} (watch the console for the one-time setup PIN on first start)\"\n    else\n        warn \"WARDEN_ENABLED is on but WARDEN_PORT is empty; Warden stays disabled.\"\n        ARGS+=(--set \"warden.enabled=false\")\n    fi\nelse\n    ARGS+=(--set \"warden.enabled=false\")\nfi\n\n# RCON (TCP) - needs an allocation on RCON_PORT and OP77_RCON_PASSWORD.\nif is_true \"${RCON_ENABLED:-0}\"; then\n    if [ -z \"${RCON_PORT:-}\" ] || [ -z \"${OP77_RCON_PASSWORD:-}\" ]; then\n        warn \"RCON_ENABLED is on but RCON_PORT or OP77_RCON_PASSWORD is empty; RCON stays disabled.\"\n        ARGS+=(--set \"rcon.enabled=false\")\n    else\n        ARGS+=(--set \"rcon.enabled=true\" --set \"rcon.bindAddress=0.0.0.0\" --set \"rcon.port=${RCON_PORT}\"\n               --set \"rcon.allowInsecureRemote=true\")\n        warn \"RCON is exposed on ${PUBLIC_IP}:${RCON_PORT} without TLS. Restrict it with a firewall or configure rcon.tlsCertificateFile in server.jsonc.\"\n    fi\nelse\n    ARGS+=(--set \"rcon.enabled=false\")\nfi\n\n# Database bridge - enabled automatically when a connection string is provided.\nif [ -n \"${OP77_DATABASE_CONNECTION:-}\" ]; then\n    ARGS+=(--set \"database.enabled=true\")\nfi\n\n# License key is read from the OP77_LICENSE_KEY environment variable by the server.\nif [ -z \"${OP77_LICENSE_KEY:-}\" ]; then\n    warn \"OP77_LICENSE_KEY is empty. Mint a key at https://open2077.net/account/keys - without it the server cannot enrol with the master or be listed in the launcher.\"\nfi\n\n# Free-form extra arguments (word-split on purpose).\nif [ -n \"${EXTRA_ARGS:-}\" ]; then\n    # shellcheck disable=SC2206\n    EXTRA=( $EXTRA_ARGS )\n    ARGS+=(\"${EXTRA[@]}\")\nfi\n\nlog \"Game port UDP ${GAME_PORT} | resource downloads TCP ${DOWNLOAD_PORT} | public endpoint ${PUBLIC_ENDPOINT:-$PUBLIC_IP:$GAME_PORT}\"\nif is_true \"${CHECK_CONFIG_ONLY:-0}\"; then\n    log \"CHECK_CONFIG_ONLY set: validating configuration and exiting.\"\n    exec \"$BINARY\" \"${ARGS[@]}\" --check-config\nfi\n\nlog \"Starting: $BINARY ${ARGS[*]}\"\nexec \"$BINARY\" \"${ARGS[@]}\"\n__OP77_START__\n\nchmod +x \"$SERVER_DIR/op77-updater.sh\" \"$SERVER_DIR/op77-start.sh\"\n\n# Install (or re-install) the requested release and create server.jsonc when missing.\nbash \"$SERVER_DIR/op77-updater.sh\" install\n\necho \"[op77] Installation complete.\"",
+      "container": "ghcr.io/pelican-eggs/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": 3,
+      "name": "Auto Update",
+      "description": "Check the release API on every start. 1 = download and install newer builds automatically (server.jsonc is preserved and backed up). 0 = only print a notice in the console and send a webhook.",
+      "env_variable": "AUTO_UPDATE",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "boolean"
+      ]
+    },
+    {
+      "sort": 21,
+      "name": "CDN URL",
+      "description": "Release CDN origin. Only change this if the project moves its downloads.",
+      "env_variable": "CDN_URL",
+      "default_value": "https://cdn.open77.dev",
+      "user_viewable": true,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "string",
+        "url"
+      ]
+    },
+    {
+      "sort": 22,
+      "name": "Config File",
+      "description": "Path of the JSONC configuration file relative to the server directory.",
+      "env_variable": "CONFIG_FILE",
+      "default_value": "server.jsonc",
+      "user_viewable": true,
+      "user_editable": false,
+      "rules": [
+        "required",
+        "string",
+        "max:255"
+      ]
+    },
+    {
+      "sort": 12,
+      "name": "Resource Download Port",
+      "description": "TCP port clients use to download server resources (default 11779). Add this port as an additional allocation on the server and open it on the firewall.",
+      "env_variable": "DOWNLOAD_PORT",
+      "default_value": "11779",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "integer",
+        "between:1024,65535"
+      ]
+    },
+    {
+      "sort": 20,
+      "name": "Extra Arguments",
+      "description": "Additional Open77.Server arguments, e.g. --tick-rate 60 --set simulation.snapshotRate=20. See https://open2077.net/docs/server-startup",
+      "env_variable": "EXTRA_ARGS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:1024"
+      ]
+    },
+    {
+      "sort": 13,
+      "name": "Log Level",
+      "description": "Console log level: trace, debug, info, warn or error.",
+      "env_variable": "LOG_LEVEL",
+      "default_value": "info",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "in:trace,debug,info,warn,error"
+      ]
+    },
+    {
+      "sort": 10,
+      "name": "Max Players",
+      "description": "Maximum concurrent players (network.maximumPlayers).",
+      "env_variable": "MAX_PLAYERS",
+      "default_value": "32",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "integer",
+        "between:1,1024"
+      ]
+    },
+    {
+      "sort": 19,
+      "name": "Database Connection",
+      "description": "Optional MySQL/MariaDB connection string (MySqlConnector style: Server=...;Port=3306;Database=...;User ID=...;Password=...). When set, the SQL bridge is enabled automatically.",
+      "env_variable": "OP77_DATABASE_CONNECTION",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:2048"
+      ]
+    },
+    {
+      "sort": 6,
+      "name": "License Key",
+      "description": "Server license key (op77_live_...) minted at https://open2077.net/account/keys. Required for master enrolment and the launcher listing. Passed to the server as the OP77_LICENSE_KEY environment variable.",
+      "env_variable": "OP77_LICENSE_KEY",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:255"
+      ]
+    },
+    {
+      "sort": 18,
+      "name": "RCON Password",
+      "description": "RCON service password (16-1024 characters). Passed to the server as the OP77_RCON_PASSWORD environment variable.",
+      "env_variable": "OP77_RCON_PASSWORD",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:1024"
+      ]
+    },
+    {
+      "sort": 11,
+      "name": "Public IP",
+      "description": "Public IPv4 address or hostname players connect to. Leave empty to use the allocation IP, or auto-detect it when the allocation is a private address.",
+      "env_variable": "PUBLIC_IP",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:255"
+      ]
+    },
+    {
+      "sort": 16,
+      "name": "RCON Enabled",
+      "description": "Enable the authenticated TCP RCON service on RCON_PORT (plaintext unless rcon.tlsCertificateFile is configured in server.jsonc).",
+      "env_variable": "RCON_ENABLED",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "boolean"
+      ]
+    },
+    {
+      "sort": 17,
+      "name": "RCON Port",
+      "description": "TCP port for RCON (default 11782). Add it as an additional allocation.",
+      "env_variable": "RCON_PORT",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "integer",
+        "between:1024,65535"
+      ]
+    },
+    {
+      "sort": 1,
+      "name": "Release Channel",
+      "description": "Official Open77 release channel. 'stable' reads /server/latest.json, 'unstable' reads /server/unstable/latest.json on the CDN. Unstable builds require players to use the matching unstable launcher channel.",
+      "env_variable": "RELEASE_CHANNEL",
+      "default_value": "stable",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "in:stable,unstable"
+      ]
+    },
+    {
+      "sort": 8,
+      "name": "Server Description",
+      "description": "Short description shown in the launcher.",
+      "env_variable": "SERVER_DESCRIPTION",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "max:500"
+      ]
+    },
+    {
+      "sort": 7,
+      "name": "Server Name",
+      "description": "Name shown in the launcher server browser.",
+      "env_variable": "SERVER_NAME",
+      "default_value": "Open77 Server",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:120"
+      ]
+    },
+    {
+      "sort": 2,
+      "name": "Server Version",
+      "description": "'latest' follows the channel's release pointer. Pin an exact build (e.g. 2.31.21+op77.138 or 2.31.21-unstable+op77.128) to stay on it; updates are then only announced, never installed.",
+      "env_variable": "SERVER_VERSION",
+      "default_value": "latest",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "regex:/^(latest|[0-9]+\\.[0-9]+\\.[0-9]+(-unstable)?\\+op77\\.[0-9]+)$/"
+      ]
+    },
+    {
+      "sort": 4,
+      "name": "Update Webhook URL",
+      "description": "Optional Discord-compatible webhook. Receives a message when an update is available or has been installed.",
+      "env_variable": "UPDATE_WEBHOOK_URL",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "string",
+        "url"
+      ]
+    },
+    {
+      "sort": 5,
+      "name": "Verify Checksum",
+      "description": "Verify the downloaded archive against the archiveSha256 published by the release API.",
+      "env_variable": "VERIFY_CHECKSUM",
+      "default_value": "1",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "boolean"
+      ]
+    },
+    {
+      "sort": 9,
+      "name": "Visibility",
+      "description": "Public = listed in the launcher, Unlisted = joinable by direct connect only, Private = hidden.",
+      "env_variable": "VISIBILITY",
+      "default_value": "Public",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "in:Public,Unlisted,Private"
+      ]
+    },
+    {
+      "sort": 14,
+      "name": "Warden Enabled",
+      "description": "Serve the Warden browser admin panel on WARDEN_PORT. The one-time setup PIN is printed in the console on first start.",
+      "env_variable": "WARDEN_ENABLED",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "boolean"
+      ]
+    },
+    {
+      "sort": 15,
+      "name": "Warden Port",
+      "description": "TCP port for Warden (default 11780). Add it as an additional allocation. Keep it firewalled or behind a VPN/SSH tunnel.",
+      "env_variable": "WARDEN_PORT",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "nullable",
+        "integer",
+        "between:1024,65535"
+      ]
+    }
+  ]
+}

@@ -3878,6 +3878,14 @@ fake_request POST /templates/romm-streaming/deploy '{"target_stack":"demo","auto
 check "romm streaming: another subdomain and port from the deploy's variables" "1 1 1" "$(grep -c 'Host(`games.smoke.test`)' "$_ZZR/demo/romm-streaming.yml" 2>/dev/null) $(grep -cE 'url: "http://[^"]+:3020"' "$_ZZR/demo/romm-streaming.yml" 2>/dev/null) $(grep -c '^          host: https://games.smoke.test$' "$(_rsw)" 2>/dev/null)"
 # the stacks as they were: the sections below count demo's and demo2's services
 for _st in demo demo2; do command cp -f "$WORK/rs-$_st.yml" "$WORK/Stacks/$_st/docker-compose.yml"; command cp -f "$WORK/rs-$_st.env" "$WORK/Stacks/$_st/.env"; rm -f "$WORK/rs-$_st.yml" "$WORK/rs-$_st.env" "$_ZZR/$_st/romm-streaming.yml"; rm -rf "$WORK/Stacks/$_st/App-Data/RomM-Streaming"; done; _RSW=$(_rsw); [[ -n "$_RSW" ]] && rm -rf "$(dirname "$_RSW")"
+# pelican: a route per service with the template's subdomains (panel. to the panel, play. to Wings' API on 8080), both
+# open (Pelican signs people in itself), the panel's URL filled from its route and SQLite's file in the persistent volume
+command cp -f "$WORK/Stacks/demo2/docker-compose.yml" "$WORK/pl-demo2.yml"; command cp -f "$WORK/Stacks/demo2/.env" "$WORK/pl-demo2.env" 2>/dev/null || : > "$WORK/pl-demo2.env"
+command rm -rf "$WORK/.templates/pelican"; cp -r "$ROOT/.templates/pelican" "$WORK/.templates/pelican"
+check "pelican: deploys" 200 "$(fake_request POST /templates/pelican/deploy '{"target_stack":"demo2","auto_start":false}' | status_of)"
+check "pelican: panel.<domain> to the panel, play.<domain> to Wings' API, neither behind Authelia" "1 1 1 1 0" "$(grep -c 'Host(`panel.smoke.test`)' "$_ZZR/demo2/pelican-panel.yml" 2>/dev/null) $(grep -c 'url: "http://Pelican-Panel:80"' "$_ZZR/demo2/pelican-panel.yml" 2>/dev/null) $(grep -c 'Host(`play.smoke.test`)' "$_ZZR/demo2/pelican-wings.yml" 2>/dev/null) $(grep -c 'url: "http://Pelican-Wings:8080"' "$_ZZR/demo2/pelican-wings.yml" 2>/dev/null) $(cat "$_ZZR/demo2/pelican-panel.yml" "$_ZZR/demo2/pelican-wings.yml" 2>/dev/null | grep -c '"authelia-forwardauth"')"
+check "pelican: the panel's URL is its route, SQLite's file in /pelican-data" "1 1" "$(grep -c 'APP_URL=https://panel.smoke.test$' "$WORK/Stacks/demo2/docker-compose.yml") $(grep -c 'DB_DATABASE=/pelican-data/database/database.sqlite$' "$WORK/Stacks/demo2/docker-compose.yml")"
+command cp -f "$WORK/pl-demo2.yml" "$WORK/Stacks/demo2/docker-compose.yml"; command cp -f "$WORK/pl-demo2.env" "$WORK/Stacks/demo2/.env"; rm -f "$WORK/pl-demo2.yml" "$WORK/pl-demo2.env" "$_ZZR/demo2/pelican-panel.yml" "$_ZZR/demo2/pelican-wings.yml"; rm -rf "$WORK/Stacks/demo2/App-Data/Pelican"
 # a template deployed with auto_start into a stack that uses the core Redis password (the core stack) before DCS ever started
 # that stack (a fresh install: setup.sh brings the core stack up by itself): the password is made then, as a start makes it,
 # and the stack starts instead of waiting for a secret nobody is meant to type
@@ -4170,6 +4178,7 @@ check "rebuild: viewer denied"               403 "$(viewer_request POST /traefik
 _FC=$(PATH="$WORK/fakebin:$PATH" _lib _routes_apply_local_chain '{"http":{"routers":{"m1-routed-tpl-dcs":{"rule":"Host(`a.smoke.test`)","service":"m1-routed-tpl-dcs"},"m1-bypass-tpl-dcs":{"rule":"Host(`b.smoke.test`)","service":"m1-bypass-tpl-dcs"}},"services":{}}}')
 check "fleet chain: protected router"        'traefik-chain compress-gzip authelia-forwardauth' "$(printf '%s' "$_FC" | jq -r '.http.routers["m1-routed-tpl-dcs"].middlewares | join(" ")')"
 check "fleet chain: bypass router open"      'traefik-chain compress-gzip' "$(printf '%s' "$_FC" | jq -r '.http.routers["m1-bypass-tpl-dcs"].middlewares | join(" ")')"
+check "fleet chain: a service of a bypass template (pelican-panel of pelican) open" 'traefik-chain compress-gzip' "$(PATH="$WORK/fakebin:$PATH" _lib _routes_apply_local_chain '{"http":{"routers":{"m-1-pelican-panel-dcs":{"rule":"Host(`p.smoke.test`)","service":"x"}},"services":{}}}' | jq -r '.http.routers["m-1-pelican-panel-dcs"].middlewares | join(" ")')"
 # a template deployed into a VM through the hub: Authelia is the hub's — the choice is kept here, the VM gets a plain deploy
 _lib _fleet_update '.members += [{id: "zz-vm", name: "zz-vm", url: "http://127.0.0.1:9", username: "dcs-hub", role: "admin", source: "manual", added_by: "smoke", added_at: 0, vmid: null, node: null, stacks: []}]'
 _MP=/fleet/members/zz-vm/api/templates/routed-tpl/deploy; _FAJ="$WORK/.data/fleet-auth.json"

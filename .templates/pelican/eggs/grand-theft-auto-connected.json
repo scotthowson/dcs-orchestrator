@@ -1,0 +1,93 @@
+{
+  "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PANEL",
+  "meta": {
+    "version": "PLCN_v3",
+    "update_url": null
+  },
+  "exported_at": "2026-10-18T17:46:37+00:00",
+  "name": "Grand Theft Auto Connected",
+  "author": "admin@softwarenoob.com",
+  "uuid": "8dd48285-6510-439e-8397-fa79dc297ef6",
+  "description": "Grand Theft Auto Connected is a custom scriptable multiplayer modification for multiple Grand Theft Auto games.",
+  "icon": null,
+  "tags": [],
+  "features": null,
+  "docker_images": {
+    "ghcr.io/parkervcp/yolks:debian": "ghcr.io/parkervcp/yolks:debian"
+  },
+  "file_denylist": [],
+  "startup_commands": {
+    "Default": "./Server"
+  },
+  "config": {
+    "files": "{\n    \"server.xml\": {\n        \"parser\": \"xml\",\n        \"find\": {\n            \"server.servername\": \"{{server.environment.SERVERNAME}}\",\n            \"server.port\": \"{{server.allocations.default.port}}\",\n            \"server.httpport\": \"{{server.allocations.default.port}}\",\n            \"server.game\": \"{{server.environment.GAMETYPE}}\",\n            \"server.serverbrowser\": \"{{server.environment.SERVERBROWSER}}\"\n        }\n    }\n}",
+    "startup": "{\n    \"done\": \"Successfully added server\"\n}",
+    "logs": "{}",
+    "stop": "quit"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/bash\r\ncd /mnt/server\r\n\r\n\r\nif [ \"${DL_VERSION}\" == \"latest\" ]; then\r\n    DOWNLOAD_LINK=https://gtaconnected.com/downloads/server/latest/linux\r\nelse\r\n    DOWNLOAD_LINK=https://gtaconnected.com/downloads/GTAC-Server-Linux-${DL_VERSION}.tar.gz\r\nfi\r\n\r\nif [ ! -z \"${DOWNLOAD_LINK}\" ]; then \r\n    if curl --output /dev/null --silent --head --fail --location ${DOWNLOAD_LINK}; then\r\n        echo -e \"Chosen server version is valid.\"\r\n    else\r\n        echo -e \"Chosen server version is invalid, tried $DOWNLOAD_LINK. Exiting installation\"\r\n        exit 2\r\n    fi\r\nelse\r\n    echo -e \"no download link, stopping installation\"\r\n    exit 3\r\nfi\r\n\r\necho -e \"Downloading ${DL_VERSION} version of the server\"\r\ncurl -sSL ${DOWNLOAD_LINK} -o GTAC.tar.gz\r\necho \"Extracting files\"\r\ntar -xf GTAC.tar.gz\r\n\r\nchmod +x Server\r\nrm GTAC.tar.gz\r\n\r\necho \"Install complete\"",
+      "container": "ghcr.io/parkervcp/installers:debian",
+      "entrypoint": "bash"
+    }
+  },
+  "variables": [
+    {
+      "sort": null,
+      "name": "Server Version",
+      "description": "The version of GATC to install such as 1.2.10, enter latest for the latest version.",
+      "env_variable": "DL_VERSION",
+      "default_value": "latest",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:20"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Game type",
+      "description": "Sets the game this server will support. Available options: gta:iii, gta:vc, gta:sa, gta:ug, gta:iv, gta:eflc",
+      "env_variable": "GAMETYPE",
+      "default_value": "gta:iv",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "in:gta:iii,gta:vc,gta:sa,gta:ug,gta:iv,gta:eflc"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "serverbrowser",
+      "description": "Whether to show the server in the server browser, set to true or false",
+      "env_variable": "SERVERBROWSER",
+      "default_value": "true",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "in:true,false"
+      ]
+    },
+    {
+      "sort": null,
+      "name": "Server Name",
+      "description": "The name of the server, which appears in the server browser.",
+      "env_variable": "SERVERNAME",
+      "default_value": "Pterodactyl Server",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": [
+        "required",
+        "string",
+        "max:60"
+      ]
+    }
+  ]
+}

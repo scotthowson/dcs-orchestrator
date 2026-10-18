@@ -24,6 +24,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with Remove. A deploy or save into a VM carries the consent to the VM: the exception is in the VM's own policy.
   Nothing in the default policy changed.
 
+### Fixed
+
+- **A Pelican deploy now gives a working panel and a Wings that joins it, with nothing left to do by hand.** On
+  2026-10-18 a deploy into a VM left a panel with no database (SQLite's `DB_DATABASE=pelican` points into the image's
+  own folder: every request logged `Database file at path [/var/www/html/database/pelican] does not exist`), no admin,
+  no node, Wings restarting for want of `/etc/pelican/config.yml`, and no route or DNS record. Now: SQLite's file is
+  `/pelican-data/database/database.sqlite` in the persistent volume; the panel answers at `panel.<domain>` and Wings at
+  `play.<domain>` (`PANEL_SUBDOMAIN`, `WINGS_SUBDOMAIN`), both without Authelia (Pelican signs people in itself, Wings
+  checks its own token), and `PANEL_APP_URL` is filled from the panel's route; after the start DCS does the installer's
+  first run: migrations, the admin `admin` (`PANEL_ADMIN_EMAIL`, password in the secret `PELICAN_ADMIN_PASSWORD`), this
+  machine as the node (`https://play.<domain>` on 443 through the route, Wings plain on 8080 behind it) and Wings'
+  `config.yml` from the panel, then restarts both. A panel already installed is left alone. Wings' SFTP port is
+  published as itself (the panel tells Wings to listen on the node's SFTP port).
+- **A fresh Pelican panel comes with its eggs.** The first run (and any redeploy of a panel that has none) imports the
+  268 eggs bundled in `.templates/pelican/eggs` (Scott's panel's set, one panel export per egg, icons inside) through
+  the panel's own importer; a panel that has eggs is left alone. On 2026-10-18 Austin's panel had 0 eggs.
+- **Pelican's Wings works with game servers and the browser console from the first deploy** (all found on Austin's
+  live deploy, 2026-10-18). `PANEL_APP_URL` never ends with a slash (any `"fill": "public_url"` value: the slash went
+  into Wings' `remote` and every websocket was refused, "request origin not allowed"); `TRUSTED_PROXIES` is no longer
+  a container env (it overrode the panel's `.env`, so Settings → Trusted Proxies never applied): the first run writes
+  it into `/pelican-data/.env` once; Wings also mounts its config folder at its host path (`WINGS_CONFIG_DIR`, new
+  `"fill": "app_data"` kind: an absolute path below the stack's App-Data), and the generated `config.yml` sets
+  `system.user.passwd.directory` to it (the default `/etc/pelican` made every server fail with "bind source path does
+  not exist: /etc/pelican/passwd"), `system.machine_id.enable: false` and `allowed_origins: [<panel URL>]`.
+- **A template can name each service's subdomain** (`"route_subdomains": {"<service>": "<VARIABLE>"}` in
+  template.json), and a VM's route for a service of a bypass template (`pelican-panel` of `pelican`) stays off
+  Authelia on the hub like the template's own.
+
+### Changed
+
+- **The Pelican template keeps the panel's cache, sessions and queue in a small Valkey (Redis) container.** With the
+  file cache, the panel's queue worker (root) creates cache folders that the web workers (www-data) cannot write into,
+  and the panel throws `file_put_contents(.../storage/framework/cache/data/..): Failed to open stream` (seen on a live
+  hub on 2026-10-18). The template now adds `pelican-redis` (`valkey/valkey:8-alpine`, no ports, no persistence,
+  128 MB) and points the panel at it (`CACHE_STORE`, `SESSION_DRIVER`, `QUEUE_CONNECTION` = `redis`), the way
+  Pelican recommends for production; the panel starts once Valkey answers its health check.
+
 ## [4.0.59] - 2026-10-17
 
 ### Added
@@ -51,7 +88,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   at most every 5 minutes. A fresh list is only made for a change Cloudflare leaves pending or failed for more than two
   hours, and never when the account has no room for a second list (the free plan's one list, or 10019): DCS says so
   plainly instead. An unchanged set of addresses is never sent again.
-
 ## [4.0.58] - 2026-10-16
 
 ### Changed
