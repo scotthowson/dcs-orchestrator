@@ -19306,7 +19306,7 @@ handle_template_deploy() {
         done < <(jq -c '.variables[]? | select(.fill == "public_url" and .name != null)' "$tdir/template.json" 2>/dev/null)
         # A variable that holds an absolute host path in the stack's App-Data ({"fill": "app_data", "path": "<below App-Data>"}),
         # left empty: for a same-path mount (Pelican's Wings hands that path to Docker as a bind source)
-        local _fa _fa_name _fa_ad
+        local _fa _fa_name _fa_ad=""
         while IFS=$'\t' read -r _fa_name _fa; do
             [[ -n "$_fa_name" && "$_fa" != *..* ]] || continue
             [[ -z "$(printf '%s\n' "$vars" | sed -n "s/^${_fa_name}=//p" | head -n 1)" ]] || continue
